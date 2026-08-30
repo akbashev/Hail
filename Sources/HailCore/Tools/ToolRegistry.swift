@@ -102,6 +102,12 @@ public actor ToolRegistry: Sendable {
                         output: "Error: tool \(call.name) received invalid arguments: \(Self.decodingMessage(error))",
                         isError: true
                     ))
+            } catch is CancellationError {
+                // Cancellation is the turn being abandoned, not tool feedback:
+                // it must abort the round, not continue as a model-visible
+                // error. Surfaced as `.cancelled` because the typed `throws`
+                // cannot rethrow a raw `CancellationError`.
+                throw AgentRuntimeError.cancelled
             } catch {
                 results.append(
                     ToolResult(

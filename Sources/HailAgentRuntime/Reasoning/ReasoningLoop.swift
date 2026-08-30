@@ -115,6 +115,12 @@ struct ReasoningLoop: Sendable {
     /// Records an ephemeral activity fragment (status/thinking/text/tool).
     let recordActivity: @Sendable (AgentActivity) async -> Void
 
+    /// Ceiling on tool-call rounds within one turn. A model stuck in a
+    /// tool-call loop would otherwise spin forever, growing the transcript
+    /// (and the provider bill) without bound; exceeding the ceiling fails
+    /// the turn as model misbehavior instead of hanging it.
+    private static let maxToolRounds = 25
+
     private let logger: Logger
 
     init(
@@ -148,20 +154,35 @@ struct ReasoningLoop: Sendable {
     ) async throws {
         do {
             try await runStreamingTurn(input: input, through: connection)
-        } catch let runtimeError as AgentRuntimeError {
-            let at = Date()
-            // Journal the failure so it survives reloads; the turn bracket is
-            // closed by the caller (`turnCompleted`), so no re-run triggers.
-            try? await emit(.turnFailed(error: runtimeError, at: at))
-            await broadcast(.run(.event(.runFailed(error: runtimeError, at: at))), to: connection)
-            throw runtimeError
         } catch {
-            let runtimeError = AgentRuntimeError.modelMisbehavior(String(describing: error))
+            let (runtimeError, journalsFailure) = Self.mapTurnError(error)
             let at = Date()
-            try? await emit(.turnFailed(error: runtimeError, at: at))
+            if journalsFailure {
+                // Journal the failure so it survives reloads; the turn bracket
+                // is closed by the caller (`turnCompleted`), so no re-run
+                // triggers. Cancellation bypasses this: an abandoned turn is
+                // not a failure and must not replay as one.
+                try? await emit(.turnFailed(error: runtimeError, at: at))
+            }
             await broadcast(.run(.event(.runFailed(error: runtimeError, at: at))), to: connection)
             throw runtimeError
         }
+    }
+
+    /// Maps an error escaping the turn to the runtime error that is thrown,
+    /// and decides whether it is journaled as ``AgentEvent/turnFailed(error:at:)``.
+    /// Cancellation — a raw `CancellationError` from a consumer abort, or an
+    /// endpoint reporting `.cancelled` — is the caller abandoning the turn,
+    /// not a failure: journaling it would replay as a failed turn after
+    /// re-activation, so it bypasses the journal.
+    static func mapTurnError(_ error: any Error) -> (mapped: AgentRuntimeError, journalsFailure: Bool) {
+        if error is CancellationError {
+            return (.cancelled, false)
+        }
+        if let runtimeError = error as? AgentRuntimeError {
+            return (runtimeError, runtimeError != .cancelled)
+        }
+        return (.modelMisbehavior(String(describing: error)), true)
     }
 
     // MARK: - Turn execution
@@ -305,7 +326,9 @@ struct ReasoningLoop: Sendable {
         endpoint: ModelEndpoint,
         through connection: AgentConnection<Output>
     ) async throws -> Output? {
+        var toolRounds = 0
         while true {
+            try Task.checkCancellation()
             let schemas = await registry.schemas()
             let tools = schemas.isEmpty ? nil : schemas
 
@@ -365,6 +388,16 @@ struct ReasoningLoop: Sendable {
             }
 
             if !turnToolCalls.isEmpty {
+                // Reject the excess round *before* its tools run: the cap
+                // must prevent round 26's side effects, not merely fail after
+                // them — and before `toolInvoked` journaling, so the journal
+                // never holds tool events without matching results.
+                toolRounds += 1
+                guard toolRounds <= Self.maxToolRounds else {
+                    throw AgentRuntimeError.modelMisbehavior(
+                        "Model exceeded the maximum of \(Self.maxToolRounds) tool rounds in a single turn."
+                    )
+                }
                 messages.append(
                     LLMMessage(
                         role: .assistant,
@@ -379,6 +412,7 @@ struct ReasoningLoop: Sendable {
 
                 let toolRoundStartedAt = Date()
                 let results = try await registry.execute(turnToolCalls)
+                try Task.checkCancellation()
                 logger.info(
                     "Tool round finished",
                     metadata: [

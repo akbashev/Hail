@@ -42,6 +42,17 @@ struct ClassifiedTests {
         let secret = Classified(sealing: "hunter2", access: TestAccess())
         #expect(secret.reveal(TestAccess()) == "hunter2")
     }
+
+    @Test("Reflection (dump, String(reflecting:)) never exposes the secret")
+    func reflectionIsRedacted() {
+        let secret = Classified(sealing: "hunter2-s3cret", access: TestAccess())
+        #expect(!String(reflecting: secret).contains("hunter2-s3cret"))
+        #expect(!String(describing: secret).contains("hunter2-s3cret"))
+        #expect(!"\(secret)".contains("hunter2-s3cret"))
+        var dumpOutput = ""
+        dump(secret, to: &dumpOutput)
+        #expect(!dumpOutput.contains("hunter2-s3cret"))
+    }
 }
 
 @Suite("SecretRef")

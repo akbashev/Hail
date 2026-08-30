@@ -43,7 +43,11 @@ public actor ModelRouter {
     /// The caller owns the streaming effect; this router only resolves and
     /// caches the endpoint instance. `resumeSession` and `authority` are used
     /// only when a new endpoint is created — a cached endpoint already owns
-    /// its live session and authority.
+    /// its live session and authority. The creation authority scopes only
+    /// endpoint infrastructure (the harness spawn); a turn's lane authority
+    /// flows per-stream through ``SessionOwningEndpoint`` instead, which is
+    /// why ``CacheKey`` has no authority component (see the lane-authority
+    /// invariant in `Agent.reasoningLoop`).
     public func endpoint(
         for model: String,
         agentID: String,

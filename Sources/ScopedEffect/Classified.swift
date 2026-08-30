@@ -61,3 +61,10 @@ extension Classified: CustomStringConvertible {
 extension Classified: CustomDebugStringConvertible {
     public var debugDescription: String { "Classified(****)" }
 }
+
+extension Classified: CustomReflectable {
+    /// An empty mirror: reflection ignores access control, so without this
+    /// `dump`/`String(reflecting:)`/Mirror-based logging would bypass the
+    /// redacted descriptions and expose the raw secret.
+    public var customMirror: Mirror { Mirror(self, children: []) }
+}

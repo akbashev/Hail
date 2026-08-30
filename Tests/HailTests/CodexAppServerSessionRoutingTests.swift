@@ -280,4 +280,174 @@ struct CodexAppServerSessionRoutingTests {
         #expect(grantedRoots == [directory.path])
         #expect(deniedRoots == [])
     }
+
+    /// The stub answers just enough to attach a thread and start a turn,
+    /// then goes completely silent — a live-but-wedged app-server. Without
+    /// the stall ceiling (`maxStallDuration`) this turn would hang forever.
+    @Test("wedged app-server fails the turn at the stall ceiling")
+    func wedgedServerFailsAtStallCeiling() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hail-codex-stall-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let stub = directory.appendingPathComponent("stub-codex-wedged.py")
+        let script = """
+            #!/usr/bin/env python3
+            import sys, json
+            def send(value):
+                sys.stdout.write(json.dumps(value) + "\\n")
+                sys.stdout.flush()
+            for line in sys.stdin:
+                message = json.loads(line)
+                method = message.get("method")
+                if method == "initialize":
+                    send({"id": message["id"], "result": {}})
+                elif method == "thread/start":
+                    send({"id": message["id"], "result": {"thread": {"id": "stall-thread", "sessionId": "stall-session"}}})
+                elif method == "turn/start":
+                    send({"id": message["id"], "result": {"turn": {"id": "turn-1", "status": "inProgress"}}})
+                    # Wedged: no turn progress, no turn/completed, ever.
+            """
+        try script.write(to: stub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+
+        let session = CodexAppServerSession(
+            model: "gpt-test",
+            workingDirectory: directory.path,
+            agentID: nil,
+            contextLabel: nil,
+            mcpServerConfiguration: nil,
+            executionPolicy: .autonomousWorkspace,
+            executablePath: stub.path,
+            resumeSession: nil,
+            authority: FullAuthority(),
+            maxStallDuration: 2
+        )
+
+        let start = Date()
+        // The ceiling resets the connection, which finishes the turn's event
+        // stream — surfacing as `.disconnected`, not just any error.
+        await #expect {
+            _ = try await session.runTurn(
+                fullPrompt: "hello",
+                deltaPrompt: nil,
+                identity: nil,
+                memorySnapshot: nil,
+                outputSchema: nil,
+                turnAuthority: nil,
+                onNarration: { _ in }
+            )
+        } throws: { error in
+            guard let sessionError = error as? CodexSessionError, case .disconnected = sessionError else {
+                return false
+            }
+            return true
+        }
+        // The lower bound pins the failure to the 2s ceiling: an instant
+        // failure would mean the turn died during bootstrap, not from the
+        // watchdog. The upper bound stays far below the 1800s default.
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed >= 2)
+        #expect(elapsed < 20)
+        await session.terminate()
+    }
+
+    /// The stub starts a turn and never finishes it, so only consumer
+    /// cancellation can end the turn — and cancellation must reach the
+    /// *server*: without `turn/interrupt` the app-server turn keeps running,
+    /// and the next warm turn on the reused thread would overlap it.
+    @Test("cancelling a turn sends turn/interrupt to the app-server")
+    func cancellationInterruptsServerTurn() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hail-codex-cancel-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let log = directory.appendingPathComponent("requests.log")
+        let stub = directory.appendingPathComponent("stub-codex.py")
+        let script = """
+            #!/usr/bin/env python3
+            import sys, json
+            def send(value):
+                sys.stdout.write(json.dumps(value) + "\\n")
+                sys.stdout.flush()
+            for line in sys.stdin:
+                message = json.loads(line)
+                method = message.get("method")
+                with open(\(log.path.debugDescription), "a") as f:
+                    f.write(json.dumps(message) + "\\n")
+                if method == "initialize":
+                    send({"id": message["id"], "result": {}})
+                elif method == "thread/start":
+                    send({"id": message["id"], "result": {"thread": {"id": "cancel-thread", "sessionId": "cancel-session"}}})
+                elif method == "turn/start":
+                    send({"id": message["id"], "result": {"turn": {"id": "turn-1", "status": "inProgress"}}})
+                    # Never completes: only cancellation can end this turn.
+                elif method == "turn/interrupt":
+                    send({"id": message["id"], "result": {}})
+            """
+        try script.write(to: stub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+
+        // Generous stall ceiling: the watchdog must not interfere — only
+        // consumer cancellation may end this turn.
+        let session = CodexAppServerSession(
+            model: "gpt-test",
+            workingDirectory: directory.path,
+            agentID: nil,
+            contextLabel: nil,
+            mcpServerConfiguration: nil,
+            executionPolicy: .autonomousWorkspace,
+            executablePath: stub.path,
+            resumeSession: nil,
+            authority: FullAuthority(),
+            maxStallDuration: 60
+        )
+
+        let turn = Task {
+            try await session.runTurn(
+                fullPrompt: "hello",
+                deltaPrompt: nil,
+                identity: nil,
+                memorySnapshot: nil,
+                outputSchema: nil,
+                turnAuthority: nil,
+                onNarration: { _ in }
+            )
+        }
+
+        // Cancel only once the turn is genuinely in flight, so the interrupt
+        // targets a running server-side turn — the case that used to leak.
+        #expect(await stubLog(log, contains: "turn/start"))
+        turn.cancel()
+        await #expect {
+            _ = try await turn.value
+        } throws: { error in
+            guard let sessionError = error as? CodexSessionError, case .cancelled = sessionError else {
+                return false
+            }
+            return true
+        }
+        // The interrupt is fire-and-forget, so poll for its arrival.
+        #expect(await stubLog(log, contains: "\"turn/interrupt\""))
+        #expect(await stubLog(log, contains: "\"turn-1\""))
+        await session.terminate()
+    }
+
+    /// Polls the stub's log until it contains `needle` or the deadline
+    /// passes. The stub writes asynchronously, so a single read could race
+    /// the write. (Same helper as the ACP cancellation suite.)
+    private func stubLog(_ log: URL, contains needle: String, timeout: TimeInterval = 10) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let data = try? Data(contentsOf: log),
+                String(decoding: data, as: UTF8.self).contains(needle)
+            {
+                return true
+            }
+            if Date() >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
 }

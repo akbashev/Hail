@@ -180,20 +180,22 @@ struct ClaudeCliSessionRoutingTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        // The stub dies on any --resume call (the CLI session is gone), and
-        // answers normally otherwise.
+        // The stub logs argv first, then dies on any --resume call (the CLI
+        // session is gone), and answers normally otherwise. Logging before
+        // the exit is what makes the resume attempt observable below — an
+        // implementation that skipped the resume would log only the cold call.
         let promptLogPath = directory.appendingPathComponent("prompts.log").path
         let argsLogPath = directory.appendingPathComponent("args.log").path
         let script = """
             #!/usr/bin/env python3
             import sys, json
+            with open(\(argsLogPath.debugDescription), "a") as f:
+                f.write(" ".join(sys.argv[1:]) + "\\n")
             if "--resume" in sys.argv:
                 sys.exit(1)
             prompt = sys.stdin.buffer.read().decode("utf-8", errors="replace")
             with open(\(promptLogPath.debugDescription), "a") as f:
                 f.write(prompt + "\\n<<<END>>>\\n")
-            with open(\(argsLogPath.debugDescription), "a") as f:
-                f.write(" ".join(sys.argv[1:]) + "\\n")
             sys.stdout.write(json.dumps({"type": "system", "subtype": "init", "session_id": "fresh-session"}) + "\\n")
             sys.stdout.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "OK"}]}}) + "\\n")
             sys.stdout.write(json.dumps({"type": "result", "result": "OK", "is_error": False}) + "\\n")
@@ -223,5 +225,66 @@ struct ClaudeCliSessionRoutingTests {
 
         let prompts = try String(contentsOf: directory.appendingPathComponent("prompts.log"), encoding: .utf8)
         #expect(prompts.contains("SYSTEM-PROMPT"))
+
+        // The args log must show the --resume attempt followed by the cold
+        // bootstrap retry — without the first line the test can't tell a
+        // resume-miss-retry from an implementation that never resumed at all.
+        let args = try String(contentsOf: directory.appendingPathComponent("args.log"), encoding: .utf8)
+            .components(separatedBy: .newlines)
+            .filter { !$0.isEmpty }
+        try #require(args.count == 2)
+        #expect(args[0].contains("--resume dead-session"))
+        #expect(!args[1].contains("--resume"))
+    }
+
+    /// A `claude -p` process that never emits output and never exits must
+    /// fail the turn at the stall ceiling instead of blocking it forever.
+    /// The stub sleeps only 60s so even a leaked process cleans itself up.
+    @Test("hung claude process fails the turn at the stall ceiling")
+    func hungProcessFailsAtStallCeiling() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hail-claude-stall-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let stub = directory.appendingPathComponent("stub-claude-hung.sh")
+        try "#!/bin/sh\nexec sleep 60\n".write(to: stub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+
+        let endpoint = ClaudeCliEndpoint(
+            model: "",
+            workingDirectory: directory.path,
+            executablePath: stub.path,
+            maxStallDuration: 2
+        )
+
+        let start = Date()
+        var failure: ModelEndpointError?
+        for await event in endpoint.stream(
+            messages: [LLMMessage(role: .user, content: "HELLO")],
+            delta: TurnDelta(
+                messages: [LLMMessage(role: .user, content: "HELLO")],
+                workingMemory: [],
+                sessionIdentity: SessionIdentity("stall-ceiling")
+            ),
+            authority: FullAuthority(),
+            tools: nil,
+            responseType: String.self
+        ) {
+            if case .failed(let error) = event { failure = error }
+        }
+
+        // The ceiling surfaces as the `withTimeout` error wrapped in
+        // `requestFailed` — a concrete identity, not just any failure.
+        guard case .requestFailed(let reason) = failure else {
+            Issue.record("expected .failed(.requestFailed), got \(String(describing: failure))")
+            return
+        }
+        #expect(reason.contains("TimeoutError"))
+        // The lower bound pins the failure to the 2s ceiling: an instant
+        // failure would mean the spawn or the stub broke, not the watchdog.
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed >= 2)
+        #expect(elapsed < 20)
     }
 }

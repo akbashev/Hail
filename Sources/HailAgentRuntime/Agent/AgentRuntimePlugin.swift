@@ -155,7 +155,12 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// The caller owns the streaming effect; this method only resolves and
     /// caches the endpoint instance. `authority` is used only when a new
     /// endpoint is created — a cached endpoint keeps the authority it was
-    /// built with.
+    /// built with. That is safe for per-turn lanes because the creation
+    /// authority scopes only endpoint infrastructure (the harness spawn):
+    /// the turn's lane authority is delivered per-stream through
+    /// ``SessionOwningEndpoint/stream(messages:delta:authority:tools:responseType:)``
+    /// and governs every model-facing effect, so the cache key deliberately
+    /// has no authority component (see the invariant in `Agent.reasoningLoop`).
     public func endpoint(
         for model: String,
         agentID: String,

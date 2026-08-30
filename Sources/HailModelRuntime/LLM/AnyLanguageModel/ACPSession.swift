@@ -13,36 +13,6 @@ import Synchronization
 
 private let logger = Logger(label: "ACPSession")
 
-/// Shared mutable timestamp for the stall watchdog. A tiny class box so the
-/// value can cross the prompt's concurrent tasks without ownership plumbing.
-private final class ActivityClock: Sendable {
-    private let storage = Mutex(Date())
-
-    var lastActivity: Date {
-        storage.withLock { $0 }
-    }
-
-    func touch() {
-        storage.withLock { $0 = Date() }
-    }
-}
-
-/// One-shot flag for the watchdog probe. The probe request is *abandoned* on
-/// timeout, never awaited: swift-acp's own `timeout:` races a task group
-/// against the request continuation, which never resumes for an unanswered
-/// request — so the package timeout itself hangs exactly when it is needed.
-private final class ProbeFlag: Sendable {
-    private let storage = Mutex(false)
-
-    var answered: Bool {
-        storage.withLock { $0 }
-    }
-
-    func mark() {
-        storage.withLock { $0 = true }
-    }
-}
-
 /// Manages a long-lived Agent Client Protocol (ACP) session for a local CLI
 /// agent such as `kimi-code` or Claude Code.
 ///
@@ -92,7 +62,9 @@ actor ACPSession {
     private struct PromptStream {
         let sessionId: SessionId
         let continuation: AsyncThrowingStream<ACPPromptEvent, Error>.Continuation
-        let lastActivity: ActivityClock
+        /// Monotonic timestamp of the last routed notification, read by the
+        /// stall watchdog. Actor-isolated like everything else here — no lock.
+        var lastActivity: ContinuousClock.Instant
     }
 
     /// swift-acp's `client.notifications` is a single-consumer `AsyncStream`:
@@ -102,8 +74,21 @@ actor ACPSession {
     /// client, started with it, and per-prompt streams are demultiplexed from
     /// it. Never iterate `client.notifications` anywhere else.
     private var notificationTask: Task<Void, Never>?
+
+    /// When the last notification was routed, monotonic. The prompt finish
+    /// path waits for this to go quiet — see
+    /// ``finishPromptStreamWhenRoutingSettles(_:)``.
+    private var lastRoutedAt: ContinuousClock.Instant = .now
     private var promptStreams: [UUID: PromptStream] = [:]
     private var sessionId: SessionId?
+
+    /// Set when a prompt's consumer cancels — meaning the harness may still be
+    /// running that prompt, so the next turn must cold-start, not warm-delta.
+    /// This is a `Mutex`, not actor state, on purpose: it is written from the
+    /// stream's `onTermination`, which is *not* actor-isolated, and an actor
+    /// hop from there could be reordered after the next prompt's own hop —
+    /// exactly the interleaving the flag exists to prevent.
+    private let cancelledPrompt = Mutex(false)
 
     /// The agent identity fingerprint the live session was bootstrapped with
     /// (see ``AgentSessionIdentity``). A mismatch on the next turn invalidates
@@ -147,9 +132,9 @@ actor ACPSession {
     // Session setup timeouts guard against a hung `kimi-code` process. The
     // actual prompt/response loop has no timeout because model responses can
     // take minutes or longer.
-    private let initializeTimeout: TimeInterval = ACPSession.timeInterval(
+    private let initializeTimeout: TimeInterval = ProcessEnvironment.timeInterval(
         from: "HAIL_KIMI_INITIALIZE_TIMEOUT", default: 30)
-    private let newSessionTimeout: TimeInterval = ACPSession.timeInterval(
+    private let newSessionTimeout: TimeInterval = ProcessEnvironment.timeInterval(
         from: "HAIL_KIMI_SESSION_TIMEOUT", default: 120)
     private let heartbeatInterval: TimeInterval = 15
 
@@ -170,13 +155,6 @@ actor ACPSession {
     private let stallTimeout: TimeInterval
     private let probeTimeout: TimeInterval
     private let maxStallDuration: TimeInterval
-
-    private static func timeInterval(from key: String, default value: TimeInterval) -> TimeInterval {
-        if let raw = ProcessInfo.processInfo.environment[key], let seconds = Int(raw) {
-            return TimeInterval(seconds)
-        }
-        return value
-    }
 
     init(
         model: String,
@@ -204,13 +182,13 @@ actor ACPSession {
         self.activeAuthority = self.authority
         self.stallTimeout =
             stallTimeout
-            ?? ACPSession.timeInterval(from: "HAIL_KIMI_STALL_TIMEOUT", default: 600)
+            ?? ProcessEnvironment.timeInterval(from: "HAIL_KIMI_STALL_TIMEOUT", default: 600)
         self.probeTimeout =
             probeTimeout
-            ?? ACPSession.timeInterval(from: "HAIL_KIMI_PROBE_TIMEOUT", default: 60)
+            ?? ProcessEnvironment.timeInterval(from: "HAIL_KIMI_PROBE_TIMEOUT", default: 60)
         self.maxStallDuration =
             maxStallDuration
-            ?? ACPSession.timeInterval(from: "HAIL_KIMI_MAX_STALL_TIMEOUT", default: 1800)
+            ?? ProcessEnvironment.timeInterval(from: "HAIL_KIMI_MAX_STALL_TIMEOUT", default: 1800)
     }
 
     /// Sends a prompt to the kimi-code ACP session and returns the final text
@@ -326,7 +304,14 @@ actor ACPSession {
             delegate?.setAuthority(authority)
         }
         let text: String
-        if sessionId != nil, sessionIdentity == identity {
+        // A cancelled prompt leaves the session's turn state unknown (see
+        // `cancelledPrompt`), so it forces the cold path like an identity
+        // change. Read-and-clear: the flag covers exactly one cold start.
+        let promptWasCancelled = cancelledPrompt.withLock { flagged in
+            defer { flagged = false }
+            return flagged
+        }
+        if !promptWasCancelled, sessionId != nil, sessionIdentity == identity {
             var parts: [String] = []
             if let memorySnapshot, memorySnapshot != lastMemorySnapshot {
                 parts.append(memorySnapshot)
@@ -383,6 +368,12 @@ actor ACPSession {
             let monitored = Task {
                 do {
                     return try await response.value
+                } catch is CancellationError {
+                    // A consumer cancellation already forces the next turn
+                    // down the cold path via `cancelledPrompt`; an async
+                    // reset here could land *after* that turn's own
+                    // bootstrap and kill it.
+                    throw CancellationError()
                 } catch {
                     await self.reset()
                     throw error
@@ -413,25 +404,34 @@ actor ACPSession {
         let sessionId = try await ensureSession(client: client)
 
         let (stream, streamContinuation) = AsyncThrowingStream<ACPPromptEvent, Error>.makeStream()
-        // Updated on every routed ACP notification for this prompt's session;
-        // the watchdog reads it to distinguish a busy-but-silent turn (a long
-        // terminal command produces no traffic) from a wedged process.
-        let lastActivity = ActivityClock()
         let registrationID = UUID()
+        // `lastActivity` is updated on every routed ACP notification for this
+        // prompt's session; the watchdog reads it to distinguish a
+        // busy-but-silent turn (a long terminal command produces no traffic)
+        // from a wedged process.
         promptStreams[registrationID] = PromptStream(
             sessionId: sessionId,
             continuation: streamContinuation,
-            lastActivity: lastActivity
+            lastActivity: .now
         )
 
         let responseTask = Task {
-            // `finish()` fires `onTermination` below, which cancels the
-            // watchdog and unregisters the prompt stream.
-            defer { streamContinuation.finish() }
-            return try await client.sendPrompt(
-                sessionId: sessionId,
-                content: [.text(TextContent(text: text))]
-            )
+            do {
+                let response = try await client.sendPrompt(
+                    sessionId: sessionId,
+                    content: [.text(TextContent(text: text))]
+                )
+                await self.finishPromptStreamWhenRoutingSettles(streamContinuation)
+                return response
+            } catch is CancellationError {
+                // A cancelled consumer wants the stream closed now; the final
+                // chunk is moot, so skip the settle wait.
+                streamContinuation.finish()
+                throw CancellationError()
+            } catch {
+                await self.finishPromptStreamWhenRoutingSettles(streamContinuation)
+                throw error
+            }
         }
 
         // Stall watchdog: a live but silent process is left alone as long as it
@@ -439,12 +439,29 @@ actor ACPSession {
         // the pending prompt (`Client.terminate` resumes it) instead of hanging
         // the turn — and the assignment — forever.
         let watchdogTask = Task {
-            await self.watchForStall(client: client, lastActivity: lastActivity)
+            await self.watchForStall(client: client, registrationID: registrationID)
         }
-        // The stream ends exactly when the prompt resolves or fails, which is
-        // also when the watchdog becomes obsolete.
-        streamContinuation.onTermination = { _ in
+        // The stream ends when the prompt resolves or fails (which is also
+        // when the watchdog becomes obsolete) — or when the consumer cancels.
+        // A cancelled consumer means Hail considers the turn over, so the
+        // harness must hear about it: without `session/cancel` it would keep
+        // executing fs/terminal effects, and the next turn's warm delta would
+        // interleave into the still-running prompt in the same session. The
+        // notification is fire-and-forget: termination must not block on a
+        // harness that may be wedged.
+        streamContinuation.onTermination = { termination in
             watchdogTask.cancel()
+            if case .cancelled = termination {
+                responseTask.cancel()
+                Task { try? await client.cancelSession(sessionId: sessionId) }
+                // But `session/cancel` is not reliably observed mid-turn, and
+                // the prompt's continuation may never resume — so the next
+                // turn must not warm-delta into the possibly still-running
+                // prompt. The flag forces its cold path (which resets before
+                // re-bootstrapping); an async reset here could instead land
+                // *after* the next prompt's own bootstrap and kill it.
+                self.cancelledPrompt.withLock { $0 = true }
+            }
             Task { await self.unregisterPrompt(registrationID) }
         }
 
@@ -454,6 +471,38 @@ actor ACPSession {
     /// Removes a finished prompt's event sink from the routing table.
     private func unregisterPrompt(_ id: UUID) {
         promptStreams.removeValue(forKey: id)
+    }
+
+    /// Finishes a prompt's event stream once notification routing has been
+    /// quiet for a full check interval.
+    ///
+    /// Why not finish synchronously when the response arrives: swift-acp's
+    /// read loop processes wire messages sequentially, yielding every
+    /// `session/update` into `client.notifications` strictly *before* resuming
+    /// that prompt's response — but Hail consumes the two channels from
+    /// independent tasks (`notificationTask` and the prompt's `responseTask`),
+    /// and the executor may wake them in either order (swift-acp offers no
+    /// inline notification hook, so the producer's ordering is invisible to
+    /// consumers). A synchronous `finish()` therefore races the trailing
+    /// chunk's route and, when it wins, drops it as a yield-after-finish —
+    /// for a short reply that is the whole answer.
+    ///
+    /// Quiescence is the correct-by-construction signal available: the chunk
+    /// was yielded before the response, and `notificationTask` consumes the
+    /// stream FIFO, so once routing has been quiet for a full interval after
+    /// the response arrived, every pre-response chunk has been routed. The
+    /// residual risk is `notificationTask` being starved past one interval
+    /// exactly at turn end, which would drop the trailing chunk with this
+    /// bounded window instead of the unbounded race it replaces.
+    private func finishPromptStreamWhenRoutingSettles(
+        _ continuation: AsyncThrowingStream<ACPPromptEvent, Error>.Continuation
+    ) async {
+        let settleInterval = Duration.milliseconds(25)
+        while !Task.isCancelled {
+            try? await Task.sleep(for: settleInterval)
+            if ContinuousClock.now - lastRoutedAt >= settleInterval { break }
+        }
+        continuation.finish()
     }
 
     /// Monitors ACP traffic while a prompt is in flight. After `stallTimeout`
@@ -467,24 +516,27 @@ actor ACPSession {
     ///   running from the last real ACP notification. Once the turn has been
     ///   silent for `maxStallDuration`, it is failed anyway, so a live-but-
     ///   wedged turn (upstream stall, swallowed error) cannot hang forever.
-    private func watchForStall(client: ACP.Client, lastActivity: ActivityClock) async {
+    private func watchForStall(client: ACP.Client, registrationID: UUID) async {
         // Never check less often than the stall timeout itself, so short
         // timeouts (tests, aggressive configs) are still honored promptly.
         let checkInterval = min(heartbeatInterval, stallTimeout)
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(checkInterval))
             guard !Task.isCancelled else { return }
-            let idle = Date().timeIntervalSince(lastActivity.lastActivity)
-            guard idle > stallTimeout else { continue }
+            // The prompt may already be unregistered (finished or cancelled);
+            // in that case this watchdog is obsolete.
+            guard let lastActivity = promptStreams[registrationID]?.lastActivity else { return }
+            let idle = ContinuousClock.now - lastActivity
+            guard idle > .seconds(stallTimeout) else { continue }
 
             // A turn that has produced no ACP traffic for the whole tolerance
             // window is failed whether or not the process still answers pings:
             // liveness is not progress.
-            if idle >= maxStallDuration {
+            if idle >= .seconds(maxStallDuration) {
                 logger.error(
                     "kimi-code turn made no progress within the stall ceiling; resetting so the turn fails",
                     metadata: [
-                        "idleSeconds": .string("\(Int(idle))"),
+                        "idleSeconds": .string("\(idle.components.seconds)"),
                         "maxStallSeconds": .string("\(Int(maxStallDuration))"),
                     ]
                 )
@@ -493,27 +545,30 @@ actor ACPSession {
             }
 
             // Probe with a lightweight request. The timeout is enforced by
-            // abandoning the probe (see ProbeFlag), not by the package's own
-            // timeout parameter, which cannot fire for an unanswered request.
-            let probe = ProbeFlag()
+            // abandoning the probe, not by the package's own `timeout:`
+            // parameter, which cannot fire for an unanswered request: its task
+            // group races against a continuation that never resumes. The probe
+            // task inherits this actor's isolation, so the flag is a plain
+            // local — every access is serialized on the actor already.
+            var probeAnswered = false
             let probeTask = Task {
                 if (try? await client.listSessions(cwd: workingDirectory)) != nil {
-                    probe.mark()
+                    probeAnswered = true
                 }
             }
             try? await Task.sleep(for: .seconds(probeTimeout))
-            if probe.answered {
+            if probeAnswered {
                 // Alive but silent: keep waiting without touching the idle
                 // clock, so the `maxStallDuration` ceiling still applies.
                 logger.info(
                     "kimi-code session probe succeeded; turn is slow but alive",
-                    metadata: ["idleSeconds": .string("\(Int(idle))")]
+                    metadata: ["idleSeconds": .string("\(idle.components.seconds)")]
                 )
             } else {
                 probeTask.cancel()
                 logger.error(
                     "kimi-code session unresponsive; resetting so the turn fails",
-                    metadata: ["idleSeconds": .string("\(Int(idle))")]
+                    metadata: ["idleSeconds": .string("\(idle.components.seconds)")]
                 )
                 await reset()
                 return
@@ -596,8 +651,11 @@ actor ACPSession {
             logger.debug("dropping undecodable session/update notification")
             return
         }
-        for (_, stream) in promptStreams where stream.sessionId == update.sessionId {
-            stream.lastActivity.touch()
+        lastRoutedAt = .now
+        let matchingIDs = promptStreams.keys.filter { promptStreams[$0]?.sessionId == update.sessionId }
+        for id in matchingIDs {
+            guard let stream = promptStreams[id] else { continue }
+            promptStreams[id]?.lastActivity = .now
             switch update.update {
             case .agentMessageChunk(let block):
                 if case .text(let textContent) = block {

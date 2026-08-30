@@ -11,6 +11,7 @@ enum CodexSessionError: Error, CustomStringConvertible {
     case requestFailed(String)
     case missingThreadID
     case turnFailed(String)
+    case cancelled
 
     var description: String {
         switch self {
@@ -18,6 +19,7 @@ enum CodexSessionError: Error, CustomStringConvertible {
         case .requestFailed(let message): return message
         case .missingThreadID: return "Codex App Server returned no thread id."
         case .turnFailed(let message): return message
+        case .cancelled: return "Codex turn cancelled."
         }
     }
 }
@@ -254,6 +256,11 @@ struct CodexTurnCompleted: Codable, Sendable {
 
 struct CodexErrorNotification: Codable, Sendable {
     let message: String
+}
+
+struct CodexTurnInterruptParams: Codable, Sendable {
+    let threadId: String
+    let turnId: String
 }
 
 struct CodexRequestContext: Codable, Sendable {

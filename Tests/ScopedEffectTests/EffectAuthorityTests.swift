@@ -114,15 +114,20 @@ struct EffectAuthorityTests {
         }
     }
 
-    // Serialized: the observer is process-global and EffectAuditStressTests
-    // installs its own concurrently — parallel execution can swallow these
-    // decisions and flake the exact-count assertion.
-    @Test("Every gated decision is reported to the audit observer", .serialized)
+    // The observer is process-global and EffectAuditStressTests swaps it too;
+    // exclusivity comes from the turnstile (see EffectAuditStressTests.swift),
+    // not from .serialized, which cannot order tests across suites.
+    @Test("Every gated decision is reported to the audit observer")
     func auditReportsDecisions() async throws {
+        await EffectAuditTurnstile.shared.enter()
+        defer { Task { await EffectAuditTurnstile.shared.leave() } }
         let entries = Mutex<[(String, EffectDecision)]>([])
         EffectAudit.install { effect, decision in
             entries.withLock { $0.append((effect.name, decision)) }
         }
+        // Restore silence however the test ends, so a failure below can't
+        // leave the process-global observer installed for other suites.
+        defer { EffectAudit.install(nil) }
 
         let effect = AuditProbeEffect()
         let granting = CompositeAuthority().grantingAll(for: AuditProbeEffect.self)
@@ -138,11 +143,11 @@ struct EffectAuthorityTests {
         // Suites run in parallel, so other tests' decisions land here too —
         // filter to this probe's effect.
         let recorded = entries.withLock { $0 }.filter { $0.0 == "audit-probe" }
-        #expect(recorded.count == 2)
+        // #require, not #expect: a failed #expect would continue into the
+        // indexing below and trap, crashing the whole test process.
+        try #require(recorded.count == 2)
         #expect(recorded[0].1 == .granted)
         #expect(recorded[1].1 != .granted)
-        // Restore silence so other tests don't see this observer.
-        EffectAudit.install(nil)
     }
 }
 

@@ -289,6 +289,13 @@ struct ACPModelEndpoint: ModelEndpoint {
             }
         }
 
+        // A cancelled consumer ends the event stream above without waiting
+        // for the prompt; the session's termination handler has already
+        // cancelled the response task and sent `session/cancel` to the
+        // harness. Awaiting an unstructured task's value does NOT unblock
+        // when the waiter is cancelled, so check first instead of lingering
+        // here until the turn ends naturally.
+        try Task.checkCancellation()
         let response = try await responseTask.value
         logger.info(
             "\(harness) turn completed",

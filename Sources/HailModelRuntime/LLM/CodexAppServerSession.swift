@@ -33,6 +33,22 @@ actor CodexAppServerSession {
     private var threadIsAttached = false
     private var lastMemorySnapshot: String?
 
+    /// Stall ceiling. A turn produces app-server traffic as it works, so a
+    /// turn silent for this long is live-but-wedged (upstream stall,
+    /// swallowed error) and is failed instead of hanging forever. Process
+    /// death needs no probe here — it already surfaces as transport EOF
+    /// (`disconnect`) — so unlike `ACPSession.watchForStall` there is only
+    /// the ceiling, no probe round. Defaults to 30 minutes like the ACP
+    /// ceiling; `HAIL_CODEX_MAX_STALL_TIMEOUT` (seconds) overrides.
+    private let maxStallDuration: TimeInterval
+    private let heartbeatInterval: TimeInterval = 15
+
+    /// Monotonic timestamp of the last app-server envelope in the current
+    /// turn, read by the stall watchdog. Turns are serialized per session, so
+    /// one actor property suffices — everything touching it is already
+    /// actor-isolated, no lock needed.
+    private var turnLastActivity: ContinuousClock.Instant = .now
+
     var currentSessionID: SessionID? { sessionID }
 
     init(
@@ -44,13 +60,17 @@ actor CodexAppServerSession {
         executionPolicy: AgentExecutionPolicy,
         executablePath: String,
         resumeSession: ModelSessionResume?,
-        authority: any Authority
+        authority: any Authority,
+        maxStallDuration: TimeInterval? = nil
     ) {
         self.model = model
         self.workingDirectory = workingDirectory
         self.mcpServerConfiguration = mcpServerConfiguration
         self.executionPolicy = executionPolicy
         self.creationAuthority = authority
+        self.maxStallDuration =
+            maxStallDuration
+            ?? ProcessEnvironment.timeInterval(from: "HAIL_CODEX_MAX_STALL_TIMEOUT", default: 1800)
         self.sessionID = resumeSession?.id
         self.sessionIdentity = resumeSession?.identity
         self.client = CodexAppServerClient(
@@ -73,6 +93,14 @@ actor CodexAppServerSession {
         turnAuthority: (any Authority)?,
         onNarration: @escaping @Sendable (CodexNarration) -> Void
     ) async throws -> String {
+        // Stall watchdog: any app-server traffic (responses, notifications,
+        // approval requests) touches the clock; a turn silent for
+        // `maxStallDuration` is wedged, so the connection is reset — which
+        // fails the pending request or ends the event loop — instead of the
+        // turn hanging forever.
+        turnLastActivity = .now
+        let watchdog = Task { await self.watchForStall() }
+        defer { watchdog.cancel() }
         do {
             try await client.connect()
             let prompt = try await prepareThread(
@@ -89,6 +117,13 @@ actor CodexAppServerSession {
                 authority: turnAuthority ?? creationAuthority,
                 onNarration: onNarration
             )
+        } catch CodexSessionError.cancelled {
+            throw CodexSessionError.cancelled
+        } catch is CancellationError {
+            // An abandoned turn says nothing about the connection: the
+            // app-server stays up and the warm thread attachment survives,
+            // so the next turn reuses both instead of cold-bootstrapping.
+            throw CodexSessionError.cancelled
         } catch {
             await resetConnection(preservingThread: true)
             throw error
@@ -203,6 +238,9 @@ actor CodexAppServerSession {
         var sawTextDelta = false
         var pendingFileChanges: [String: [String]] = [:]
         for await message in events {
+            // Every envelope — notifications and server-initiated approval
+            // requests alike — is proof of life for the stall watchdog.
+            turnLastActivity = .now
             if let method = message.method, message.id != nil {
                 try await client.send(
                     adapter.response(
@@ -256,6 +294,24 @@ actor CodexAppServerSession {
             default:
                 break
             }
+        }
+        // The event stream ended mid-turn. If the consumer cancelled, this is
+        // an abandoned turn, not a lost connection: the app-server is still
+        // healthy, so classify it as cancellation — `runTurn` must not tear
+        // the connection down for it.
+        if Task.isCancelled {
+            // But the local iterator stopping does not stop the *server-side*
+            // turn: without an interrupt the thread stays busy, and the next
+            // turn on it would receive stale events or overlap model effects.
+            // Fire-and-forget — the teardown must not block on a wedged
+            // server; reset-on-doubt covers a missed interrupt.
+            Task {
+                try? await client.request(
+                    "turn/interrupt",
+                    params: CodexTurnInterruptParams(threadId: threadID, turnId: turnID)
+                )
+            }
+            throw CodexSessionError.cancelled
         }
         throw CodexSessionError.disconnected
     }
@@ -319,6 +375,35 @@ actor CodexAppServerSession {
                 )
             ]
         )
+    }
+
+    /// Monitors app-server traffic while a turn is in flight. Once the turn
+    /// has been silent for `maxStallDuration` it is failed regardless of
+    /// process health — liveness is not progress — by resetting the
+    /// connection, which resumes any parked request and finishes the event
+    /// stream with `CodexSessionError.disconnected`. Mirrors
+    /// `ACPSession.watchForStall`'s ceiling, minus the probe: process death
+    /// already surfaces as transport EOF here, so the only case the ceiling
+    /// must cover is a live-but-silent server.
+    private func watchForStall() async {
+        // Never check less often than the ceiling itself, so short ceilings
+        // (tests, aggressive configs) are still honored promptly.
+        let checkInterval = min(heartbeatInterval, maxStallDuration)
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(checkInterval))
+            guard !Task.isCancelled else { return }
+            let idle = ContinuousClock.now - turnLastActivity
+            guard idle >= .seconds(maxStallDuration) else { continue }
+            codexSessionLogger.error(
+                "Codex turn made no progress within the stall ceiling; resetting so the turn fails",
+                metadata: [
+                    "idleSeconds": .string("\(idle.components.seconds)"),
+                    "maxStallSeconds": .string("\(Int(maxStallDuration))"),
+                ]
+            )
+            await resetConnection(preservingThread: true)
+            return
+        }
     }
 
     private func resetConnection(preservingThread: Bool) async {

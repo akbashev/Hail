@@ -82,6 +82,13 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     private let authority: any Authority
     private let sessionState = ClaudeSessionState()
 
+    /// Stall ceiling for one `claude -p` turn: the subprocess is awaited with
+    /// no output-based liveness signal Hail can trust, so a hung process is
+    /// failed (and cancelled) once it exceeds this budget instead of blocking
+    /// the turn forever. Defaults to 30 minutes like the ACP/Codex ceilings;
+    /// `HAIL_CLAUDE_MAX_STALL_TIMEOUT` (seconds) overrides.
+    private let maxStallDuration: TimeInterval
+
     public init(
         model: String = "",
         workingDirectory: String,
@@ -91,7 +98,8 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         executablePath: String = "/usr/bin/env",
         resumeSession: ModelSessionResume? = nil,
-        authority: (any Authority)? = nil
+        authority: (any Authority)? = nil,
+        maxStallDuration: TimeInterval? = nil
     ) {
         self.model = model
         self.executionPolicy = executionPolicy
@@ -101,6 +109,9 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
         self.mcpServerConfiguration = mcpServerConfiguration
         self.executablePath = executablePath
         self.authority = authority ?? FullAuthority()
+        self.maxStallDuration =
+            maxStallDuration
+            ?? ProcessEnvironment.timeInterval(from: "HAIL_CLAUDE_MAX_STALL_TIMEOUT", default: 1800)
         if let resumeSession {
             sessionState.prime(id: resumeSession.id, identity: resumeSession.identity)
         }
@@ -315,6 +326,8 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     /// final result text and, for structured turns, the report tool call.
     /// `authority` scopes the process spawn; always the endpoint's creation
     /// authority — per-turn lanes never gate the spawn (see ``sessionStream``).
+    /// The subprocess wait is bounded by `maxStallDuration`: a hung `claude -p`
+    /// throws `TimeoutError` (failing the turn) instead of blocking forever.
     private func runTurn(
         prompt: String,
         resumeSessionID: String? = nil,
@@ -336,57 +349,61 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
 
         let claudeArgs = claudeArguments(mcpConfig: mcpConfig, resumeSessionID: resumeSessionID)
         // Spawning `claude` is a process effect, checked against the
-        // endpoint's authority before the subprocess exists.
-        let execution = try await withEffect(
-            ProcessEffect(executable: executablePath, arguments: claudeArgs, cwd: workingDirectory),
-            authority: authority
-        ) { _ in
-            try await run(
-                .path(FilePath(executablePath)),
-                arguments: .init(claudeArgs),
-                environment: .inherit.updating(hailEnvironment),
-                workingDirectory: FilePath(workingDirectory),
-                // `.array`, not `.data`: swift-subprocess's Data input bridges to
-                // a borrowed RawSpan whose owner can die before the async write
-                // completes — observed as garbage bytes on the child's stdin.
-                input: .array([UInt8](prompt.utf8)),
-                output: .sequence,
-                error: .sequence
-            ) { execution in
-                // Drained concurrently with stdout: the child can fill the
-                // stderr pipe while we're blocked reading stdout (or vice
-                // versa), so reading them sequentially risks a deadlock.
-                async let stderrBytes: [UInt8] = {
-                    var buffer: [UInt8] = []
-                    for try await chunk in execution.standardError {
-                        buffer.append(contentsOf: Data(buffer: chunk))
-                    }
-                    return buffer
-                }()
+        // endpoint's authority before the subprocess exists. The timeout
+        // wrapper cancels the subprocess task at the stall ceiling; the
+        // error surfaces as `TimeoutError`.
+        let execution = try await withTimeout(seconds: maxStallDuration) {
+            try await withEffect(
+                ProcessEffect(executable: executablePath, arguments: claudeArgs, cwd: workingDirectory),
+                authority: authority
+            ) { _ in
+                try await run(
+                    .path(FilePath(executablePath)),
+                    arguments: .init(claudeArgs),
+                    environment: .inherit.updating(hailEnvironment),
+                    workingDirectory: FilePath(workingDirectory),
+                    // `.array`, not `.data`: swift-subprocess's Data input bridges to
+                    // a borrowed RawSpan whose owner can die before the async write
+                    // completes — observed as garbage bytes on the child's stdin.
+                    input: .array([UInt8](prompt.utf8)),
+                    output: .sequence,
+                    error: .sequence
+                ) { execution in
+                    // Drained concurrently with stdout: the child can fill the
+                    // stderr pipe while we're blocked reading stdout (or vice
+                    // versa), so reading them sequentially risks a deadlock.
+                    async let stderrBytes: [UInt8] = {
+                        var buffer: [UInt8] = []
+                        for try await chunk in execution.standardError {
+                            buffer.append(contentsOf: Data(buffer: chunk))
+                        }
+                        return buffer
+                    }()
 
-                var state = ParseState()
-                var pending: [UInt8] = []
-                for try await chunk in execution.standardOutput {
-                    pending.append(contentsOf: Data(buffer: chunk))
-                    while let newline = pending.firstIndex(of: 0x0A) {
-                        let line = Data(pending[..<newline])
-                        pending.removeSubrange(...newline)
-                        Self.consume(
-                            line: line, reportToolNames: reportToolNames, onNarration: onNarration, into: &state)
+                    var state = ParseState()
+                    var pending: [UInt8] = []
+                    for try await chunk in execution.standardOutput {
+                        pending.append(contentsOf: Data(buffer: chunk))
+                        while let newline = pending.firstIndex(of: 0x0A) {
+                            let line = Data(pending[..<newline])
+                            pending.removeSubrange(...newline)
+                            Self.consume(
+                                line: line, reportToolNames: reportToolNames, onNarration: onNarration, into: &state)
+                        }
                     }
+                    if !pending.isEmpty {
+                        Self.consume(
+                            line: Data(pending), reportToolNames: reportToolNames, onNarration: onNarration,
+                            into: &state)
+                    }
+                    var result = state.result
+                    let stderrData = try await stderrBytes
+                    if !stderrData.isEmpty {
+                        result.stderrText = String(decoding: stderrData, as: UTF8.self)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    return result
                 }
-                if !pending.isEmpty {
-                    Self.consume(
-                        line: Data(pending), reportToolNames: reportToolNames, onNarration: onNarration,
-                        into: &state)
-                }
-                var result = state.result
-                let stderrData = try await stderrBytes
-                if !stderrData.isEmpty {
-                    result.stderrText = String(decoding: stderrData, as: UTF8.self)
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-                return result
             }
         }
 

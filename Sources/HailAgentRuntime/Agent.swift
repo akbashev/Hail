@@ -54,6 +54,11 @@ public distributed actor Agent: AsyncSequence {
     let workspacePath: String
     let agentDirectoryID: AgentDirectoryID
     let resumesInterruptedTurns: Bool
+    /// The spawn configuration this agent was created with. Kept so
+    /// ``shouldDeactivate()`` can restore its directory entry when a turn
+    /// starts mid-deactivation — registration otherwise happens only on
+    /// activation.
+    let spawnConfig: AgentSpawnConfig
     /// The effect authority this agent's tools and harness spawns are scoped
     /// against, resolved once at activation from the runtime plugin's provider.
     let authority: any Authority
@@ -101,6 +106,7 @@ public distributed actor Agent: AsyncSequence {
         self.workspacePath = dependency.scope.path ?? dependency.projectRootPath
         self.agentDirectoryID = dependency.agentDirectoryID
         self.resumesInterruptedTurns = dependency.resumesInterruptedTurns
+        self.spawnConfig = dependency
         self.authority = await actorSystem.agentRuntime.authority(for: dependency)
 
         // The virtual actor and its event-sourced state share one canonical
@@ -148,14 +154,13 @@ public distributed actor Agent: AsyncSequence {
     /// endpoint (and its harness subprocess) independently of this actor's
     /// lifetime, so deactivating without eviction would leak the process. The
     /// next turn rebuilds the endpoint and resumes from the journaled session.
+    /// Acceptance also unregisters from the agent directory, so `list_agents`
+    /// stops reporting a passivated agent — and the directory stays usable as
+    /// the existence check that keeps `agent send` from spawning phantom
+    /// agents (see `AgentTool`). Both actions run before the final `isWorking`
+    /// re-check; a turn that slips in mid-way restores the registration.
     public func shouldDeactivate() async -> Bool {
         guard !self.isWorking else { return false }
-        let waiters = activityWaiters
-        activityWaiters.removeAll()
-        activityBuffers.removeAll()
-        for waiter in waiters.values {
-            waiter.resume(returning: nil)
-        }
         await actorSystem.agentRuntime.evictEndpoint(
             for: definition.behavior.model,
             agentID: state.agentID.rawValue,
@@ -163,6 +168,29 @@ public distributed actor Agent: AsyncSequence {
             workingDirectory: workspacePath,
             executionPolicy: definition.behavior.execution
         )
+        await actorSystem.agentRuntime.unregister(agentID: state.agentID)
+        // Both calls above suspend and this actor is reentrant: a turn that
+        // started during either window must not be torn down. The eviction is
+        // harmless — the next turn rebuilds the endpoint cold from the
+        // journaled session — but the directory removal must be undone, since
+        // registration otherwise happens only on activation. Only after this
+        // final check is the commit below (waiter flush + accept) safe.
+        guard !self.isWorking else {
+            try? await actorSystem.agentRuntime.register(
+                entry: AgentDirectoryEntry(
+                    agentID: state.agentID,
+                    definition: definition,
+                    spawnConfig: spawnConfig
+                )
+            )
+            return false
+        }
+        let waiters = activityWaiters
+        activityWaiters.removeAll()
+        activityBuffers.removeAll()
+        for waiter in waiters.values {
+            waiter.resume(returning: nil)
+        }
         return true
     }
 
@@ -389,6 +417,21 @@ public distributed actor Agent: AsyncSequence {
     /// `lane` is the per-turn effect lane: its authority flows into the turn's
     /// tool registry and the session-owning endpoint's stream call. `nil`
     /// keeps the agent's plugin-derived authority (and its cached registry).
+    ///
+    /// LANE-AUTHORITY INVARIANT: the endpoint is deliberately resolved with
+    /// the agent's default authority even for a laned turn. That creation
+    /// authority scopes only endpoint *infrastructure* — the harness process
+    /// spawn — which must stay broad so a deny-everything lane (e.g.
+    /// ``TurnAuthorityLane/untrustedInput``) can still run a turn at all. The
+    /// lane's authority reaches the turn per-stream instead:
+    /// `ReasoningLoop.authority` is handed to
+    /// ``SessionOwningEndpoint/stream(messages:delta:authority:tools:responseType:)``
+    /// on every turn, and every session-owning endpoint honors it for
+    /// *model-facing* effects (the ACP delegate's fs/terminal checks, Codex's
+    /// approval decisions); Hail-side tools run through the laned registry.
+    /// Because the creation authority never varies by lane, the router's
+    /// endpoint cache key needs no authority component — a cached endpoint
+    /// can never smuggle a broader authority into a restricted lane.
     private func reasoningLoop(lane: TurnAuthorityLane?) -> ReasoningLoop {
         ReasoningLoop(
             agentID: state.agentID,
@@ -397,6 +440,10 @@ public distributed actor Agent: AsyncSequence {
             context: { await self.buildTurnContext() },
             endpoint: {
                 let resumeSession = await self.modelSessionResume
+                // Creation authority is the agent's default on purpose — it
+                // scopes only the harness spawn (see the invariant above);
+                // the lane's authority reaches the endpoint per-stream via
+                // the loop's `authority`.
                 return try await self.actorSystem.agentRuntime.endpoint(
                     for: self.definition.behavior.model,
                     agentID: self.state.agentID.rawValue,

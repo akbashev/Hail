@@ -18,7 +18,10 @@ public struct AgentState: Codable, Sendable {
 
     /// The opening message of a turn interrupted by a crash, folded by
     /// ``normalizeAfterReplay()``. The agent re-runs it after activation (when
-    /// configured to); `turnStarted` clears it once the re-run begins.
+    /// configured to). It is NOT cleared by `turnStarted`: the re-run starts a
+    /// fresh turn before re-journaling its opening, so the marker must survive
+    /// until `messageReceived` can recognize — and collapse — the duplicate.
+    /// A non-matching opening clears it as stale.
     public private(set) var pendingTurnRerun: ChatMessage?
 
     /// The harness session this agent's turns run in (kimi/claude CLI), if
@@ -57,24 +60,44 @@ public struct AgentState: Codable, Sendable {
         case .activated(let agentID):
             self.agentID = agentID
         case .turnStarted:
+            // Deliberately keeps `pendingTurnRerun`: the crash-recovery re-run
+            // starts a fresh turn before re-journaling its opening, so the
+            // marker must survive until `messageReceived` recognizes it.
             activeTurn = ActiveTurn()
-            pendingTurnRerun = nil
         case .messageReceived(let message):
-            // Defensive fold: an interrupted turn is re-run after replay and
-            // the loop re-journals the exact same opening message (same
-            // timestamp), so the duplicate collapses here. Genuinely repeated
-            // messages carry fresh timestamps and are kept.
-            if conversationThread.last != message {
+            // Crash-recovery fold: an interrupted turn is re-run after replay
+            // and the loop re-journals the exact same opening message (same
+            // timestamp), so the duplicate collapses against
+            // `pendingTurnRerun`. This works even when the crash happened
+            // after tool events, where the thread tail is a tool call or
+            // result and the old `last != message` check alone would append
+            // the opening a second time. Genuinely repeated messages carry
+            // fresh timestamps and are kept; the `last != message` check
+            // stays as a secondary guard.
+            let isRerunOpening = message == pendingTurnRerun
+            if !isRerunOpening, conversationThread.last != message {
                 conversationThread.append(message)
             }
             switch message {
             case .decisionRequest, .decisionResolved:
                 // Display-only posts (``Agent/post(_:)``) never open a turn, so
-                // they must not become the re-run candidate after a crash.
+                // they must not become the re-run candidate after a crash —
+                // nor clear a pending one.
                 break
             default:
-                if activeTurn?.opening == nil {
+                if isRerunOpening {
+                    // The collapsed duplicate still opens the re-run's turn,
+                    // then the marker is consumed.
                     activeTurn?.opening = message
+                    pendingTurnRerun = nil
+                } else {
+                    // A non-matching opening means the marker is stale (or
+                    // none was pending); clear it so it cannot collapse a
+                    // later unrelated message.
+                    pendingTurnRerun = nil
+                    if activeTurn?.opening == nil {
+                        activeTurn?.opening = message
+                    }
                 }
             }
         case .contextSet:

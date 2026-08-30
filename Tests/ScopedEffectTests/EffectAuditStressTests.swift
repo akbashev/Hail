@@ -1,6 +1,37 @@
 import ScopedEffect
 import Testing
 
+/// Mutual exclusion for the tests that swap `EffectAudit`'s process-global
+/// observer. swift-testing's `.serialized` only orders a suite's *own*
+/// contents — it "doesn't affect the execution of a test relative to its
+/// peers or to unrelated tests" — so two serialized suites still interleave
+/// and can replace/nil each other's observer mid-test. There is no
+/// cross-suite trait, so the two observer-swapping tests take explicit turns
+/// (an actor, because `DispatchSemaphore.wait` is banned from async contexts).
+actor EffectAuditTurnstile {
+    static let shared = EffectAuditTurnstile()
+
+    private var held = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func enter() async {
+        guard held else {
+            held = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func leave() {
+        if waiters.isEmpty {
+            held = false
+        } else {
+            // Ownership handoff: still held, now by the resumed waiter.
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 /// Regression cover for the thunk-accumulation stack overflow
 /// (swiftlang/swift#54724, #49727): a closure stored in `Mutex` and read
 /// back per call gains a nested re-abstraction thunk layer per round-trip
@@ -15,9 +46,11 @@ struct EffectAuditStressTests {
     func alternatingDecisions() async throws {
         // A non-nil observer must be stored — the stored closure is the value
         // that accumulated thunk layers. (No counting assertion: the observer
-        // is process-global and parallel suites replace it, so exact counts
-        // race. Survival of the loop is the assertion — unboxed, this
-        // overflowed the stack at ~50k iterations.)
+        // is process-global, so exact counts race with any parallel
+        // non-turnstile suite. Survival of the loop is the assertion —
+        // unboxed, this overflowed the stack at ~50k iterations.)
+        await EffectAuditTurnstile.shared.enter()
+        defer { Task { await EffectAuditTurnstile.shared.leave() } }
         EffectAudit.install { _, _ in }
         defer { EffectAudit.install(nil) }
 

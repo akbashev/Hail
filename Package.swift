@@ -82,17 +82,6 @@ let package = Package(
         .testTarget(
             name: "HailTests",
             dependencies: ["Hail", "HailCore", "HailModelRuntime", "HailAgentRuntime", "ScopedEffect"],
-            sources: [
-                "ACPSessionResumeTests.swift",
-                "ACPSessionTurnRoutingTests.swift",
-                "AgentStateTurnTimingTests.swift",
-                "ClaudeCliSessionRoutingTests.swift",
-                "CodexAppServerSessionRoutingTests.swift",
-                "KimiCodeStallWatchdogTests.swift",
-                "ModelEndpointErrorTests.swift",
-                "NowToolTests.swift",
-                "PromptPolicyPersonaTests.swift",
-            ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")
             ]
@@ -100,12 +89,6 @@ let package = Package(
         .testTarget(
             name: "ScopedEffectTests",
             dependencies: ["ScopedEffect"],
-            sources: [
-                "ClassifiedTests.swift",
-                "EffectAuditStressTests.swift",
-                "EffectAuthorityTests.swift",
-                "ScopedEffectTests.swift",
-            ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")
             ]

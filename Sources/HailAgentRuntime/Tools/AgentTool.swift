@@ -130,6 +130,24 @@ public struct AgentTool: Tool {
                     "Unknown agent id '\(target.rawValue)'. Use list_agents to discover active agent ids."
                 )
             }
+            // `AgentID(rawValue:)` accepts any hyphenated string, and
+            // `getActor` below CREATES the actor when absent — so parsing
+            // alone cannot reject a hallucinated or mistyped id (e.g.
+            // `coder-T-999`), which would silently activate a brand-new
+            // agent under this sender's root/scope. The directory is the
+            // existence check: agents register on activation and unregister
+            // on deactivation, so an unlisted id is unknown. Consequence:
+            // sending to a passivated agent now fails loudly instead of
+            // reactivating it — the tool's contract is `list_agents` first,
+            // and that only ever shows active agents. A small TOCTOU window
+            // remains: a target that deactivates between this check and
+            // `getActor` is re-spawned below, which is legitimate (the id
+            // was real moments ago).
+            guard await system.agentRuntime.entry(forAgentID: targetID) != nil else {
+                throw AgentRuntimeError.modelMisbehavior(
+                    "Unknown agent id '\(target.rawValue)'. Use list_agents to discover active agent ids."
+                )
+            }
             let other: Agent = try await system.virtualActors.getActor(
                 identifiedBy: VirtualActorID(rawValue: targetID.rawValue),
                 dependency: AgentSpawnConfig(

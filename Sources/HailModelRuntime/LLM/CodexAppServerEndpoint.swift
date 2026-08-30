@@ -33,7 +33,8 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         executablePath: String = "/usr/bin/env",
         resumeSession: ModelSessionResume? = nil,
-        authority: (any Authority)? = nil
+        authority: (any Authority)? = nil,
+        maxStallDuration: TimeInterval? = nil
     ) {
         let effectiveModel = model.isEmpty ? "gpt-5.6-sol" : model
         self.model = effectiveModel
@@ -47,7 +48,8 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
             executionPolicy: executionPolicy,
             executablePath: executablePath,
             resumeSession: resumeSession,
-            authority: authority ?? FullAuthority()
+            authority: authority ?? FullAuthority(),
+            maxStallDuration: maxStallDuration
         )
     }
 
@@ -131,6 +133,9 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
                     }
                     if structured { continuation.yield(.status("Outcome received.")) }
                     continuation.yield(.generated(value))
+                    continuation.finish()
+                } catch CodexSessionError.cancelled {
+                    continuation.yield(.failed(.cancelled))
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.yield(.failed(.cancelled))

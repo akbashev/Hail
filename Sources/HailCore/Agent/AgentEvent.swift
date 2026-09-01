@@ -14,7 +14,12 @@ public enum AgentEvent: Codable, Sendable {
     case toolInvoked(ToolCall, at: Date?)
     case toolResult(ToolResult, at: Date?)
     case memoryCommitted(summary: String)
-    case conversationCompacted(archivedCount: Int)
+    /// The oldest `archivedCount` thread entries were compacted into
+    /// `summary`, which replaces ``AgentState/contextSummary`` (rolling
+    /// summary). One atomic event: the summary is a non-deterministic fold
+    /// of the archived prefix, so it must be journaled with the boundary —
+    /// a snapshot-less replay cannot reproduce it otherwise.
+    case conversationCompacted(archivedCount: Int, summary: String)
     case responseReceived(sender: String, payload: Data, at: Date)
     case turnFailed(error: AgentRuntimeError, at: Date)
     case turnCompleted(at: Date?)

@@ -126,6 +126,7 @@ public protocol SessionOwningEndpoint: ModelEndpoint {
 }
 
 extension SessionOwningEndpoint {
+    public var contextOwnership: ModelContextOwnership { .endpointSession }
     public func terminateSession() async {}
 }
 

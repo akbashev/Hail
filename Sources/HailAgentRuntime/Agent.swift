@@ -30,6 +30,23 @@ public distributed actor Agent: AsyncSequence {
     // `EventSourced` protocol witness — do not mutate directly.
     public var state: AgentState
 
+    // Snapshot policy: checkpoint right after a compaction shrank the state
+    // (the cheapest snapshot, covering the longest prefix), with a fixed
+    // cadence as a fallback so long uncompacted runs still bound replay.
+    // The rule fires repeatedly, so retention prunes to the newest two —
+    // without it the store would grow one snapshot per compaction forever.
+    // Snapshots are a best-effort replay optimization; the journal stays the
+    // source of truth. Without a configured SnapshotStore this degrades to a
+    // log warning per boundary — behavior is unchanged.
+    public let snapshotting: Snapshotting<AgentEvent, AgentState> = .every(
+        numberOfEvents: 50,
+        retention: .keepLast(2),
+        orWhen: { event, _, _ in
+            if case .conversationCompacted = event { return true }
+            return false
+        }
+    )
+
     // Convenience accessors for the event-sourced state.
     var role: Role { state.agentID.role }
     var contextID: AgentContextID { state.agentID.contextID }
@@ -456,7 +473,8 @@ public distributed actor Agent: AsyncSequence {
             },
             tools: { try await self.toolRegistry(lane: lane) },
             emit: { try await self.emit(event: $0) },
-            recordActivity: { await self.recordActivity($0) }
+            recordActivity: { await self.recordActivity($0) },
+            compactor: actorSystem.agentRuntime.contextCompactor
         )
     }
 
@@ -477,17 +495,18 @@ public distributed actor Agent: AsyncSequence {
             )
             manifest = ContextManifest(items: [])
         }
+        let promptContext = PromptContext(
+            agentID: state.agentID,
+            definition: definition,
+            projectRootPath: projectRootPath,
+            workingMemory: workingMemory,
+            contextSummary: state.contextSummary,
+            conversationThread: conversationThread,
+            contextManifest: manifest
+        )
         return TurnContext(
-            messages: policy.build(
-                PromptContext(
-                    agentID: state.agentID,
-                    definition: definition,
-                    projectRootPath: projectRootPath,
-                    workingMemory: workingMemory,
-                    conversationThread: conversationThread,
-                    contextManifest: manifest
-                )
-            ),
+            messages: policy.build(promptContext),
+            promptContext: promptContext,
             workingMemory: workingMemory,
             sessionIdentity: AgentSessionIdentity.fingerprint(
                 model: definition.behavior.model,

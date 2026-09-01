@@ -11,6 +11,12 @@ public struct AgentState: Codable, Sendable {
     public var conversationThread: [ChatMessage]
     public var workingMemory: [String]
 
+    /// The rolling summary of compacted-away conversation history. Each
+    /// `conversationCompacted` event REPLACES it (the new summary folds the
+    /// old one in), so the window carries at most one summary no matter how
+    /// many compactions ran.
+    public private(set) var contextSummary: String? = nil
+
     /// The turn currently in flight, if any. Set by `turnStarted`, cleared by
     /// `turnCompleted`. `opening` is the message that opened the turn (once
     /// journaled); `responded` records that a response made it to the journal.
@@ -120,7 +126,8 @@ public struct AgentState: Codable, Sendable {
             if maxFragments > 0 && workingMemory.count > maxFragments {
                 workingMemory.removeFirst(workingMemory.count - maxFragments)
             }
-        case .conversationCompacted(let archivedCount):
+        case .conversationCompacted(let archivedCount, let summary):
+            contextSummary = summary
             if archivedCount > 0 && archivedCount <= conversationThread.count {
                 conversationThread.removeFirst(archivedCount)
             }

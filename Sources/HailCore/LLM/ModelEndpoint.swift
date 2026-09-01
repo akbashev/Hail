@@ -31,8 +31,20 @@ public enum ModelEvent<Output: AgentOutput>: Sendable {
 
 extension ModelEvent: Equatable where Output: Equatable, Output.PartiallyGenerated: Equatable {}
 
+/// Identifies which layer owns the model-visible conversation window.
+///
+/// Every endpoint must choose explicitly. Runtime-owned endpoints receive an
+/// assembled transcript on every request and may use Hail's context compactor.
+/// Endpoint-session-owned endpoints receive turn deltas after bootstrap and
+/// manage their own context window behind ``SessionOwningEndpoint``.
+public enum ModelContextOwnership: Sendable, Equatable {
+    case runtime
+    case endpointSession
+}
+
 public protocol ModelEndpoint: Sendable {
     var model: String { get }
+    var contextOwnership: ModelContextOwnership { get }
 
     /// Streams one model turn for the given conversation context and tools.
     ///

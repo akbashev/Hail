@@ -107,6 +107,12 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// Policy used to assemble an agent's LLM context before each turn.
     public let promptPolicy: PromptPolicy = .default
 
+    /// Optional compactor for non-session-owning endpoints (Ollama, hosted
+    /// chat APIs): consulted at turn start, its result is journaled as one
+    /// `conversationCompacted` event. Session-owning harnesses manage their
+    /// own context and are never offered compaction.
+    public let contextCompactor: (any ContextCompactor)?
+
     /// Provider that resolves external context documents for an agent turn.
     /// When nil, the runtime falls back to inline context.
     public let contextProvider: AgentContextProvider?
@@ -118,7 +124,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         extraToolsProvider: ExtraToolsProvider? = nil,
         authorityProvider: AuthorityProvider? = nil,
         definitionProvider: DefinitionProvider? = nil,
-        contextProvider: AgentContextProvider? = nil
+        contextProvider: AgentContextProvider? = nil,
+        contextCompactor: (any ContextCompactor)? = nil
     ) {
         self.modelRouter = ModelRouter(
             projectRootPath: projectRootPath,
@@ -129,6 +136,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         self.authorityProvider = authorityProvider
         self.definitionProvider = definitionProvider
         self.contextProvider = contextProvider
+        self.contextCompactor = contextCompactor
     }
 
     /// Resolves the effect authority for one agent. Defaults to

@@ -208,6 +208,23 @@ Hail is agnostic about roles, prompts, workflows, tools, persistence layout, and
 
 Models are equally open. A provider implements `ModelEndpoint` and can be hosted, local, self-hosted, or custom. Hail includes Kimi Code over ACP, Claude Code over its stream-JSON CLI, Codex over its native App Server protocol, and API-backed endpoints, but no provider is privileged by the architecture. Session-owning endpoints may keep warm conversations; stateless endpoints receive the assembled transcript. In both cases, the event journal remains the recovery authority.
 
+### Compact context for stateless endpoints
+
+Session-owning harnesses (Kimi, Claude, Codex) manage context server-side. Stateless endpoints (Ollama, plain chat APIs) have no such memory, so the runtime offers compaction at turn start through the `ContextCompactor` seam. The reference implementation lives in the optional `Packages/HailCompaction` library:
+
+```swift
+import HailCompaction
+
+let runtime = AgentRuntimePlugin(
+    // ... providers as above ...
+    contextCompactor: SlidingWindowCompactor(
+        budget: ContextWindowBudget(overrides: [("llama3.2", 131_072)])
+    )
+)
+```
+
+When the assembled context crosses a fraction of the model's window, the oldest messages are folded into a rolling summary journaled as one `conversationCompacted` event — replay never re-runs the summarizer, and snapshotting checkpoints the compacted state. Note Ollama applies `num_ctx = 4096` per request unless configured, so the budget defaults to that; pass overrides for windows you actually raised.
+
 ## Package layout
 
 Depend only on the layer you need:

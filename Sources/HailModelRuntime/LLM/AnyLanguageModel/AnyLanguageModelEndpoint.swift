@@ -7,6 +7,7 @@ import HailCore
 /// Ollama, Open Responses, etc.).
 public struct AnyLanguageModelEndpoint: ModelEndpoint {
     public let model: String
+    public let contextOwnership: ModelContextOwnership = .runtime
     private let languageModel: any LanguageModel
     private let temperature: Double
 

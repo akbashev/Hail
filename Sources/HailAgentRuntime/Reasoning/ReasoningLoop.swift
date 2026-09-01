@@ -71,6 +71,9 @@ private enum TurnReducer {
 /// sessions).
 struct TurnContext: Sendable {
     var messages: [LLMMessage]
+    /// The inputs the messages were assembled from; handed to the
+    /// ``ContextCompactor`` so it can estimate and select from the same data.
+    var promptContext: PromptContext
     var workingMemory: [String]
     var sessionIdentity: SessionIdentity
     /// The journaled harness session (id + identity) from previous runs, used
@@ -106,6 +109,10 @@ struct ReasoningLoop: Sendable {
     /// Resolves the model endpoint for this turn.
     let endpoint: @Sendable () async throws -> ModelEndpoint
 
+    /// Optional context compactor, consulted at turn start for
+    /// non-session-owning endpoints. See ``ContextCompactor``.
+    let compactor: (any ContextCompactor)?
+
     /// Resolves the tool registry available to this turn.
     let tools: @Sendable () async throws -> ToolRegistry
 
@@ -131,7 +138,8 @@ struct ReasoningLoop: Sendable {
         endpoint: @escaping @Sendable () async throws -> ModelEndpoint,
         tools: @escaping @Sendable () async throws -> ToolRegistry,
         emit: @escaping @Sendable (AgentEvent) async throws -> Void,
-        recordActivity: @escaping @Sendable (AgentActivity) async -> Void
+        recordActivity: @escaping @Sendable (AgentActivity) async -> Void,
+        compactor: (any ContextCompactor)? = nil
     ) {
         self.agentID = agentID
         self.logger = logger
@@ -141,6 +149,7 @@ struct ReasoningLoop: Sendable {
         self.tools = tools
         self.emit = emit
         self.recordActivity = recordActivity
+        self.compactor = compactor
     }
 
     /// Runs one full agent turn: builds context, drives the model/tool loop,
@@ -185,6 +194,95 @@ struct ReasoningLoop: Sendable {
         return (.modelMisbehavior(String(describing: error)), true)
     }
 
+    // MARK: - Compaction
+
+    /// Offers the turn's context to the compactor and journals the result.
+    ///
+    /// Session-owning harnesses manage their own context server-side and are
+    /// never offered compaction. A compactor/summarizer failure degrades to
+    /// the pre-compaction behavior — the turn proceeds with the uncompacted
+    /// context rather than failing on an optimization. A successful
+    /// compaction is journaled as one atomic `conversationCompacted` event
+    /// and the context is rebuilt so this turn already sees the trimmed
+    /// window. Internal (not private) for direct testing.
+    func compactIfNeeded(
+        turnContext: TurnContext,
+        endpoint: any ModelEndpoint,
+        additionalMessages: [LLMMessage] = [],
+        tools: [LLMToolSchema] = []
+    ) async throws -> TurnContext {
+        let implementsSessionContract = endpoint is SessionOwningEndpoint
+        guard
+            (endpoint.contextOwnership == .endpointSession) == implementsSessionContract
+        else {
+            throw AgentRuntimeError.configurationError(
+                "Model endpoint \(endpoint.model) declares \(endpoint.contextOwnership) context ownership "
+                    + "but its SessionOwningEndpoint conformance does not match"
+            )
+        }
+        guard let compactor, endpoint.contextOwnership == .runtime else {
+            return turnContext
+        }
+        let result: CompactionResult?
+        do {
+            result = try await compactor.compact(
+                context: turnContext.promptContext,
+                messages: turnContext.messages + additionalMessages,
+                tools: tools
+            ) { messages in
+                try await self.summarize(messages: messages, endpoint: endpoint)
+            }
+        } catch {
+            if error is CancellationError {
+                throw error
+            }
+            if let runtimeError = error as? AgentRuntimeError, runtimeError == .cancelled {
+                throw runtimeError
+            }
+            if let modelError = error as? ModelEndpointError, modelError == .cancelled {
+                throw AgentRuntimeError.cancelled
+            }
+            logger.warning(
+                "Context compaction failed; continuing uncompacted",
+                metadata: [
+                    "agentID": .string(agentID.rawValue),
+                    "error": .string(String(describing: error)),
+                ]
+            )
+            return turnContext
+        }
+        guard let result else { return turnContext }
+        await recordActivity(.turn(.progress(.status("Compacting conversation context.")), at: Date()))
+        try await emit(.conversationCompacted(archivedCount: result.archivedCount, summary: result.summary))
+        return await context()
+    }
+
+    /// Runs the summarization prompt through the turn's own endpoint as a
+    /// plain (tool-less) chat request and reduces the stream to its text.
+    private func summarize(
+        messages: [LLMMessage],
+        endpoint: any ModelEndpoint
+    ) async throws -> String {
+        var text = ""
+        for await event in endpoint.stream(messages: messages, tools: nil) {
+            try Task.checkCancellation()
+            switch event {
+            case .text(let fragment):
+                text += fragment
+            case .generated(let value):
+                if text.isEmpty { text = value }
+            case .failed(let error):
+                throw error
+            default:
+                continue
+            }
+        }
+        guard !text.isEmpty else {
+            throw AgentRuntimeError.modelMisbehavior("Compaction produced an empty summary")
+        }
+        return text
+    }
+
     // MARK: - Turn execution
 
     /// Runs one full agent turn: builds context, drives the model/tool loop,
@@ -217,8 +315,9 @@ struct ReasoningLoop: Sendable {
         }
 
         let registry = try await tools()
-        let turnContext = await context()
-        var messages = turnContext.messages
+        let endpoint = try await self.endpoint()
+        var turnContext = await context()
+
         // The turn delta is everything appended after the assembled context:
         // per-turn instructions followed by the new input message. On a warm
         // session-owning endpoint this is all the harness receives — the
@@ -229,18 +328,15 @@ struct ReasoningLoop: Sendable {
             content:
                 "Turn started at \(turnStartedAt.ISO8601Format()). Use this timestamp as the current time at the beginning of the turn."
         )
-        messages.append(turnClockInstruction)
         deltaMessages.append(turnClockInstruction)
 
         for instruction in input.systemInstructions() {
             let instructionMessage = LLMMessage(role: .system, content: instruction)
-            messages.append(instructionMessage)
             deltaMessages.append(instructionMessage)
         }
         switch message {
         case .text(let sender, let content, _):
             let inputMessage = LLMMessage(role: .user, content: content, name: sender)
-            messages.append(inputMessage)
             deltaMessages.append(inputMessage)
         case .response(let sender, let payload, _):
             if let content = try? JSONDecoder().decode(String.self, from: payload), !content.isEmpty {
@@ -248,7 +344,6 @@ struct ReasoningLoop: Sendable {
                     role: sender == agentID.rawValue ? .assistant : .user,
                     content: content
                 )
-                messages.append(inputMessage)
                 deltaMessages.append(inputMessage)
             }
         case .toolCall(let calls, _):
@@ -257,11 +352,9 @@ struct ReasoningLoop: Sendable {
                 content: "",
                 toolCalls: calls.map { LLMToolCall($0) }
             )
-            messages.append(inputMessage)
             deltaMessages.append(inputMessage)
         case .toolResult(let id, let content, _):
             let inputMessage = LLMMessage(role: .tool, content: content, toolCallID: id)
-            messages.append(inputMessage)
             deltaMessages.append(inputMessage)
         case .failure:
             // Turn failures are transcript-only; the model never sees them.
@@ -271,13 +364,25 @@ struct ReasoningLoop: Sendable {
             // through the ask_user tool result or resume messages.
             break
         }
+
+        // Budget the request that will actually be sent, not a second
+        // approximation assembled from AgentState fields. This includes the
+        // per-turn delta and tool schemas as well as PromptPolicy output.
+        let schemas = await registry.schemas()
+        turnContext = try await compactIfNeeded(
+            turnContext: turnContext,
+            endpoint: endpoint,
+            additionalMessages: deltaMessages,
+            tools: schemas
+        )
+        var messages = turnContext.messages
+        messages.append(contentsOf: deltaMessages)
+
         let delta = TurnDelta(
             messages: deltaMessages,
             workingMemory: turnContext.workingMemory,
             sessionIdentity: turnContext.sessionIdentity
         )
-
-        let endpoint = try await self.endpoint()
 
         guard
             let outcome = try await runTurn(

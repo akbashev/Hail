@@ -169,7 +169,7 @@ struct PromptAssemblySummaryTests {
 }
 
 /// The turn-start hook: exclusion of session-owning endpoints, atomic
-/// journaling, context rebuild, and graceful degradation.
+/// journaling, context rebuild, and failure propagation.
 @Suite("ReasoningLoop compaction")
 struct ReasoningLoopCompactionTests {
     private let agentID = AgentID(role: Role("scout"), contextID: AgentContextID("c1"))
@@ -194,13 +194,12 @@ struct ReasoningLoopCompactionTests {
         }
     }
 
-    private struct TokenCountingError: Error, Equatable {}
-
     private struct FailingTokenCountEndpoint: ModelEndpoint {
         let model = "counting-fails"
         let contextOwnership: ModelContextOwnership = .runtime
-        let tokenCounting: TokenCounting = .available { _, _ in
-            throw TokenCountingError()
+        let tokenCounting: TokenCounting = .available {
+            (_: [LLMMessage], _: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int in
+            throw AgentRuntimeError.infrastructureFailure("tokenizer unavailable")
         }
 
         func stream(
@@ -248,19 +247,20 @@ struct ReasoningLoopCompactionTests {
     }
 
     private struct FakeCompactor: ContextCompactor {
-        let body:
+        typealias Body =
             @Sendable (
                 PromptContext,
                 PreparedRequest,
-                @Sendable ([LLMMessage]) async throws -> String
-            ) async throws
-                -> CompactionDecision
+                @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
+            ) async throws(AgentRuntimeError) -> CompactionDecision
+
+        let body: Body
 
         func compact(
             context: PromptContext,
             request: PreparedRequest,
-            summarize: @Sendable ([LLMMessage]) async throws -> String
-        ) async throws -> CompactionDecision {
+            summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
+        ) async throws(AgentRuntimeError) -> CompactionDecision {
             try await body(context, request, summarize)
         }
     }
@@ -356,7 +356,7 @@ struct ReasoningLoopCompactionTests {
             .text(sender: "user", content: "m2", timestamp: Date()),
         ])
         let rebuilt = try makeContext(thread: [])
-        let compactor = FakeCompactor { _, _, summarize in
+        let body: FakeCompactor.Body = { _, _, summarize in
             await recorder.compacted()
             // The runtime's summarize reduces the endpoint stream to text.
             let summary = try await summarize([LLMMessage(role: .user, content: "summarize me")])
@@ -364,6 +364,7 @@ struct ReasoningLoopCompactionTests {
                 ConversationCompaction(summary: summary, archivedCount: 2)
             )
         }
+        let compactor = FakeCompactor(body: body)
         let loop = makeLoop(recorder: recorder, contexts: [rebuilt], compactor: compactor)
 
         let result = try await loop.compactIfNeeded(
@@ -402,12 +403,12 @@ struct ReasoningLoopCompactionTests {
     func sessionOwningEndpointExcluded() async throws {
         let recorder = Recorder()
         let context = try makeContext(thread: [])
-        let compactor = FakeCompactor { _, _, _ in
+        let compactor = FakeCompactor(body: { _, _, _ in
             await recorder.compacted()
             return .compacted(
                 ConversationCompaction(summary: "x", archivedCount: 1)
             )
-        }
+        })
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
         let result = try await loop.compactIfNeeded(turnContext: context, endpoint: FakeSessionEndpoint())
@@ -437,7 +438,7 @@ struct ReasoningLoopCompactionTests {
     func noCompactionNoJournal() async throws {
         let recorder = Recorder()
         let context = try makeContext(thread: [])
-        let compactor = FakeCompactor { _, _, _ in .unchanged }
+        let compactor = FakeCompactor(body: { _, _, _ in .unchanged })
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
         let result = try await loop.compactIfNeeded(turnContext: context, endpoint: FakeEndpoint(response: "unused"))
@@ -465,10 +466,10 @@ struct ReasoningLoopCompactionTests {
                 parameters: .init(type: "object", properties: nil, required: nil)
             )
         )
-        let compactor = FakeCompactor { _, request, _ in
+        let compactor = FakeCompactor(body: { _, request, _ in
             await recorder.budgeted(messages: request.messages, tools: request.tools)
             return .unchanged
-        }
+        })
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
         _ = try await loop.compactIfNeeded(
@@ -484,15 +485,17 @@ struct ReasoningLoopCompactionTests {
 
     @Test("a compactor failure propagates instead of sending oversized context")
     func compactorFailurePropagates() async throws {
-        struct CompactionError: Error, Equatable {}
         let recorder = Recorder()
         let context = try makeContext(thread: [
             .text(sender: "user", content: "m1", timestamp: Date())
         ])
-        let compactor = FakeCompactor { _, _, _ in throw CompactionError() }
+        let body: FakeCompactor.Body = {
+            _, _, _ in throw AgentRuntimeError.infrastructureFailure("compactor unavailable")
+        }
+        let compactor = FakeCompactor(body: body)
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
-        await #expect(throws: CompactionError.self) {
+        await #expect(throws: AgentRuntimeError.infrastructureFailure("compactor unavailable")) {
             try await loop.compactIfNeeded(
                 turnContext: context,
                 endpoint: FakeEndpoint(response: "unused")
@@ -505,10 +508,10 @@ struct ReasoningLoopCompactionTests {
     func supportedTokenCounterFailurePropagates() async throws {
         let recorder = Recorder()
         let context = try makeContext(thread: [])
-        let compactor = FakeCompactor { _, _, _ in .unchanged }
+        let compactor = FakeCompactor(body: { _, _, _ in .unchanged })
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
-        await #expect(throws: TokenCountingError.self) {
+        await #expect(throws: AgentRuntimeError.infrastructureFailure("tokenizer unavailable")) {
             try await loop.compactIfNeeded(
                 turnContext: context,
                 endpoint: FailingTokenCountEndpoint()
@@ -521,10 +524,11 @@ struct ReasoningLoopCompactionTests {
     func compactorCancellationPropagates() async throws {
         let recorder = Recorder()
         let context = try makeContext(thread: [])
-        let compactor = FakeCompactor { _, _, _ in throw CancellationError() }
+        let body: FakeCompactor.Body = { _, _, _ in throw AgentRuntimeError.cancelled }
+        let compactor = FakeCompactor(body: body)
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
-        await #expect(throws: CancellationError.self) {
+        await #expect(throws: AgentRuntimeError.cancelled) {
             try await loop.compactIfNeeded(
                 turnContext: context,
                 endpoint: FakeEndpoint(response: "unused")

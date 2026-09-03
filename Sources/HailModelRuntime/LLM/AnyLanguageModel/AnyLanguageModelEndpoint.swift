@@ -18,7 +18,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         modelIdentifier: String,
         temperature: Double,
         effectiveContextWindow: Int? = nil,
-        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws -> Int)? = nil,
+        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
         generationOptions: GenerationOptions? = nil
     ) {
         self.languageModel = languageModel

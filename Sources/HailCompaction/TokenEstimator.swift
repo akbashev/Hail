@@ -21,12 +21,12 @@ public struct TokenEstimator: Sendable {
     /// Optional model-specific counter. Hosts can wrap a tokenizer already
     /// owned by their Qwen/MLX/llama.cpp endpoint. Absence uses the heuristic;
     /// a configured counter failure propagates.
-    public var exactCount: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws -> Int)?
+    public var exactCount: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)?
 
     public init(
         charactersPerToken: Double = 4.0,
         perMessageOverhead: Int = 4,
-        exactCount: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws -> Int)? = nil
+        exactCount: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil
     ) {
         self.charactersPerToken = charactersPerToken
         self.perMessageOverhead = perMessageOverhead
@@ -45,8 +45,14 @@ public struct TokenEstimator: Sendable {
         self.init(
             charactersPerToken: charactersPerToken,
             perMessageOverhead: perMessageOverhead,
-            exactCount: { messages, tools in
-                try tokenizer.count(messages: messages, tools: tools)
+            exactCount: { (messages: [LLMMessage], tools: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int in
+                do {
+                    return try tokenizer.count(messages: messages, tools: tools)
+                } catch is CancellationError {
+                    throw .cancelled
+                } catch {
+                    throw .infrastructureFailure("Token counting failed: \(error)")
+                }
             }
         )
     }
@@ -65,7 +71,7 @@ public struct TokenEstimator: Sendable {
     public func estimate(
         messages: [LLMMessage],
         tools: [LLMToolSchema]
-    ) async throws -> Int {
+    ) async throws(AgentRuntimeError) -> Int {
         if let exactCount {
             return max(try await exactCount(messages, tools), 0)
         }

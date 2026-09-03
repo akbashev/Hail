@@ -162,41 +162,35 @@ struct ACPSessionCancellationTests {
 }
 
 /// A cancelled turn is the caller abandoning the work, not a failure: it must
-/// map to `AgentRuntimeError.cancelled` and must not be journaled as
-/// `turnFailed` (a journaled failure would replay as a failed turn after
-/// re-activation).
-///
-/// These tests pin the mapping decision directly. A full `ReasoningLoop.run`
-/// test would need an `AgentConnection` (a distributed actor on a
-/// `ClusterSystem`), which is disproportionate infrastructure for this seam.
+/// map to `AgentRuntimeError.cancelled` and must not be emitted as `turnFailed`.
+/// The loop keeps this decision in one pure boundary function so lifecycle
+/// handling does not spread across the model/tool transitions.
 @Suite("ReasoningLoop cancellation mapping")
 struct ReasoningLoopCancellationTests {
-    @Test("cancellation maps to .cancelled and bypasses turnFailed journaling")
-    func cancellationBypassesFailureJournal() {
+    @Test("cancellation maps to .cancelled and bypasses turnFailed emission")
+    func cancellationBypassesFailureEmission() {
         let raw = ReasoningLoop<ContinuousClock>.mapTurnError(CancellationError())
         #expect(raw.mapped == .cancelled)
-        #expect(!raw.journalsFailure)
+        #expect(!raw.emitsFailure)
 
-        // Endpoints report consumer cancellation as `.failed(.cancelled)`,
-        // which the loop maps to the same runtime error — same journal rule.
         let endpointReported = ReasoningLoop<ContinuousClock>.mapTurnError(AgentRuntimeError.cancelled)
         #expect(endpointReported.mapped == .cancelled)
-        #expect(!endpointReported.journalsFailure)
+        #expect(!endpointReported.emitsFailure)
     }
 
-    @Test("genuine failures still journal turnFailed")
-    func failuresStillJournal() {
+    @Test("genuine failures still emit turnFailed")
+    func failuresStillEmit() {
         let rateLimit = ReasoningLoop<ContinuousClock>.mapTurnError(AgentRuntimeError.rateLimit)
         #expect(rateLimit.mapped == .rateLimit)
-        #expect(rateLimit.journalsFailure)
+        #expect(rateLimit.emitsFailure)
 
         struct UnexpectedError: Error {}
         let wrapped = ReasoningLoop<ContinuousClock>.mapTurnError(UnexpectedError())
-        guard case .modelMisbehavior = wrapped.mapped else {
-            Issue.record("unexpected errors must wrap as modelMisbehavior, got \(wrapped.mapped)")
+        guard case .infrastructureFailure = wrapped.mapped else {
+            Issue.record("unexpected errors must wrap as infrastructureFailure, got \(wrapped.mapped)")
             return
         }
-        #expect(wrapped.journalsFailure)
+        #expect(wrapped.emitsFailure)
     }
 }
 

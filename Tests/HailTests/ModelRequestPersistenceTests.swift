@@ -5,15 +5,34 @@ import Testing
 
 @Suite("Model request persistence")
 struct ModelRequestPersistenceTests {
-    private struct JournalError: Error {}
+    @Test("failure to journal a request start becomes a persistence failure")
+    func failedStartWriteIsNotMisclassified() async {
+        let runner = ReasoningLoop<ContinuousClock>.ModelRequestRunner(
+            turnID: TurnID(),
+            emit: { (_: AgentEvent) async throws(AgentRuntimeError) in
+                throw AgentRuntimeError.persistenceFailure("journal unavailable")
+            },
+            recordActivity: { _ in },
+            clock: ContinuousClock()
+        )
+        let stream = AsyncStream<ModelEvent<String>> { $0.finish() }
+
+        await #expect(throws: AgentRuntimeError.persistenceFailure("journal unavailable")) {
+            _ = try await runner.run(
+                model: "test/model",
+                kind: .generation,
+                stream: stream
+            ) { _ in }
+        }
+    }
 
     @Test("failure to journal a failed request becomes a persistence failure")
     func failedFailureWriteIsNotSuppressed() async {
         let runner = ReasoningLoop<ContinuousClock>.ModelRequestRunner(
             turnID: TurnID(),
-            emit: { event in
+            emit: { (event: AgentEvent) async throws(AgentRuntimeError) in
                 if case .modelRequestFailed = event {
-                    throw JournalError()
+                    throw AgentRuntimeError.persistenceFailure("journal unavailable")
                 }
             },
             recordActivity: { _ in },
@@ -29,7 +48,7 @@ struct ModelRequestPersistenceTests {
                 model: "test/model",
                 kind: .generation,
                 stream: stream
-            ) { event in
+            ) { (event: ModelEvent<String>) async throws(AgentRuntimeError) in
                 if case .failed = event {
                     throw AgentRuntimeError.rateLimit
                 }

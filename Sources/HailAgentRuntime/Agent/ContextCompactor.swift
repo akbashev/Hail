@@ -109,6 +109,6 @@ public protocol ContextCompactor: Sendable {
     func compact(
         context: PromptContext,
         request: PreparedRequest,
-        summarize: @Sendable ([LLMMessage]) async throws -> String
-    ) async throws -> CompactionDecision
+        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
+    ) async throws(AgentRuntimeError) -> CompactionDecision
 }

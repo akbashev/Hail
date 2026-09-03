@@ -24,7 +24,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         baseURL: URL,
         temperature: Double,
         numContext: Int? = nil,
-        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws -> Int)? = nil,
+        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
         session: URLSession = .shared
     ) {
         self.model = model

@@ -71,10 +71,12 @@ struct TokenEstimatorTests {
 
     @Test("a configured tokenizer failure propagates")
     func exactTokenizerFailurePropagates() async {
-        struct TokenizerError: Error {}
-        let estimator = TokenEstimator(exactCount: { _, _ in throw TokenizerError() })
+        let estimator = TokenEstimator(exactCount: {
+            (_: [LLMMessage], _: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int in
+            throw AgentRuntimeError.infrastructureFailure("tokenizer unavailable")
+        })
 
-        await #expect(throws: TokenizerError.self) {
+        await #expect(throws: AgentRuntimeError.infrastructureFailure("tokenizer unavailable")) {
             try await estimator.estimate(
                 messages: [LLMMessage(role: .user, content: "tiny")],
                 tools: []

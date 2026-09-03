@@ -30,11 +30,12 @@ private enum ModelRoundOutcome<Output> {
     case requiresTools(narration: String, calls: [ToolCall], schemas: [LLMToolSchema])
 }
 
-/// Signals that the turn's terminal failure could not be journaled. The host
-/// must not append `turnCompleted`, so replay can recognize and recover the
-/// unmatched turn.
-struct UnjournaledTurnFailure: Error {
-    let runtimeError: AgentRuntimeError
+/// The only failures a reasoning loop can return to its host. Keeping the
+/// lifecycle distinction in the type prevents the host from accidentally
+/// closing a turn whose terminal failure was never emitted.
+enum ReasoningLoopError: Error, Sendable, Equatable {
+    case failed(AgentRuntimeError)
+    case failureNotEmitted(AgentRuntimeError)
 }
 
 /// Pure reducer that turns a stream of ``ModelEvent`` values into the typed
@@ -130,20 +131,20 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
 
     /// Builds the prompt context (system prompt, memory, conversation thread,
     /// context manifest) for one turn.
-    let context: @Sendable () async throws -> TurnContext
+    let context: @Sendable () async throws(AgentRuntimeError) -> TurnContext
 
     /// Resolves the model endpoint for this turn.
-    let endpoint: @Sendable () async throws -> ModelEndpoint
+    let endpoint: @Sendable () async throws(AgentRuntimeError) -> ModelEndpoint
 
     /// Optional context compactor, consulted before each request for
     /// non-session-owning endpoints. See ``ContextCompactor``.
     let compactor: (any ContextCompactor)?
 
     /// Resolves the tool registry available to this turn.
-    let tools: @Sendable () async throws -> ToolRegistry
+    let tools: @Sendable () async throws(AgentRuntimeError) -> ToolRegistry
 
-    /// Journals a persistent agent event.
-    let emit: @Sendable (AgentEvent) async throws -> Void
+    /// Emits a persistent agent event.
+    let emit: @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void
 
     /// Records an ephemeral activity fragment (status/thinking/text/tool).
     let recordActivity: @Sendable (AgentActivity) async -> Void
@@ -164,7 +165,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// result; starts, usage, completion, failure, and duration are uniform.
     struct ModelRequestRunner: Sendable {
         let turnID: TurnID
-        let emit: @Sendable (AgentEvent) async throws -> Void
+        let emit: @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void
         let recordActivity: @Sendable (AgentActivity) async -> Void
         let clock: ClockType
 
@@ -172,8 +173,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             model: String,
             kind: ModelRequestKind,
             stream: AsyncStream<ModelEvent<Output>>,
-            handle: (ModelEvent<Output>) async throws -> Void
-        ) async throws -> ModelUsage? {
+            handle: (ModelEvent<Output>) async throws(AgentRuntimeError) -> Void
+        ) async throws(AgentRuntimeError) -> ModelUsage? {
             let requestID = ModelRequestID()
             let startedAt = clock.now
             try await emit(
@@ -184,12 +185,14 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                         model: model,
                         kind: kind,
                         startedAt: Date()
-                    )))
+                    )
+                )
+            )
 
             var usage: ModelUsage?
             do {
                 for await event in stream {
-                    try Task.checkCancellation()
+                    try ReasoningLoop<ClockType>.checkCancellation()
                     switch event {
                     case .usage(let requestUsage):
                         usage = requestUsage
@@ -203,7 +206,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                     }
                     try await handle(event)
                 }
-                try Task.checkCancellation()
+                try ReasoningLoop<ClockType>.checkCancellation()
                 try await emit(
                     .modelRequestCompleted(
                         id: requestID,
@@ -211,7 +214,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                         durationMilliseconds: ReasoningLoop<ClockType>.durationMilliseconds(
                             since: startedAt, now: clock.now),
                         at: Date()
-                    ))
+                    )
+                )
                 return usage
             } catch {
                 let requestError = error
@@ -239,10 +243,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         turnID: TurnID = TurnID(),
         logger: Logger = Logger(label: "hail.reasoning-loop"),
         authority: any Authority,
-        context: @escaping @Sendable () async throws -> TurnContext,
-        endpoint: @escaping @Sendable () async throws -> ModelEndpoint,
-        tools: @escaping @Sendable () async throws -> ToolRegistry,
-        emit: @escaping @Sendable (AgentEvent) async throws -> Void,
+        context: @escaping @Sendable () async throws(AgentRuntimeError) -> TurnContext,
+        endpoint: @escaping @Sendable () async throws(AgentRuntimeError) -> ModelEndpoint,
+        tools: @escaping @Sendable () async throws(AgentRuntimeError) -> ToolRegistry,
+        emit: @escaping @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void,
         recordActivity: @escaping @Sendable (AgentActivity) async -> Void,
         compactor: (any ContextCompactor)? = nil,
         clock: ClockType,
@@ -270,7 +274,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     func run<Input: AgentInput, Output: AgentOutput>(
         _ input: Input,
         through connection: AgentConnection<Output>
-    ) async throws {
+    ) async throws(ReasoningLoopError) {
         do {
             guard maxToolRounds > 0 else {
                 throw AgentRuntimeError.configurationError(
@@ -279,10 +283,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             }
             try await runStreamingTurn(input: input, through: connection)
         } catch {
-            let (runtimeError, journalsFailure) = Self.mapTurnError(error)
+            let (runtimeError, emitsFailure) = Self.mapTurnError(error)
             let at = Date()
-            if journalsFailure {
-                // Journal the failure so it survives reloads; the turn bracket
+            if emitsFailure {
+                // Emit the failure so it survives reloads; the turn bracket
                 // is closed by the caller (`turnCompleted`), so no re-run
                 // triggers. Cancellation bypasses this: an abandoned turn is
                 // not a failure and must not replay as one.
@@ -296,28 +300,36 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                         .run(.event(.runFailed(error: persistenceError, at: at))),
                         to: connection
                     )
-                    throw UnjournaledTurnFailure(runtimeError: persistenceError)
+                    throw .failureNotEmitted(persistenceError)
                 }
             }
             await broadcast(.run(.event(.runFailed(error: runtimeError, at: at))), to: connection)
-            throw runtimeError
+            throw .failed(runtimeError)
         }
     }
 
-    /// Maps an error escaping the turn to the runtime error that is thrown,
-    /// and decides whether it is journaled as ``AgentEvent/turnFailed(error:at:)``.
+    /// Normalizes the existential `catch` boundary around the typed turn.
+    /// Swift exposes a caught value as `any Error` even when every current
+    /// dependency throws `AgentRuntimeError`; keeping this conversion in one
+    /// place prevents a future untyped dependency from leaking out.
+    /// It also decides whether the error is emitted as
+    /// ``AgentEvent/turnFailed(error:at:)``.
     /// Cancellation — a raw `CancellationError` from a consumer abort, or an
     /// endpoint reporting `.cancelled` — is the caller abandoning the turn,
-    /// not a failure: journaling it would replay as a failed turn after
-    /// re-activation, so it bypasses the journal.
-    static func mapTurnError(_ error: any Error) -> (mapped: AgentRuntimeError, journalsFailure: Bool) {
+    /// not a failure: emitting it would replay as a failed turn after
+    /// re-activation, so it bypasses the event stream.
+    static func mapTurnError(_ error: any Error) -> (mapped: AgentRuntimeError, emitsFailure: Bool) {
         if error is CancellationError {
             return (.cancelled, false)
         }
         if let runtimeError = error as? AgentRuntimeError {
             return (runtimeError, runtimeError != .cancelled)
         }
-        return (.modelMisbehavior(String(describing: error)), true)
+        return (.infrastructureFailure(String(describing: error)), true)
+    }
+
+    private static func checkCancellation() throws(AgentRuntimeError) {
+        guard !Task.isCancelled else { throw .cancelled }
     }
 
     // MARK: - Compaction
@@ -336,7 +348,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         endpoint: any ModelEndpoint,
         additionalMessages: [LLMMessage] = [],
         tools: [LLMToolSchema] = []
-    ) async throws -> TurnContext {
+    ) async throws(AgentRuntimeError) -> TurnContext {
         var turnContext = turnContext
         let implementsSessionContract = endpoint is SessionOwningEndpoint
         guard
@@ -377,20 +389,19 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 tokenCounting: endpoint.tokenCounting
             )
         )
-        let decision: CompactionDecision
-        do {
-            decision = try await compactor.compact(
-                context: turnContext.promptContext,
-                request: request
-            ) { messages in
-                try await self.summarize(messages: messages, endpoint: endpoint)
-            }
-        } catch let modelError as ModelEndpointError {
-            throw Self.map(modelError: modelError)
+        let summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String = { messages in
+            try await self.summarize(messages: messages, endpoint: endpoint)
         }
+        let decision = try await compactor.compact(
+            context: turnContext.promptContext,
+            request: request,
+            summarize: summarize
+        )
         guard case .compacted(let result) = decision else { return turnContext }
         await recordActivity(.turn(.progress(.status("Compacting conversation context.")), at: Date()))
-        try await emit(.conversationCompacted(archivedCount: result.archivedCount, summary: result.summary))
+        try await emit(
+            .conversationCompacted(archivedCount: result.archivedCount, summary: result.summary)
+        )
         return try await context()
     }
 
@@ -399,7 +410,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     private func summarize(
         messages: [LLMMessage],
         endpoint: any ModelEndpoint
-    ) async throws -> String {
+    ) async throws(AgentRuntimeError) -> String {
         var text = ""
         let runner = ModelRequestRunner(
             turnID: turnID,
@@ -407,22 +418,24 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             recordActivity: recordActivity,
             clock: clock
         )
-        _ = try await runner.run(
-            model: endpoint.model,
-            kind: .compaction,
-            stream: endpoint.stream(messages: messages, tools: nil)
-        ) { event in
+        let handle: (ModelEvent<String>) async throws(AgentRuntimeError) -> Void = { event in
             switch event {
             case .text(let fragment):
                 text += fragment
             case .generated(let value):
                 if text.isEmpty { text = value }
             case .failed(let error):
-                throw error
+                throw Self.map(modelError: error)
             default:
                 break
             }
         }
+        _ = try await runner.run(
+            model: endpoint.model,
+            kind: .compaction,
+            stream: endpoint.stream(messages: messages, tools: nil),
+            handle: handle
+        )
         guard !text.isEmpty else {
             throw AgentRuntimeError.modelMisbehavior("Compaction produced an empty summary")
         }
@@ -437,7 +450,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     private func runStreamingTurn<Input: AgentInput, Output: AgentOutput>(
         input: Input,
         through connection: AgentConnection<Output>
-    ) async throws {
+    ) async throws(AgentRuntimeError) {
         let message = input.asChatMessage(timestamp: Date())
         try await emit(.messageReceived(message))
         await broadcast(.run(.event(.messageHandled(message: message, at: Date()))), to: connection)
@@ -555,11 +568,19 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
         }
 
+        let payload: Data
+        do {
+            payload = try JSONEncoder().encode(outcome)
+        } catch {
+            throw AgentRuntimeError.persistenceFailure(
+                "Could not encode response for persistence: \(error)"
+            )
+        }
         let timestamp = Date()
         try await emit(
             .responseReceived(
                 sender: agentID.rawValue,
-                payload: try JSONEncoder().encode(outcome),
+                payload: payload,
                 at: timestamp
             )
         )
@@ -579,8 +600,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         endpoint: ModelEndpoint,
         completedToolRounds: Int = 0,
         through connection: AgentConnection<Output>
-    ) async throws -> Output {
-        try Task.checkCancellation()
+    ) async throws(AgentRuntimeError) -> Output {
+        try Self.checkCancellation()
         switch try await requestModelRound(
             messages: messages,
             delta: delta,
@@ -629,7 +650,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         registry: ToolRegistry,
         endpoint: ModelEndpoint,
         through connection: AgentConnection<Output>
-    ) async throws -> ModelRoundOutcome<Output> {
+    ) async throws(AgentRuntimeError) -> ModelRoundOutcome<Output> {
         let schemas = await registry.schemas()
         let tools = schemas.isEmpty ? nil : schemas
         let stream: AsyncStream<ModelEvent<Output>>
@@ -660,11 +681,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             recordActivity: recordActivity,
             clock: clock
         )
-        _ = try await runner.run(
-            model: endpoint.model,
-            kind: .generation,
-            stream: stream
-        ) { event in
+        let handle: (ModelEvent<Output>) async throws(AgentRuntimeError) -> Void = { event in
             let (nextState, updates) = TurnReducer.reduce(
                 state: turnState,
                 event: event,
@@ -695,6 +712,12 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 throw Self.map(modelError: modelError)
             }
         }
+        _ = try await runner.run(
+            model: endpoint.model,
+            kind: .generation,
+            stream: stream,
+            handle: handle
+        )
 
         if !calls.isEmpty {
             return .requiresTools(narration: text, calls: calls, schemas: schemas)
@@ -728,7 +751,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         registry: ToolRegistry,
         endpoint: ModelEndpoint,
         through connection: AgentConnection<Output>
-    ) async throws -> [LLMMessage] {
+    ) async throws(AgentRuntimeError) -> [LLMMessage] {
         var nextMessages = messages
         nextMessages.append(
             LLMMessage(
@@ -747,7 +770,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
 
         let startedAt = clock.now
         let results = try await registry.execute(calls)
-        try Task.checkCancellation()
+        try Self.checkCancellation()
         logger.info(
             "Tool round finished",
             metadata: [
@@ -868,7 +891,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         if let modelError = error as? ModelEndpointError {
             return map(modelError: modelError)
         }
-        return .modelMisbehavior(String(describing: error))
+        return .infrastructureFailure(String(describing: error))
     }
 
     private static func durationMilliseconds(since start: ClockType.Instant, now: ClockType.Instant) -> Int {

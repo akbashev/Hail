@@ -46,8 +46,8 @@ public struct SlidingWindowCompactor: ContextCompactor {
     public func compact(
         context: PromptContext,
         request: PreparedRequest,
-        summarize: @Sendable ([LLMMessage]) async throws -> String
-    ) async throws -> CompactionDecision {
+        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
+    ) async throws(AgentRuntimeError) -> CompactionDecision {
         let window =
             context.measurement.effectiveContextWindow
             ?? budget.budget(for: context.definition.behavior.model.rawValue)
@@ -131,8 +131,8 @@ public struct SlidingWindowCompactor: ContextCompactor {
         context: PromptContext,
         archived: [ChatMessage],
         window: Int,
-        summarize: @Sendable ([LLMMessage]) async throws -> String
-    ) async throws -> String {
+        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
+    ) async throws(AgentRuntimeError) -> String {
         let summaryBudget = max(1, window - outputReserve)
         var rollingSummary = context.contextSummary
         var pending: [ChatMessage] = []
@@ -290,7 +290,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
         context: PromptContext,
         messages: [LLMMessage],
         tools: [LLMToolSchema]
-    ) async throws -> Int {
+    ) async throws(AgentRuntimeError) -> Int {
         switch context.measurement.tokenCounting {
         case .available(let counter):
             return max(0, try await counter(messages, tools))

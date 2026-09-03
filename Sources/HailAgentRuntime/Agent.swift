@@ -338,25 +338,27 @@ public distributed actor Agent: AsyncSequence {
             recordActivity(.turn(.started, at: Date()))
             do {
                 try await loop.run(input, through: connection)
-            } catch let unjournaled as UnjournaledTurnFailure {
-                // Do not manufacture a completed turn when its failure never
-                // reached the journal. The unmatched opening remains
-                // recoverable on replay.
-                recordActivity(.turn(.completed, at: Date()))
-                throw unjournaled.runtimeError
-            } catch {
-                let turnError = error
-                // The error is surfaced to the caller, so the turn is closed;
-                // only a crash before this point triggers a re-run.
-                do {
-                    try await self.emit(event: .turnCompleted(at: Date()))
-                } catch {
-                    throw AgentRuntimeError.persistenceFailure(
-                        "Could not close failed turn in the journal: \(error). Original failure: \(turnError)"
-                    )
+            } catch let loopError as ReasoningLoopError {
+                switch loopError {
+                case .failureNotEmitted(let runtimeError):
+                    // Do not manufacture a completed turn when its failure
+                    // never reached the event stream. The unmatched opening
+                    // remains recoverable on replay.
+                    recordActivity(.turn(.completed, at: Date()))
+                    throw runtimeError
+                case .failed(let runtimeError):
+                    // The error is surfaced to the caller, so the turn is
+                    // closed; only a crash before this point triggers a re-run.
+                    do {
+                        try await self.emit(event: .turnCompleted(at: Date()))
+                    } catch {
+                        throw AgentRuntimeError.persistenceFailure(
+                            "Could not close failed turn in the event stream: \(error). Original failure: \(runtimeError)"
+                        )
+                    }
+                    recordActivity(.turn(.completed, at: Date()))
+                    throw runtimeError
                 }
-                recordActivity(.turn(.completed, at: Date()))
-                throw turnError
             }
             try await self.emit(event: .turnCompleted(at: Date()))
             recordActivity(.turn(.completed, at: Date()))
@@ -527,6 +529,25 @@ public distributed actor Agent: AsyncSequence {
         state.apply(event, maxMemoryFragments: definition.limits.maxMemoryFragments)
     }
 
+    /// Adapts the event-sourcing API to the typed event port consumed by
+    /// ``ReasoningLoop``. Infrastructure errors are translated once here;
+    /// the loop cannot accidentally leak a raw storage failure.
+    private func emitReasoningEvent(_ event: AgentEvent) async throws(AgentRuntimeError) {
+        do {
+            try await emit(event: event)
+        } catch {
+            if error is CancellationError {
+                throw AgentRuntimeError.cancelled
+            }
+            if let runtimeError = error as? AgentRuntimeError {
+                throw runtimeError
+            }
+            throw AgentRuntimeError.persistenceFailure(
+                "Could not record agent event: \(error)"
+            )
+        }
+    }
+
     // MARK: - Reasoning loop host
 
     /// The reasoning loop this actor hosts. Built per access from stable,
@@ -557,26 +578,36 @@ public distributed actor Agent: AsyncSequence {
             turnID: turnID,
             logger: actorSystem.log,
             authority: lane?.authority ?? authority,
-            context: { try await self.buildTurnContext() },
-            endpoint: {
+            context: { () async throws(AgentRuntimeError) -> TurnContext in
+                try await self.buildTurnContext()
+            },
+            endpoint: { () async throws(AgentRuntimeError) -> any ModelEndpoint in
                 let resumeSession = await self.modelSessionResume
                 // Creation authority is the agent's default on purpose — it
                 // scopes only the harness spawn (see the invariant above);
                 // the lane's authority reaches the endpoint per-stream via
                 // the loop's `authority`.
-                return try await self.actorSystem.agentRuntime.endpoint(
-                    for: self.definition.behavior.model.rawValue,
-                    agentID: self.state.agentID.rawValue,
-                    contextID: self.state.agentID.contextID,
-                    workingDirectory: self.workspacePath,
-                    executionPolicy: self.definition.behavior.execution,
-                    resumeSession: resumeSession,
-                    authority: self.authority,
-                    reasoningEffort: self.definition.behavior.reasoningEffort
-                )
+                do {
+                    return try await self.actorSystem.agentRuntime.endpoint(
+                        for: self.definition.behavior.model.rawValue,
+                        agentID: self.state.agentID.rawValue,
+                        contextID: self.state.agentID.contextID,
+                        workingDirectory: self.workspacePath,
+                        executionPolicy: self.definition.behavior.execution,
+                        resumeSession: resumeSession,
+                        authority: self.authority,
+                        reasoningEffort: self.definition.behavior.reasoningEffort
+                    )
+                } catch {
+                    throw Self.mapEndpointDependencyError(error)
+                }
             },
-            tools: { try await self.toolRegistry(lane: lane) },
-            emit: { try await self.emit(event: $0) },
+            tools: { () async throws(AgentRuntimeError) -> ToolRegistry in
+                try await self.toolRegistry(lane: lane)
+            },
+            emit: { (event: AgentEvent) async throws(AgentRuntimeError) in
+                try await self.emitReasoningEvent(event)
+            },
             recordActivity: { await self.recordActivity($0) },
             compactor: actorSystem.agentRuntime.contextCompactor,
             clock: ContinuousClock(),
@@ -584,12 +615,17 @@ public distributed actor Agent: AsyncSequence {
         )
     }
 
-    private func buildTurnContext() async throws -> TurnContext {
+    private func buildTurnContext() async throws(AgentRuntimeError) -> TurnContext {
         let runtime = actorSystem.agentRuntime
         let assemblePrompt = runtime.assemblePrompt
-        let manifest =
-            try await runtime.contextProvider?.manifest(state.agentID, actorSystem)
-            ?? ContextManifest(items: [])
+        let manifest: ContextManifest
+        do {
+            manifest =
+                try await runtime.contextProvider?.manifest(state.agentID, actorSystem)
+                ?? ContextManifest(items: [])
+        } catch {
+            throw mapInfrastructureDependencyError(error, operation: "Could not build model context")
+        }
         let promptContext = PromptContext(
             agentID: state.agentID,
             definition: definition,
@@ -621,7 +657,7 @@ public distributed actor Agent: AsyncSequence {
     /// providers' journal replays, against turns that are seconds apart.
     /// A laned turn builds under the lane's authority, an unlaned one under
     /// the agent's plugin-derived authority.
-    private func toolRegistry(lane: TurnAuthorityLane?) async throws -> ToolRegistry {
+    private func toolRegistry(lane: TurnAuthorityLane?) async throws(AgentRuntimeError) -> ToolRegistry {
         let registry = ToolRegistry(authority: lane?.authority ?? authority)
         try await registerTools(in: registry)
         return registry
@@ -629,7 +665,7 @@ public distributed actor Agent: AsyncSequence {
 
     /// Registers the agent's default tools and the runtime's extra tools into
     /// `registry`. Runs once per turn (see ``toolRegistry(lane:)``).
-    private func registerTools(in registry: ToolRegistry) async throws {
+    private func registerTools(in registry: ToolRegistry) async throws(AgentRuntimeError) {
         await registry.register(NowTool())
         await registry.register(
             FileTool(projectRoot: URL(fileURLWithPath: scope.path ?? projectRootPath))
@@ -645,12 +681,32 @@ public distributed actor Agent: AsyncSequence {
         ])
 
         let runtime = actorSystem.agentRuntime
-        let extraTools = try await runtime.extraTools(
-            forAgentID: state.agentID,
-            sourceAgentID: state.agentID,
-            actorSystem: actorSystem
-        )
+        let extraTools: [any HailCore.Tool]
+        do {
+            extraTools = try await runtime.extraTools(
+                forAgentID: state.agentID,
+                sourceAgentID: state.agentID,
+                actorSystem: actorSystem
+            )
+        } catch {
+            throw mapInfrastructureDependencyError(error, operation: "Could not load agent tools")
+        }
         await registry.register(tools: extraTools)
+    }
+
+    private static func mapEndpointDependencyError(_ error: any Error) -> AgentRuntimeError {
+        if error is CancellationError { return .cancelled }
+        if let runtimeError = error as? AgentRuntimeError { return runtimeError }
+        return .configurationError("Could not resolve model endpoint: \(error)")
+    }
+
+    private func mapInfrastructureDependencyError(
+        _ error: any Error,
+        operation: String
+    ) -> AgentRuntimeError {
+        if error is CancellationError { return .cancelled }
+        if let runtimeError = error as? AgentRuntimeError { return runtimeError }
+        return .infrastructureFailure("\(operation): \(error)")
     }
 
 }

@@ -105,7 +105,7 @@ public enum ModelContextOwnership: Sendable, Equatable {
 public enum TokenCounting: Sendable {
     case unavailable
     case available(
-        @Sendable (_ messages: [LLMMessage], _ tools: [LLMToolSchema]) async throws -> Int
+        @Sendable (_ messages: [LLMMessage], _ tools: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int
     )
 }
 
@@ -234,6 +234,8 @@ public enum HailErrorFormatter {
             "Context length exceeded. The conversation is too long for this model."
         case .configurationError(let reason):
             "Configuration error: \(reason)"
+        case .infrastructureFailure(let reason):
+            "Infrastructure error: \(reason)"
         case .persistenceFailure(let reason):
             "Persistence error: \(reason)"
         case .toolFailed(let name, let reason):

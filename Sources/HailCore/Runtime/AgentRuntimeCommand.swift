@@ -9,6 +9,7 @@ public enum AgentRuntimeError: Error, Sendable, Equatable, Codable {
     case rateLimit
     case contextLengthExceeded
     case configurationError(String)
+    case infrastructureFailure(String)
     case persistenceFailure(String)
     case toolFailed(name: String, reason: String)
     case cancelled

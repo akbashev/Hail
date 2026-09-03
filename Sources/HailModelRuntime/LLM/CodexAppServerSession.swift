@@ -62,15 +62,17 @@ actor CodexAppServerSession {
         resumeSession: ModelSessionResume?,
         authority: any Authority,
         maxStallDuration: TimeInterval? = nil
-    ) {
+    ) throws(ModelRouterError) {
         self.model = model
         self.workingDirectory = workingDirectory
         self.mcpServerConfiguration = mcpServerConfiguration
         self.executionPolicy = executionPolicy
         self.creationAuthority = authority
-        self.maxStallDuration =
-            maxStallDuration
-            ?? ProcessEnvironment.timeInterval(from: "HAIL_CODEX_MAX_STALL_TIMEOUT", default: 1800)
+        self.maxStallDuration = try ProcessEnvironment.timeInterval(
+            override: maxStallDuration,
+            from: "HAIL_CODEX_MAX_STALL_TIMEOUT",
+            default: 1800
+        )
         self.sessionID = resumeSession?.id
         self.sessionIdentity = resumeSession?.identity
         self.client = CodexAppServerClient(
@@ -306,10 +308,17 @@ actor CodexAppServerSession {
             // Fire-and-forget — the teardown must not block on a wedged
             // server; reset-on-doubt covers a missed interrupt.
             Task {
-                try? await client.request(
-                    "turn/interrupt",
-                    params: CodexTurnInterruptParams(threadId: threadID, turnId: turnID)
-                )
+                do {
+                    _ = try await client.request(
+                        "turn/interrupt",
+                        params: CodexTurnInterruptParams(threadId: threadID, turnId: turnID)
+                    )
+                } catch {
+                    codexSessionLogger.debug(
+                        "Best-effort Codex turn interrupt failed",
+                        metadata: ["error": .string(String(describing: error))]
+                    )
+                }
             }
             throw CodexSessionError.cancelled
         }

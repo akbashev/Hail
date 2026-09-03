@@ -7,6 +7,11 @@
 /// The event-sourced state of an ``Agent``. Kept as a separate value type so
 /// the state transition can be tested and replayed without a distributed actor.
 public struct AgentState: Codable, Sendable {
+    /// State is the actor-local dashboard projection, not the history store.
+    /// Keep its request timeline bounded; complete request history remains in
+    /// the journal and is projected by `AgentHistoryReader`.
+    private static let maxRecentModelRequests = 100
+
     public var agentID: AgentID
     public var conversationThread: [ChatMessage]
     public var workingMemory: [String]
@@ -21,6 +26,14 @@ public struct AgentState: Codable, Sendable {
     /// `turnCompleted`. `opening` is the message that opened the turn (once
     /// journaled); `responded` records that a response made it to the journal.
     public private(set) var activeTurn: ActiveTurn?
+
+    /// Recent durable model requests, including compaction requests. Complete
+    /// journal history remains available to an external AgentHistoryReader;
+    /// this state projection keeps dashboard reads local to the actor.
+    public private(set) var modelRequests: [ModelRequestRecord] = []
+
+    public private(set) var phase: AgentPhase = .idle
+    public private(set) var currentToolName: String?
 
     /// The opening message of a turn interrupted by a crash, folded by
     /// ``normalizeAfterReplay()``. The agent re-runs it after activation (when
@@ -37,14 +50,54 @@ public struct AgentState: Codable, Sendable {
     /// The identity fingerprint the harness session was created with.
     public private(set) var modelSessionIdentity: SessionIdentity?
 
+    /// Durable token totals projected from ``AgentEvent/modelUsage``. Kept
+    /// outside the conversation so prompt assembly and compaction never see
+    /// accounting metadata.
+    public private(set) var usageSummary: AgentUsageSummary = .init()
+
+    /// The latest provider-reported context occupancy, if any.
+    public private(set) var latestContextUsage: ContextUsage?
+
     /// A reasoning turn in progress.
     public struct ActiveTurn: Codable, Sendable, Equatable {
         public var opening: ChatMessage?
         public var responded: Bool
+        public var id: TurnID?
+        public var startedAt: Date?
 
-        public init(opening: ChatMessage? = nil, responded: Bool = false) {
+        public init(
+            opening: ChatMessage? = nil,
+            responded: Bool = false,
+            id: TurnID? = nil,
+            startedAt: Date? = nil
+        ) {
             self.opening = opening
             self.responded = responded
+            self.id = id
+            self.startedAt = startedAt
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case opening, responded, id, startedAt
+        }
+
+        /// New turn metadata was added after journals already contained
+        /// `activeTurn`. Decode the new fields optionally so an old snapshot
+        /// with only `opening` and `responded` remains loadable.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            opening = try container.decodeIfPresent(ChatMessage.self, forKey: .opening)
+            responded = try container.decodeIfPresent(Bool.self, forKey: .responded) ?? false
+            id = try container.decodeIfPresent(TurnID.self, forKey: .id)
+            startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(opening, forKey: .opening)
+            try container.encode(responded, forKey: .responded)
+            try container.encodeIfPresent(id, forKey: .id)
+            try container.encodeIfPresent(startedAt, forKey: .startedAt)
         }
     }
 
@@ -58,6 +111,49 @@ public struct AgentState: Codable, Sendable {
         self.workingMemory = workingMemory
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case agentID, conversationThread, workingMemory, contextSummary, activeTurn,
+            pendingTurnRerun, modelSessionID, modelSessionIdentity, usageSummary,
+            latestContextUsage, modelRequests, phase, currentToolName
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        agentID = try container.decode(AgentID.self, forKey: .agentID)
+        conversationThread = try container.decode([ChatMessage].self, forKey: .conversationThread)
+        workingMemory = try container.decode([String].self, forKey: .workingMemory)
+        contextSummary = try container.decodeIfPresent(String.self, forKey: .contextSummary)
+        activeTurn = try container.decodeIfPresent(ActiveTurn.self, forKey: .activeTurn)
+        pendingTurnRerun = try container.decodeIfPresent(ChatMessage.self, forKey: .pendingTurnRerun)
+        modelSessionID = try container.decodeIfPresent(SessionID.self, forKey: .modelSessionID)
+        modelSessionIdentity = try container.decodeIfPresent(SessionIdentity.self, forKey: .modelSessionIdentity)
+        usageSummary = try container.decodeIfPresent(AgentUsageSummary.self, forKey: .usageSummary) ?? .init()
+        latestContextUsage = try container.decodeIfPresent(ContextUsage.self, forKey: .latestContextUsage)
+        modelRequests = try container.decodeIfPresent([ModelRequestRecord].self, forKey: .modelRequests) ?? []
+        if modelRequests.count > Self.maxRecentModelRequests {
+            modelRequests.removeFirst(modelRequests.count - Self.maxRecentModelRequests)
+        }
+        phase = try container.decodeIfPresent(AgentPhase.self, forKey: .phase) ?? .idle
+        currentToolName = try container.decodeIfPresent(String.self, forKey: .currentToolName)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(agentID, forKey: .agentID)
+        try container.encode(conversationThread, forKey: .conversationThread)
+        try container.encode(workingMemory, forKey: .workingMemory)
+        try container.encodeIfPresent(contextSummary, forKey: .contextSummary)
+        try container.encodeIfPresent(activeTurn, forKey: .activeTurn)
+        try container.encodeIfPresent(pendingTurnRerun, forKey: .pendingTurnRerun)
+        try container.encodeIfPresent(modelSessionID, forKey: .modelSessionID)
+        try container.encodeIfPresent(modelSessionIdentity, forKey: .modelSessionIdentity)
+        try container.encode(usageSummary, forKey: .usageSummary)
+        try container.encodeIfPresent(latestContextUsage, forKey: .latestContextUsage)
+        try container.encode(modelRequests, forKey: .modelRequests)
+        try container.encode(phase, forKey: .phase)
+        try container.encodeIfPresent(currentToolName, forKey: .currentToolName)
+    }
+
     /// Apply a single event to this state. This is the only place where event
     /// replay mutates agent state, making the transition deterministic and
     /// testable.
@@ -65,11 +161,15 @@ public struct AgentState: Codable, Sendable {
         switch event {
         case .activated(let agentID):
             self.agentID = agentID
-        case .turnStarted:
+        case .turnStarted(let at):
             // Deliberately keeps `pendingTurnRerun`: the crash-recovery re-run
             // starts a fresh turn before re-journaling its opening, so the
             // marker must survive until `messageReceived` recognizes it.
-            activeTurn = ActiveTurn()
+            activeTurn = ActiveTurn(startedAt: at)
+            phase = .generating
+            currentToolName = nil
+        case .turnIdentified(let id):
+            activeTurn?.id = id
         case .messageReceived(let message):
             // Crash-recovery fold: an interrupted turn is re-run after replay
             // and the loop re-journals the exact same opening message (same
@@ -106,20 +206,33 @@ public struct AgentState: Codable, Sendable {
                     }
                 }
             }
+        case .assistantText(let content, let at):
+            guard !content.isEmpty else { break }
+            conversationThread.append(
+                .text(sender: agentID.rawValue, content: content, timestamp: at)
+            )
         case .contextSet:
             // Context is part of the immutable agent identity; no state change.
             break
         case .toolInvoked(let toolCall, let at):
-            // The fold prefers the journaled timestamp so replay is
-            // deterministic; `Date()` is only the fallback for events written
-            // before turn timing existed.
+            // Old events may not carry tool timing. Derive their timestamp
+            // from durable state rather than wall-clock time so replay remains
+            // a deterministic fold.
             conversationThread.append(
-                .toolCall(calls: [toolCall], timestamp: at ?? Date())
+                .toolCall(calls: [toolCall], timestamp: replayTimestamp(for: at))
             )
+            phase = .executingTool
+            currentToolName = toolCall.name
         case .toolResult(let result, let at):
             conversationThread.append(
-                .toolResult(id: result.toolCallID, content: result.output, timestamp: at ?? Date())
+                .toolResult(
+                    id: result.toolCallID,
+                    content: result.output,
+                    timestamp: replayTimestamp(for: at)
+                )
             )
+            phase = .generating
+            currentToolName = nil
         case .memoryCommitted(let summary):
             workingMemory.append(summary)
             let maxFragments = max(0, maxMemoryFragments)
@@ -131,13 +244,47 @@ public struct AgentState: Codable, Sendable {
             if archivedCount > 0 && archivedCount <= conversationThread.count {
                 conversationThread.removeFirst(archivedCount)
             }
+            phase = .generating
         case .responseReceived(let sender, let payload, let timestamp):
             conversationThread.append(.response(sender: sender, payload: payload, timestamp: timestamp))
             activeTurn?.responded = true
         case .turnFailed(let error, let at):
             conversationThread.append(.failure(error: error, timestamp: at))
+            phase = .failed
+            currentToolName = nil
         case .turnCompleted:
             activeTurn = nil
+            phase = .idle
+            currentToolName = nil
+        case .modelUsage(let usage, _):
+            usageSummary.record(usage)
+        case .contextUsage(let usage, _):
+            latestContextUsage = usage
+        case .modelRequestStarted(let record):
+            modelRequests.append(record)
+            if modelRequests.count > Self.maxRecentModelRequests {
+                modelRequests.removeFirst(modelRequests.count - Self.maxRecentModelRequests)
+            }
+            phase = record.kind == .compaction ? .compacting : .generating
+        case .modelRequestCompleted(let id, let usage, let durationMilliseconds, let at):
+            if let index = modelRequests.lastIndex(where: { $0.id == id }) {
+                modelRequests[index].completedAt = at
+                modelRequests[index].durationMilliseconds = durationMilliseconds
+                modelRequests[index].usage = usage
+                modelRequests[index].outcome = .completed
+                if activeTurn != nil {
+                    phase = .generating
+                }
+            }
+        case .modelRequestFailed(let id, let error, let durationMilliseconds, let at):
+            if let index = modelRequests.lastIndex(where: { $0.id == id }) {
+                modelRequests[index].completedAt = at
+                modelRequests[index].durationMilliseconds = durationMilliseconds
+                modelRequests[index].outcome = .failed(error)
+                if activeTurn != nil {
+                    phase = .generating
+                }
+            }
         case .modelSessionIdentified(let id, let identity):
             modelSessionID = id
             modelSessionIdentity = identity
@@ -152,10 +299,34 @@ public struct AgentState: Codable, Sendable {
     /// otherwise hand the opening message back so the agent can re-run it
     /// exactly once after activation.
     public mutating func normalizeAfterReplay() {
-        guard let turn = activeTurn else { return }
-        activeTurn = nil
-        if let opening = turn.opening, !turn.responded {
-            pendingTurnRerun = opening
+        // A journal can end between any pair of lifecycle events. Clear all
+        // live-only status and make every request left in `running` explicit
+        // so a stale request can never remain the dashboard's active one.
+        for index in modelRequests.indices {
+            if case .running = modelRequests[index].outcome {
+                modelRequests[index].outcome = .interrupted
+            }
         }
+
+        if let turn = activeTurn {
+            if let opening = turn.opening, !turn.responded {
+                pendingTurnRerun = opening
+            }
+        }
+        activeTurn = nil
+        phase = .idle
+        currentToolName = nil
+    }
+
+    /// Deterministic timestamp for legacy events that predate per-tool timing.
+    private func replayTimestamp(for timestamp: Date?) -> Date {
+        timestamp ?? activeTurn?.startedAt ?? Date(timeIntervalSince1970: 0)
+    }
+
+    /// Value-oriented reducer form used by projections and tests.
+    public func applying(_ event: AgentEvent, maxMemoryFragments: Int) -> AgentState {
+        var next = self
+        next.apply(event, maxMemoryFragments: maxMemoryFragments)
+        return next
     }
 }

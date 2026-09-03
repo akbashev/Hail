@@ -17,6 +17,7 @@ public actor ModelRouter {
     private let projectRootPath: String?
     private let mcpServerConfiguration: MCPServerConfiguration?
     private let modelEndpointProvider: ModelEndpointProvider?
+    private let configuration: ModelRouterConfiguration
     private var cache: [CacheKey: any ModelEndpoint] = [:]
 
     private struct CacheKey: Hashable, Sendable {
@@ -28,10 +29,12 @@ public actor ModelRouter {
     }
 
     public init(
+        configuration: ModelRouterConfiguration,
         projectRootPath: String? = nil,
         mcpServerConfiguration: MCPServerConfiguration? = nil,
         modelEndpointProvider: ModelEndpointProvider? = nil
     ) {
+        self.configuration = configuration
         self.projectRootPath = projectRootPath
         self.mcpServerConfiguration = mcpServerConfiguration
         self.modelEndpointProvider = modelEndpointProvider
@@ -164,13 +167,10 @@ public actor ModelRouter {
 
     /// Returns the model identifier that should actually be used.
     ///
-    /// Empty strings are rewritten to the shared default.
+    /// The router only normalizes surrounding whitespace. Model defaults are
+    /// application configuration and must be resolved before this boundary.
     private func effectiveModelIdentifier(_ model: String) -> String {
-        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            return defaultAgentModel
-        }
-        return trimmed
+        model.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func makeEndpoint(
@@ -183,6 +183,9 @@ public actor ModelRouter {
         authority: (any Authority)? = nil
     ) throws(ModelRouterError) -> any ModelEndpoint {
         let effectiveModel = effectiveModelIdentifier(model)
+        guard !effectiveModel.isEmpty else {
+            throw ModelRouterError.invalidRoute(.missingModel(""))
+        }
         if let endpoint = modelEndpointProvider?(
             ModelEndpointRequest(
                 model: effectiveModel,
@@ -196,40 +199,14 @@ public actor ModelRouter {
         ) {
             return endpoint
         }
-        let parts = effectiveModel.split(separator: "/")
-        let provider = parts.first.map(String.init) ?? effectiveModel
-        let modelName = parts.dropFirst().joined(separator: "/")
+        let route = try Self.parseRoute(effectiveModel)
+        let provider = route.provider
+        let modelName = route.model
         let providerContextLabel = contextID?.rawValue
 
         switch provider {
-        case "codex":
-            return CodexAppServerEndpoint(
-                model: modelName.isEmpty ? "gpt-5.6-sol" : modelName,
-                workingDirectory: workingDirectory,
-                agentID: agentID,
-                contextLabel: providerContextLabel,
-                mcpServerConfiguration: mcpServerConfiguration,
-                executionPolicy: executionPolicy,
-                resumeSession: resumeSession,
-                authority: authority
-            )
-
-        case "kimi-code":
-            return KimiCodeEndpoint(
-                model: modelName.isEmpty ? "kimi-for-coding" : modelName,
-                workingDirectory: workingDirectory,
-                agentID: agentID,
-                contextLabel: providerContextLabel,
-                mcpServerConfiguration: mcpServerConfiguration,
-                executionPolicy: executionPolicy,
-                resumeSession: resumeSession,
-                authority: authority
-            )
-
-        case "claude":
-            // An empty model name defers to the user's own `claude` CLI default
-            // model rather than forcing one here.
-            return ClaudeCliEndpoint(
+        case .codex:
+            return try CodexAppServerEndpoint(
                 model: modelName,
                 workingDirectory: workingDirectory,
                 agentID: agentID,
@@ -240,88 +217,108 @@ public actor ModelRouter {
                 authority: authority
             )
 
-        case "moonshot":
-            guard let apiKey = ProcessInfo.processInfo.environment["MOONSHOT_API_KEY"] else {
-                throw ModelRouterError.missingAPIKey("MOONSHOT_API_KEY")
-            }
-            return AnyLanguageModelEndpoint(
-                languageModel: OpenAILanguageModel(
-                    baseURL: URL(string: "https://api.moonshot.ai/v1/")!,
-                    apiKey: apiKey,
-                    model: modelName.isEmpty ? "kimi-k2.5" : modelName
-                ),
-                modelIdentifier: modelName.isEmpty ? "kimi-k2.5" : modelName,
-                temperature: 0.7
+        case .kimiCode:
+            return try KimiCodeEndpoint(
+                model: modelName,
+                workingDirectory: workingDirectory,
+                agentID: agentID,
+                contextLabel: providerContextLabel,
+                mcpServerConfiguration: mcpServerConfiguration,
+                executionPolicy: executionPolicy,
+                resumeSession: resumeSession,
+                authority: authority
             )
 
-        case "openai":
-            guard let apiKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"] else {
-                throw ModelRouterError.missingAPIKey("OPENAI_API_KEY")
-            }
+        case .claude:
+            return try ClaudeCliEndpoint(
+                model: modelName,
+                workingDirectory: workingDirectory,
+                agentID: agentID,
+                contextLabel: providerContextLabel,
+                mcpServerConfiguration: mcpServerConfiguration,
+                executionPolicy: executionPolicy,
+                resumeSession: resumeSession,
+                authority: authority
+            )
+
+        case .moonshot:
+            let apiKey = try configuration.apiKey(for: .moonshot)
+            let baseURL = try configuration.baseURL(for: .moonshot)
+            return AnyLanguageModelEndpoint(
+                languageModel: OpenAILanguageModel(
+                    baseURL: baseURL,
+                    apiKey: apiKey,
+                    model: modelName
+                ),
+                modelIdentifier: modelName,
+                temperature: configuration.temperature
+            )
+
+        case .openAI:
+            let apiKey = try configuration.apiKey(for: .openAI)
             return AnyLanguageModelEndpoint(
                 languageModel: OpenAILanguageModel(
                     apiKey: apiKey,
-                    model: modelName.isEmpty ? "gpt-5.5" : modelName
+                    model: modelName
                 ),
-                modelIdentifier: modelName.isEmpty ? "gpt-5.5" : modelName,
-                temperature: 0.7
+                modelIdentifier: modelName,
+                temperature: configuration.temperature
             )
 
-        case "anthropic":
-            guard let apiKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] else {
-                throw ModelRouterError.missingAPIKey("ANTHROPIC_API_KEY")
-            }
+        case .anthropic:
+            let apiKey = try configuration.apiKey(for: .anthropic)
             return AnyLanguageModelEndpoint(
                 languageModel: AnthropicLanguageModel(
                     apiKey: apiKey,
-                    model: modelName.isEmpty ? "claude-sonnet-4-20250514" : modelName
+                    model: modelName
                 ),
-                modelIdentifier: modelName.isEmpty ? "claude-sonnet-4-20250514" : modelName,
-                temperature: 0.7
+                modelIdentifier: modelName,
+                temperature: configuration.temperature
             )
 
-        case "gemini":
-            guard let apiKey = ProcessInfo.processInfo.environment["GEMINI_API_KEY"] else {
-                throw ModelRouterError.missingAPIKey("GEMINI_API_KEY")
-            }
+        case .gemini:
+            let apiKey = try configuration.apiKey(for: .gemini)
             return AnyLanguageModelEndpoint(
                 languageModel: GeminiLanguageModel(
                     apiKey: apiKey,
-                    model: modelName.isEmpty ? "gemini-2.5-pro" : modelName
+                    model: modelName
                 ),
-                modelIdentifier: modelName.isEmpty ? "gemini-2.5-pro" : modelName,
-                temperature: 0.7
+                modelIdentifier: modelName,
+                temperature: configuration.temperature
             )
 
-        case "ollama":
-            return AnyLanguageModelEndpoint(
-                languageModel: OllamaLanguageModel(
-                    model: modelName.isEmpty ? "qwen2.5" : modelName
-                ),
-                modelIdentifier: modelName.isEmpty ? "qwen2.5" : modelName,
-                temperature: 0.7
+        case .ollama:
+            let baseURL = try configuration.baseURL(for: .ollama)
+            let numContext = configuration.contextWindow(for: .ollama)
+            return OllamaEndpoint(
+                model: modelName,
+                baseURL: baseURL,
+                temperature: configuration.temperature,
+                numContext: numContext
             )
 
-        case "system":
+        case .system:
             #if canImport(FoundationModels)
                 return AnyLanguageModelEndpoint(
                     languageModel: SystemLanguageModel.default,
-                    modelIdentifier: modelName.isEmpty ? "default" : modelName,
-                    temperature: 0.7
+                    modelIdentifier: modelName,
+                    temperature: configuration.temperature
                 )
             #else
-                throw ModelRouterError.unsupportedProvider(provider)
+                throw ModelRouterError.unsupportedProvider(provider.rawValue)
             #endif
 
         default:
-            throw ModelRouterError.unknownProvider(provider)
+            throw ModelRouterError.invalidRoute(.unknownProvider(provider.rawValue))
         }
     }
-}
 
-public enum ModelRouterError: Error, Sendable, Equatable {
-    case unknownProvider(String)
-    case unsupportedProvider(String)
-    case missingAPIKey(String)
-    case missingProjectRoot
+    private static func parseRoute(_ identifier: String) throws(ModelRouterError) -> AgentModelRoute {
+        do {
+            return try AgentModelRoute(identifier: identifier)
+        } catch {
+            throw ModelRouterError.invalidRoute(error)
+        }
+    }
+
 }

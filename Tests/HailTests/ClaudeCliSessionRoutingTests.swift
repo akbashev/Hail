@@ -71,8 +71,8 @@ struct ClaudeCliSessionRoutingTests {
         let argsLog = directory.appendingPathComponent("args.log")
         let stub = try makeStub(directory: directory, promptLog: promptLog.path, argsLog: argsLog.path)
 
-        let endpoint = ClaudeCliEndpoint(
-            model: "",
+        let endpoint = try ClaudeCliEndpoint(
+            model: "claude-test",
             workingDirectory: directory.path,
             executablePath: stub.path
         )
@@ -148,8 +148,8 @@ struct ClaudeCliSessionRoutingTests {
         let argsLog = directory.appendingPathComponent("args.log")
         let stub = try makeStub(directory: directory, promptLog: promptLog.path, argsLog: argsLog.path)
 
-        let endpoint = ClaudeCliEndpoint(
-            model: "",
+        let endpoint = try ClaudeCliEndpoint(
+            model: "claude-test",
             workingDirectory: directory.path,
             executablePath: stub.path,
             resumeSession: ModelSessionResume(id: SessionID("primed-session"), identity: SessionIdentity("id-A"))
@@ -205,8 +205,8 @@ struct ClaudeCliSessionRoutingTests {
         try script.write(to: stub, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
 
-        let endpoint = ClaudeCliEndpoint(
-            model: "",
+        let endpoint = try ClaudeCliEndpoint(
+            model: "claude-test",
             workingDirectory: directory.path,
             executablePath: stub.path,
             resumeSession: ModelSessionResume(id: SessionID("dead-session"), identity: SessionIdentity("id-A"))
@@ -251,8 +251,8 @@ struct ClaudeCliSessionRoutingTests {
         try "#!/bin/sh\nexec sleep 60\n".write(to: stub, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
 
-        let endpoint = ClaudeCliEndpoint(
-            model: "",
+        let endpoint = try ClaudeCliEndpoint(
+            model: "claude-test",
             workingDirectory: directory.path,
             executablePath: stub.path,
             maxStallDuration: 2

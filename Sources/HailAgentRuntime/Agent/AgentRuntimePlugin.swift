@@ -25,6 +25,10 @@ public struct AgentDirectoryEntry: Codable, Sendable {
     }
 }
 
+public enum AgentDirectoryError: Error, Sendable, Equatable {
+    case unavailable
+}
+
 // MARK: - Singleton store
 
 /// A cluster singleton that holds the in-memory agent directory. No event
@@ -89,6 +93,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     private var actorSystem: ClusterSystem!
     private var store: AgentDirectoryStore?
     private let modelRouter: ModelRouter
+    /// Host-selected model used only when no definition provider is supplied.
+    public let defaultModel: AgentModelReference
 
     /// Optional closure that returns extra tools an agent should register.
     /// Invoked **once per turn** (the registry is rebuilt fresh each turn —
@@ -104,11 +110,15 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     public var definitionProvider: DefinitionProvider?
 
-    /// Policy used to assemble an agent's LLM context before each turn.
-    public let promptPolicy: PromptPolicy = .default
+    /// Pure transformation that assembles an agent's model request.
+    public let assemblePrompt: PromptAssembler
+
+    /// Product/host instructions rendered by the standard assembler. The
+    /// runtime supplies structure and context; the host owns its task rules.
+    public let promptInstructions: PromptAssemblyInstructions
 
     /// Optional compactor for non-session-owning endpoints (Ollama, hosted
-    /// chat APIs): consulted at turn start, its result is journaled as one
+    /// chat APIs): consulted before requests, its result is journaled as one
     /// `conversationCompacted` event. Session-owning harnesses manage their
     /// own context and are never offered compaction.
     public let contextCompactor: (any ContextCompactor)?
@@ -118,6 +128,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     public let contextProvider: AgentContextProvider?
 
     public init(
+        defaultModel: AgentModelReference,
+        routerConfiguration: ModelRouterConfiguration,
         projectRootPath: String? = nil,
         mcpServerConfiguration: MCPServerConfiguration? = nil,
         modelEndpointProvider: ModelEndpointProvider? = nil,
@@ -125,18 +137,24 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         authorityProvider: AuthorityProvider? = nil,
         definitionProvider: DefinitionProvider? = nil,
         contextProvider: AgentContextProvider? = nil,
-        contextCompactor: (any ContextCompactor)? = nil
+        contextCompactor: (any ContextCompactor)? = nil,
+        promptInstructions: PromptAssemblyInstructions = PromptAssemblyInstructions(),
+        assemblePrompt: @escaping PromptAssembler = assembleStandardPrompt
     ) {
         self.modelRouter = ModelRouter(
+            configuration: routerConfiguration,
             projectRootPath: projectRootPath,
             mcpServerConfiguration: mcpServerConfiguration,
             modelEndpointProvider: modelEndpointProvider
         )
+        self.defaultModel = defaultModel
         self.extraToolsProvider = extraToolsProvider
         self.authorityProvider = authorityProvider
         self.definitionProvider = definitionProvider
         self.contextProvider = contextProvider
         self.contextCompactor = contextCompactor
+        self.promptInstructions = promptInstructions
+        self.assemblePrompt = assemblePrompt
     }
 
     /// Resolves the effect authority for one agent. Defaults to
@@ -152,7 +170,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     public func definition(for spawnConfig: AgentSpawnConfig) async throws -> AgentDefinition {
         try await definitionProvider?(spawnConfig)
-            ?? .defaultDefinition(for: spawnConfig.agentID.role)
+            ?? .defaultDefinition(for: spawnConfig.agentID.role, model: defaultModel)
     }
 
     // MARK: Model endpoints
@@ -228,31 +246,28 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     // MARK: Agent directory
 
     public func register(entry: AgentDirectoryEntry) async throws {
-        // The directory is an in-memory singleton rebuilt on activation; if the
-        // plugin has stopped (node shutdown) a fire-and-forget caller may still
-        // tick. Degrade to a no-op instead of crashing the process.
-        guard let store else { return }
+        guard let store else { throw AgentDirectoryError.unavailable }
         try await store.register(entry: entry)
     }
 
-    public func unregister(agentID: AgentID) async {
-        guard let store else { return }
-        try? await store.unregister(agentID: agentID)
+    public func unregister(agentID: AgentID) async throws {
+        guard let store else { throw AgentDirectoryError.unavailable }
+        try await store.unregister(agentID: agentID)
     }
 
-    public func entry(forAgentID agentID: AgentID) async -> AgentDirectoryEntry? {
-        guard let store else { return nil }
-        return try? await store.entry(forAgentID: agentID)
+    public func entry(forAgentID agentID: AgentID) async throws -> AgentDirectoryEntry? {
+        guard let store else { throw AgentDirectoryError.unavailable }
+        return try await store.entry(forAgentID: agentID)
     }
 
-    public func agents(ofType role: Role) async -> [AgentDirectoryEntry] {
-        guard let store else { return [] }
-        return (try? await store.agents(ofType: role)) ?? []
+    public func agents(ofType role: Role) async throws -> [AgentDirectoryEntry] {
+        guard let store else { throw AgentDirectoryError.unavailable }
+        return try await store.agents(ofType: role)
     }
 
-    public func allAgents() async -> [AgentDirectoryEntry] {
-        guard let store else { return [] }
-        return (try? await store.allAgents()) ?? []
+    public func allAgents() async throws -> [AgentDirectoryEntry] {
+        guard let store else { throw AgentDirectoryError.unavailable }
+        return try await store.allAgents()
     }
 
     // MARK: Tool injection

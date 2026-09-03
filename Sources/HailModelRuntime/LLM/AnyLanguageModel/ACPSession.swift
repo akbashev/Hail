@@ -132,10 +132,8 @@ actor ACPSession {
     // Session setup timeouts guard against a hung `kimi-code` process. The
     // actual prompt/response loop has no timeout because model responses can
     // take minutes or longer.
-    private let initializeTimeout: TimeInterval = ProcessEnvironment.timeInterval(
-        from: "HAIL_KIMI_INITIALIZE_TIMEOUT", default: 30)
-    private let newSessionTimeout: TimeInterval = ProcessEnvironment.timeInterval(
-        from: "HAIL_KIMI_SESSION_TIMEOUT", default: 120)
+    private let initializeTimeout: TimeInterval
+    private let newSessionTimeout: TimeInterval
     private let heartbeatInterval: TimeInterval = 15
 
     // Stall watchdog. A prompt can legitimately produce no ACP traffic for a
@@ -166,10 +164,12 @@ actor ACPSession {
         agentArguments: [String],
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
+        initializeTimeout: TimeInterval? = nil,
+        newSessionTimeout: TimeInterval? = nil,
         stallTimeout: TimeInterval? = nil,
         probeTimeout: TimeInterval? = nil,
         maxStallDuration: TimeInterval? = nil
-    ) {
+    ) throws(ModelRouterError) {
         self.model = model
         self.workingDirectory = workingDirectory
         self.agentID = agentID
@@ -180,15 +180,31 @@ actor ACPSession {
         self.resumeSession = resumeSession
         self.authority = authority ?? FullAuthority()
         self.activeAuthority = self.authority
-        self.stallTimeout =
-            stallTimeout
-            ?? ProcessEnvironment.timeInterval(from: "HAIL_KIMI_STALL_TIMEOUT", default: 600)
-        self.probeTimeout =
-            probeTimeout
-            ?? ProcessEnvironment.timeInterval(from: "HAIL_KIMI_PROBE_TIMEOUT", default: 60)
-        self.maxStallDuration =
-            maxStallDuration
-            ?? ProcessEnvironment.timeInterval(from: "HAIL_KIMI_MAX_STALL_TIMEOUT", default: 1800)
+        self.initializeTimeout = try ProcessEnvironment.timeInterval(
+            override: initializeTimeout,
+            from: "HAIL_KIMI_INITIALIZE_TIMEOUT",
+            default: 30
+        )
+        self.newSessionTimeout = try ProcessEnvironment.timeInterval(
+            override: newSessionTimeout,
+            from: "HAIL_KIMI_SESSION_TIMEOUT",
+            default: 120
+        )
+        self.stallTimeout = try ProcessEnvironment.timeInterval(
+            override: stallTimeout,
+            from: "HAIL_KIMI_STALL_TIMEOUT",
+            default: 600
+        )
+        self.probeTimeout = try ProcessEnvironment.timeInterval(
+            override: probeTimeout,
+            from: "HAIL_KIMI_PROBE_TIMEOUT",
+            default: 60
+        )
+        self.maxStallDuration = try ProcessEnvironment.timeInterval(
+            override: maxStallDuration,
+            from: "HAIL_KIMI_MAX_STALL_TIMEOUT",
+            default: 1800
+        )
     }
 
     /// Sends a prompt to the kimi-code ACP session and returns the final text
@@ -330,7 +346,7 @@ actor ACPSession {
             await reset()
             sessionIdentity = identity
             lastMemorySnapshot = memorySnapshot
-            if let resumed = try? await resumeJournaledSession(identity: identity), resumed {
+            if try await resumeJournaledSession(identity: identity) {
                 // The CLI session already holds the history — only the delta
                 // is new. Memory is re-sent once because the journaled
                 // snapshot may postdate what the session last saw.
@@ -721,7 +737,7 @@ actor ACPSession {
         if !model.isEmpty {
             logger.info("Setting ACP model", metadata: ["model": .string(model)])
             let modelName = self.model
-            _ = try? await client.setModel(
+            _ = try await client.setModel(
                 sessionId: response.sessionId,
                 modelId: modelName
             )
@@ -830,7 +846,10 @@ actor ACPSession {
             sessionId = SessionId(resume.id.rawValue)
             if !model.isEmpty {
                 let modelName = model
-                _ = try? await client.setModel(sessionId: SessionId(resume.id.rawValue), modelId: modelName)
+                _ = try await client.setModel(
+                    sessionId: SessionId(resume.id.rawValue),
+                    modelId: modelName
+                )
             }
             logger.info(
                 "Resumed ACP session",

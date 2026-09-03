@@ -60,7 +60,7 @@ struct KimiCodeStallWatchdogTests {
         try stubScript.write(to: stub, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/bin/sh",
@@ -112,7 +112,7 @@ struct KimiCodeStallWatchdogTests {
         try aliveButWedgedScript.write(to: stub, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/bin/sh",

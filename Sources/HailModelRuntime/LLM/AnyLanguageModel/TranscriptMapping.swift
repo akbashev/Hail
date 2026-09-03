@@ -14,7 +14,7 @@ enum TranscriptMapping {
     /// that should be passed to the model. If the last message is a user message,
     /// it becomes the prompt; otherwise an empty prompt is used and the history
     /// is left in the transcript.
-    static func transcriptAndPrompt(from messages: [LLMMessage]) -> (Transcript, Prompt) {
+    static func transcriptAndPrompt(from messages: [LLMMessage]) throws -> (Transcript, Prompt) {
         var entries: [Transcript.Entry] = []
         var toolCallNames: [String: String] = [:]
 
@@ -32,11 +32,11 @@ enum TranscriptMapping {
             case .assistant:
                 flushSystemSegments(into: &entries, segments: &systemSegments, toolNames: toolCallNames)
                 if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
-                    let calls = toolCalls.map { call in
+                    let calls = try toolCalls.map { call in
                         Transcript.ToolCall(
                             id: call.id,
                             toolName: call.function.name,
-                            arguments: (try? GeneratedContent(json: call.function.arguments)) ?? GeneratedContent("{}")
+                            arguments: try GeneratedContent(json: call.function.arguments)
                         )
                     }
                     for call in toolCalls {
@@ -90,13 +90,5 @@ enum TranscriptMapping {
                     toolDefinitions: []
                 )))
         segments.removeAll(keepingCapacity: true)
-    }
-}
-
-// MARK: - GeneratedContent fallback
-
-extension GeneratedContent {
-    fileprivate init?(_ json: String) {
-        try? self.init(json: json)
     }
 }

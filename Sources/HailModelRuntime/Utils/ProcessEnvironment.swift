@@ -8,14 +8,46 @@
 /// Named `ProcessEnvironment` to avoid colliding with swift-subprocess's
 /// `Environment` in files that import both.
 enum ProcessEnvironment {
-    /// Reads a duration in seconds from an environment variable, falling back
-    /// to `value` when the variable is unset or not an integer. Endpoints call
-    /// this once at init and store the result, so the environment is consulted
-    /// exactly once per instance — never mid-turn.
-    static func timeInterval(from key: String, default value: TimeInterval) -> TimeInterval {
-        if let raw = ProcessInfo.processInfo.environment[key], let seconds = Int(raw) {
-            return TimeInterval(seconds)
+    static func timeInterval(
+        override: TimeInterval?,
+        from key: String,
+        default value: TimeInterval
+    ) throws(ModelRouterError) -> TimeInterval {
+        if let override {
+            guard override.isFinite, override > 0 else {
+                throw .invalidEnvironmentValue(key: "explicit \(key) override", value: "\(override)")
+            }
+            return override
         }
-        return value
+        return try timeInterval(from: key, default: value)
+    }
+
+    /// Reads a positive duration in seconds. Absence selects the documented
+    /// default; an explicitly malformed or non-positive value is invalid
+    /// configuration and never masquerades as absence.
+    static func timeInterval(
+        from key: String,
+        default value: TimeInterval
+    ) throws(ModelRouterError) -> TimeInterval {
+        try timeInterval(
+            ProcessInfo.processInfo.environment[key],
+            key: key,
+            default: value
+        )
+    }
+
+    /// Pure parser used by the process boundary and its tests.
+    static func timeInterval(
+        _ raw: String?,
+        key: String,
+        default value: TimeInterval
+    ) throws(ModelRouterError) -> TimeInterval {
+        guard let raw else {
+            return value
+        }
+        guard let seconds = TimeInterval(raw), seconds.isFinite, seconds > 0 else {
+            throw .invalidEnvironmentValue(key: key, value: raw)
+        }
+        return seconds
     }
 }

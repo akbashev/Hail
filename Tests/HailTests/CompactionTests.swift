@@ -36,6 +36,21 @@ struct CompactionFoldTests {
         #expect(state.conversationThread.count == 2)
     }
 
+    @Test("assistant narration accompanying a tool call survives replay")
+    func assistantToolNarrationIsRetained() {
+        var state = AgentState(agentID: agentID)
+        state.apply(
+            .assistantText(content: "I will inspect the file first.", at: Date(timeIntervalSince1970: 1)),
+            maxMemoryFragments: 10
+        )
+        guard case .text(let sender, let content, _) = state.conversationThread.first else {
+            Issue.record("Expected assistant narration in the replayed thread")
+            return
+        }
+        #expect(sender == agentID.rawValue)
+        #expect(content == "I will inspect the file first.")
+    }
+
     @Test("a second compaction replaces the summary — the fold is rolling")
     func secondCompactionReplacesSummary() {
         var state = state(threadCount: 5)
@@ -68,21 +83,24 @@ struct CompactionFoldTests {
 }
 
 /// The assembled prompt carries the rolling summary as one system line.
-@Suite("PromptPolicy compaction summary")
-struct PromptPolicySummaryTests {
+@Suite("Prompt assembly compaction summary")
+struct PromptAssemblySummaryTests {
     private let agentID = AgentID(role: Role("scout"), contextID: .main)
 
     private func context(
         summary: String?,
         contextID: AgentContextID = .main,
         thread: [ChatMessage] = []
-    ) -> PromptContext {
+    ) throws -> PromptContext {
         let id = AgentID(role: agentID.role, contextID: contextID)
         return PromptContext(
             agentID: id,
             definition: AgentDefinition(
                 role: id.role,
-                behavior: .init(systemPrompt: "sys", model: "fake"),
+                behavior: .init(
+                    systemPrompt: "sys",
+                    model: try AgentModelReference("test/fake")
+                ),
                 limits: .init()
             ),
             projectRootPath: "/tmp",
@@ -94,8 +112,10 @@ struct PromptPolicySummaryTests {
     }
 
     @Test("summary is injected into the assembled context")
-    func summaryInjected() {
-        let messages = PromptPolicy.default.build(context(summary: "user hates prod on Fridays"))
+    func summaryInjected() throws {
+        let messages = assembleStandardPrompt(
+            try context(summary: "user hates prod on Fridays")
+        ).messages
         #expect(
             messages.contains {
                 $0.role == .system && $0.content.contains("user hates prod on Fridays")
@@ -103,32 +123,45 @@ struct PromptPolicySummaryTests {
     }
 
     @Test("no summary, no summary line")
-    func noSummaryNoLine() {
-        let messages = PromptPolicy.default.build(context(summary: nil))
+    func noSummaryNoLine() throws {
+        let messages = assembleStandardPrompt(try context(summary: nil)).messages
         #expect(!messages.contains { $0.content.contains("Earlier conversation, summarized:") })
     }
 
+    @Test("the flat prompt view is derived from prepared request sections")
+    func preparedRequestIsThePromptSourceOfTruth() throws {
+        let context = try context(
+            summary: "v1",
+            thread: [.text(sender: "user", content: "hello", timestamp: Date())]
+        )
+        let prepared = assembleStandardPrompt(context)
+        let messages = prepared.messages
+
+        #expect(messages.map(\.content) == prepared.messages.map(\.content))
+        #expect(messages.map(\.role) == prepared.messages.map(\.role))
+    }
+
     @Test("chat prompt preserves more than twenty unarchived messages")
-    func chatDoesNotSilentlyTruncate() {
+    func chatDoesNotSilentlyTruncate() throws {
         let thread = (0..<25).map {
             ChatMessage.text(sender: "user", content: "message-\($0)", timestamp: Date())
         }
-        let messages = PromptPolicy.default.build(context(summary: nil, thread: thread))
+        let messages = assembleStandardPrompt(try context(summary: nil, thread: thread)).messages
 
         #expect(messages.contains { $0.content == "message-0" })
         #expect(messages.contains { $0.content == "message-24" })
     }
 
     @Test("task prompt preserves context before the latest user instruction")
-    func taskDoesNotSilentlyTruncate() {
+    func taskDoesNotSilentlyTruncate() throws {
         let thread: [ChatMessage] = [
             .text(sender: "user", content: "original constraint", timestamp: Date()),
             .text(sender: agentID.rawValue, content: "acknowledged", timestamp: Date()),
             .text(sender: "user", content: "continue", timestamp: Date()),
         ]
-        let messages = PromptPolicy.default.build(
-            context(summary: nil, contextID: AgentContextID("task-1"), thread: thread)
-        )
+        let messages = assembleStandardPrompt(
+            try context(summary: nil, contextID: AgentContextID("task-1"), thread: thread)
+        ).messages
 
         #expect(messages.contains { $0.content == "original constraint" })
         #expect(messages.contains { $0.content == "continue" })
@@ -158,6 +191,23 @@ struct ReasoningLoopCompactionTests {
                 continuation.yield(.generated(response))
                 continuation.finish()
             }
+        }
+    }
+
+    private struct TokenCountingError: Error, Equatable {}
+
+    private struct FailingTokenCountEndpoint: ModelEndpoint {
+        let model = "counting-fails"
+        let contextOwnership: ModelContextOwnership = .runtime
+        let tokenCounting: TokenCounting = .available { _, _ in
+            throw TokenCountingError()
+        }
+
+        func stream(
+            messages: [LLMMessage],
+            tools: [LLMToolSchema]?
+        ) -> AsyncStream<ModelEvent<String>> {
+            AsyncStream { $0.finish() }
         }
     }
 
@@ -198,21 +248,20 @@ struct ReasoningLoopCompactionTests {
     }
 
     private struct FakeCompactor: ContextCompactor {
-        let body: @Sendable (
-            PromptContext,
-            [LLMMessage],
-            [LLMToolSchema],
-            @Sendable ([LLMMessage]) async throws -> String
-        ) async throws
-            -> CompactionResult?
+        let body:
+            @Sendable (
+                PromptContext,
+                PreparedRequest,
+                @Sendable ([LLMMessage]) async throws -> String
+            ) async throws
+                -> CompactionDecision
 
         func compact(
             context: PromptContext,
-            messages: [LLMMessage],
-            tools: [LLMToolSchema],
+            request: PreparedRequest,
             summarize: @Sendable ([LLMMessage]) async throws -> String
-        ) async throws -> CompactionResult? {
-            try await body(context, messages, tools, summarize)
+        ) async throws -> CompactionDecision {
+            try await body(context, request, summarize)
         }
     }
 
@@ -237,21 +286,33 @@ struct ReasoningLoopCompactionTests {
 
     // MARK: Helpers
 
-    private func makeContext(thread: [ChatMessage]) -> TurnContext {
-        TurnContext(
-            messages: [],
-            promptContext: PromptContext(
-                agentID: agentID,
-                definition: AgentDefinition(
-                    role: agentID.role,
-                    behavior: .init(systemPrompt: "sys", model: "fake"),
-                    limits: .init()
+    private func makeContext(thread: [ChatMessage]) throws -> TurnContext {
+        let promptContext = PromptContext(
+            agentID: agentID,
+            definition: AgentDefinition(
+                role: agentID.role,
+                behavior: .init(
+                    systemPrompt: "sys",
+                    model: try AgentModelReference("test/fake")
                 ),
-                projectRootPath: "/tmp",
-                workingMemory: [],
-                conversationThread: thread,
-                contextManifest: ContextManifest(items: [])
+                limits: .init()
             ),
+            projectRootPath: "/tmp",
+            workingMemory: [],
+            conversationThread: thread,
+            contextManifest: ContextManifest(items: [])
+        )
+        return TurnContext(
+            preparedRequest: PreparedRequest(
+                prefix: [],
+                conversation: thread.enumerated().map {
+                    PreparedRequest.ConversationEntry(
+                        sourceIndex: $0.offset,
+                        message: LLMMessage(role: .user, content: "fixture-\($0.offset)")
+                    )
+                }
+            ),
+            promptContext: promptContext,
             workingMemory: [],
             sessionIdentity: SessionIdentity(rawValue: "identity"),
             modelSessionID: nil,
@@ -263,10 +324,10 @@ struct ReasoningLoopCompactionTests {
         recorder: Recorder,
         contexts: [TurnContext],
         compactor: (any ContextCompactor)?
-    ) -> ReasoningLoop {
+    ) -> ReasoningLoop<ContinuousClock> {
         final class Index: @unchecked Sendable { var value = 0 }
         let index = Index()
-        return ReasoningLoop(
+        return ReasoningLoop<ContinuousClock>(
             agentID: agentID,
             authority: FullAuthority(),
             context: {
@@ -279,7 +340,8 @@ struct ReasoningLoopCompactionTests {
             tools: { ToolRegistry(authority: FullAuthority()) },
             emit: { await recorder.record($0) },
             recordActivity: { _ in },
-            compactor: compactor
+            compactor: compactor,
+            clock: ContinuousClock()
         )
     }
 
@@ -288,29 +350,47 @@ struct ReasoningLoopCompactionTests {
     @Test("a compaction result is journaled atomically and the context rebuilt")
     func compactionJournaledAndContextRebuilt() async throws {
         let recorder = Recorder()
-        let original = makeContext(thread: [
+        let original = try makeContext(thread: [
             .text(sender: "user", content: "m1", timestamp: Date()),
             .text(sender: "user", content: "m2", timestamp: Date()),
         ])
-        let rebuilt = makeContext(thread: [])
-        let compactor = FakeCompactor { _, _, _, summarize in
+        let rebuilt = try makeContext(thread: [])
+        let compactor = FakeCompactor { _, _, summarize in
             await recorder.compacted()
             // The runtime's summarize reduces the endpoint stream to text.
             let summary = try await summarize([LLMMessage(role: .user, content: "summarize me")])
-            return CompactionResult(summary: summary, archivedCount: 2)
+            return .compacted(
+                ConversationCompaction(summary: summary, archivedCount: 2)
+            )
         }
         let loop = makeLoop(recorder: recorder, contexts: [rebuilt], compactor: compactor)
 
-        let result = try await loop.compactIfNeeded(turnContext: original, endpoint: FakeEndpoint(response: "rolled summary"))
+        let result = try await loop.compactIfNeeded(
+            turnContext: original, endpoint: FakeEndpoint(response: "rolled summary"))
 
         let events = await recorder.events
-        #expect(events.count == 1)
-        guard case .conversationCompacted(let archivedCount, let summary) = events.first else {
-            Issue.record("Expected conversationCompacted, got \(String(describing: events.first))")
+        let compactions = events.compactMap { event -> (Int, String)? in
+            guard case .conversationCompacted(let archivedCount, let summary) = event else { return nil }
+            return (archivedCount, summary)
+        }
+        #expect(compactions.count == 1)
+        guard let (archivedCount, summary) = compactions.first else {
+            Issue.record("Expected conversationCompacted, got \(events)")
             return
         }
         #expect(archivedCount == 2)
         #expect(summary == "rolled summary")
+        let requests = events.compactMap { event -> ModelRequestRecord? in
+            guard case .modelRequestStarted(let record) = event else { return nil }
+            return record
+        }
+        #expect(requests.count == 1)
+        #expect(requests.first?.kind == .compaction)
+        #expect(
+            events.contains { event in
+                if case .modelRequestCompleted = event { return true }
+                return false
+            })
         // The loop re-built the context after journaling: context() was
         // called exactly once (the rebuild), serving the trimmed context.
         #expect(await recorder.contextCalls == 1)
@@ -320,10 +400,12 @@ struct ReasoningLoopCompactionTests {
     @Test("session-owning endpoints are never offered compaction")
     func sessionOwningEndpointExcluded() async throws {
         let recorder = Recorder()
-        let context = makeContext(thread: [])
-        let compactor = FakeCompactor { _, _, _, _ in
+        let context = try makeContext(thread: [])
+        let compactor = FakeCompactor { _, _, _ in
             await recorder.compacted()
-            return CompactionResult(summary: "x", archivedCount: 1)
+            return .compacted(
+                ConversationCompaction(summary: "x", archivedCount: 1)
+            )
         }
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
@@ -337,9 +419,9 @@ struct ReasoningLoopCompactionTests {
     }
 
     @Test("an endpoint-session declaration requires the session contract")
-    func inconsistentContextOwnershipRejected() async {
+    func inconsistentContextOwnershipRejected() async throws {
         let recorder = Recorder()
-        let context = makeContext(thread: [])
+        let context = try makeContext(thread: [])
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: nil)
 
         await #expect(throws: AgentRuntimeError.self) {
@@ -350,17 +432,17 @@ struct ReasoningLoopCompactionTests {
         }
     }
 
-    @Test("a nil result journals nothing and keeps the context")
+    @Test("an unchanged decision journals nothing and keeps the context")
     func noCompactionNoJournal() async throws {
         let recorder = Recorder()
-        let context = makeContext(thread: [])
-        let compactor = FakeCompactor { _, _, _, _ in nil }
+        let context = try makeContext(thread: [])
+        let compactor = FakeCompactor { _, _, _ in .unchanged }
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
         let result = try await loop.compactIfNeeded(turnContext: context, endpoint: FakeEndpoint(response: "unused"))
 
         #expect(await recorder.events.isEmpty)
-        // A nil result never triggers the post-compaction context rebuild.
+        // An unchanged decision never triggers the post-compaction context rebuild.
         #expect(await recorder.contextCalls == 0)
         #expect(result.promptContext.conversationThread.isEmpty)
     }
@@ -368,8 +450,11 @@ struct ReasoningLoopCompactionTests {
     @Test("budgeting receives the complete projected request and tool schemas")
     func completeRequestIsBudgeted() async throws {
         let recorder = Recorder()
-        var context = makeContext(thread: [])
-        context.messages = [LLMMessage(role: .system, content: "base prompt")]
+        var context = try makeContext(thread: [])
+        context.preparedRequest = PreparedRequest(
+            prefix: [LLMMessage(role: .system, content: "base prompt")],
+            conversation: []
+        )
         let added = LLMMessage(role: .user, content: "current turn")
         let tool = LLMToolSchema(
             type: "function",
@@ -379,9 +464,9 @@ struct ReasoningLoopCompactionTests {
                 parameters: .init(type: "object", properties: nil, required: nil)
             )
         )
-        let compactor = FakeCompactor { _, messages, tools, _ in
-            await recorder.budgeted(messages: messages, tools: tools)
-            return nil
+        let compactor = FakeCompactor { _, request, _ in
+            await recorder.budgeted(messages: request.messages, tools: request.tools)
+            return .unchanged
         }
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
@@ -396,27 +481,46 @@ struct ReasoningLoopCompactionTests {
         #expect(await recorder.budgetedToolCount == 1)
     }
 
-    @Test("a compactor failure degrades to the uncompacted context")
-    func compactorFailureDegrades() async throws {
-        struct CompactionError: Error {}
+    @Test("a compactor failure propagates instead of sending oversized context")
+    func compactorFailurePropagates() async throws {
+        struct CompactionError: Error, Equatable {}
         let recorder = Recorder()
-        let context = makeContext(thread: [
+        let context = try makeContext(thread: [
             .text(sender: "user", content: "m1", timestamp: Date())
         ])
-        let compactor = FakeCompactor { _, _, _, _ in throw CompactionError() }
+        let compactor = FakeCompactor { _, _, _ in throw CompactionError() }
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
-        let result = try await loop.compactIfNeeded(turnContext: context, endpoint: FakeEndpoint(response: "unused"))
-
+        await #expect(throws: CompactionError.self) {
+            try await loop.compactIfNeeded(
+                turnContext: context,
+                endpoint: FakeEndpoint(response: "unused")
+            )
+        }
         #expect(await recorder.events.isEmpty)
-        #expect(result.promptContext.conversationThread.count == 1)
+    }
+
+    @Test("failure of a supported token counter propagates")
+    func supportedTokenCounterFailurePropagates() async throws {
+        let recorder = Recorder()
+        let context = try makeContext(thread: [])
+        let compactor = FakeCompactor { _, _, _ in .unchanged }
+        let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
+
+        await #expect(throws: TokenCountingError.self) {
+            try await loop.compactIfNeeded(
+                turnContext: context,
+                endpoint: FailingTokenCountEndpoint()
+            )
+        }
+        #expect(await recorder.events.isEmpty)
     }
 
     @Test("compactor cancellation aborts the turn")
-    func compactorCancellationPropagates() async {
+    func compactorCancellationPropagates() async throws {
         let recorder = Recorder()
-        let context = makeContext(thread: [])
-        let compactor = FakeCompactor { _, _, _, _ in throw CancellationError() }
+        let context = try makeContext(thread: [])
+        let compactor = FakeCompactor { _, _, _ in throw CancellationError() }
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
         await #expect(throws: CancellationError.self) {

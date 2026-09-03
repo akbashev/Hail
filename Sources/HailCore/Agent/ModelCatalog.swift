@@ -4,6 +4,26 @@
     import Foundation
 #endif
 
+/// A model identifier is opaque to the domain, but typed so arbitrary strings
+/// cannot be confused with IDs from another part of the configuration.
+public struct AgentModelID: RawRepresentable, Codable, Sendable, Hashable,
+    ExpressibleByStringLiteral, CustomStringConvertible
+{
+    public let rawValue: String
+
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public init(stringLiteral value: String) { self.init(rawValue: value) }
+    public var description: String { rawValue }
+
+    public init(from decoder: Decoder) throws {
+        self.rawValue = try decoder.singleValueContainer().decode(String.self)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 /// Suggested model names per provider, used by the UI to hint at known model
 /// identifiers in the agent edit form.
 ///
@@ -15,44 +35,22 @@
 /// ``HailConfiguration/modelCatalog``.
 public struct ModelCatalog: Codable, Sendable, Hashable {
     /// Provider name → suggested model names, in display order.
-    public var suggestions: [String: [String]]
+    /// Provider names are strings because they are configuration keys; model
+    /// values themselves remain typed IDs.
+    public var suggestions: [String: [AgentModelID]]
 
-    public init(suggestions: [String: [String]]) {
+    public init(suggestions: [String: [AgentModelID]]) {
         self.suggestions = suggestions
     }
 
-    /// Built-in suggestions: the Kimi Code model tiers plus current models for
-    /// the other providers (each provider's ``ModelRouter`` fallback for an
-    /// empty model name is always included).
-    public static let `default` = ModelCatalog(suggestions: [
-        "kimi-code": ["k3", "kimi-for-coding", "kimi-for-coding-highspeed"],
-        "claude": ["opus", "sonnet", "haiku", "fable"],
-        "moonshot": ["kimi-k2.5"],
-        "openai": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini"],
-        "anthropic": ["claude-sonnet-4-20250514"],
-        "gemini": ["gemini-2.5-pro"],
-        "ollama": ["qwen2.5"],
-        // Codex CLI's current recommended family plus currently supported
-        // previous-generation models. `gpt-5.6` is the CLI alias for Sol;
-        // Spark is a Pro-only preview model. GPT-5.4 and GPT-5.4 mini remain
-        // available until their announced August 31, 2026 retirement for
-        // ChatGPT-authenticated Codex sessions.
-        "codex": [
-            "gpt-5.6",
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
-            "gpt-5.3-codex-spark",
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-        ],
-    ])
+    public init(suggestions: [String: [String]]) {
+        self.suggestions = suggestions.mapValues { $0.map(AgentModelID.init(rawValue:)) }
+    }
 
     /// Returns a catalog that also suggests the given additional model names.
     /// Per provider the union is deduplicated, keeping built-in suggestions
     /// first and appending new ones in their given order.
-    public func merged(with additions: [String: [String]]) -> ModelCatalog {
+    public func merged(with additions: [String: [AgentModelID]]) -> ModelCatalog {
         var merged = suggestions
         for (provider, names) in additions {
             var seen = Set(merged[provider] ?? [])
@@ -65,8 +63,16 @@ public struct ModelCatalog: Codable, Sendable, Hashable {
         return ModelCatalog(suggestions: merged)
     }
 
+    public func merged(with additions: [String: [String]]) -> ModelCatalog {
+        merged(with: additions.mapValues { $0.map(AgentModelID.init(rawValue:)) })
+    }
+
     /// Suggested model names for a provider, in display order.
-    public func suggestions(for provider: String) -> [String] {
+    public func suggestions(for provider: String) -> [AgentModelID] {
         suggestions[provider] ?? []
+    }
+
+    public func modelNames(for provider: String) -> [String] {
+        suggestions(for: provider).map(\.rawValue)
     }
 }

@@ -286,6 +286,13 @@ struct ACPModelEndpoint: ModelEndpoint {
                         "size": .string("\(usageUpdate.size)"),
                     ]
                 )
+                continuation.yield(
+                    .contextUsage(
+                        ContextUsage(
+                            usedTokens: usageUpdate.used,
+                            limitTokens: usageUpdate.size,
+                            source: .reported
+                        )))
             }
         }
 
@@ -297,6 +304,19 @@ struct ACPModelEndpoint: ModelEndpoint {
         // here until the turn ends naturally.
         try Task.checkCancellation()
         let response = try await responseTask.value
+        if let usage = response.usage {
+            continuation.yield(
+                .usage(
+                    ModelUsage(
+                        inputTokens: usage.inputTokens,
+                        outputTokens: usage.outputTokens,
+                        reasoningTokens: usage.thoughtTokens,
+                        cachedReadTokens: usage.cachedReadTokens,
+                        cachedWriteTokens: usage.cachedWriteTokens,
+                        totalTokens: usage.totalTokens,
+                        source: .reported
+                    )))
+        }
         logger.info(
             "\(harness) turn completed",
             metadata: ["stopReason": .string("\(response.stopReason)")]
@@ -309,7 +329,13 @@ struct ACPModelEndpoint: ModelEndpoint {
         case .plainText:
             // Plain-text outputs (String, ChatResponse) decode from the
             // collected stream text; no reporting tool is involved.
-            return try? T(GeneratedContent(kind: .string(collectedText)))
+            do {
+                return try T(GeneratedContent(kind: .string(collectedText)))
+            } catch {
+                throw ModelEndpointError.invalidResponse(
+                    "ACP plain-text output did not satisfy the response contract: \(error)"
+                )
+            }
         case .reportTool:
             return nil
         }

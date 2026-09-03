@@ -81,7 +81,7 @@ struct ACPSessionTurnRoutingTests {
         let logURL = directory.appendingPathComponent("prompts.log")
         let stub = try makeStub(directory: directory, logPath: logURL.path)
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/usr/bin/python3",

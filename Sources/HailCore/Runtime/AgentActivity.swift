@@ -38,6 +38,10 @@ public enum AgentActivity: Codable, Sendable, Equatable {
         case reasoning(String)
         case text(String)
         case tool(name: String)
+        /// Token usage reported by the model provider for the current request.
+        case usage(ModelUsage)
+        /// Current context occupancy reported by a session-owning endpoint.
+        case contextUsage(ContextUsage)
     }
 
     /// A turn unfolding (see ``Turn``).

@@ -33,12 +33,16 @@ public struct KimiCodeEndpoint: ModelEndpoint {
         // `-y`/`--yolo` and `--auto` auto-approves kimi-code's own permission
         // prompts so the agent can run non-interactively as a Hail subprocess.
         agentArguments: [String]? = nil
-    ) {
+    ) throws(ModelRouterError) {
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            throw .invalidRoute(.missingModel(AgentModelProvider.kimiCode.rawValue))
+        }
         self.core = ACPModelEndpoint(
-            harness: "kimi-code",
+            harness: AgentModelProvider.kimiCode.rawValue,
             model: model,
             executionPolicy: executionPolicy,
-            session: ACPSession(
+            session: try ACPSession(
                 model: model,
                 workingDirectory: workingDirectory,
                 agentID: agentID,

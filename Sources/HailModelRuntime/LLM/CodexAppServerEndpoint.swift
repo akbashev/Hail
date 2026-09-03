@@ -25,7 +25,7 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
     private let session: CodexAppServerSession
 
     public init(
-        model: String = "gpt-5.6-sol",
+        model: String,
         workingDirectory: String,
         agentID: String? = nil,
         contextLabel: String? = nil,
@@ -35,12 +35,15 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         maxStallDuration: TimeInterval? = nil
-    ) {
-        let effectiveModel = model.isEmpty ? "gpt-5.6-sol" : model
-        self.model = effectiveModel
+    ) throws(ModelRouterError) {
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            throw .invalidRoute(.missingModel("codex"))
+        }
+        self.model = model
         self.executionPolicy = executionPolicy
-        self.session = CodexAppServerSession(
-            model: effectiveModel,
+        self.session = try CodexAppServerSession(
+            model: model,
             workingDirectory: workingDirectory,
             agentID: agentID,
             contextLabel: contextLabel,

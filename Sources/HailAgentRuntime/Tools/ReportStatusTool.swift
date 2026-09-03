@@ -71,7 +71,7 @@ public struct ReportStatusTool: Tool {
     public func execute(input: Input, token: borrowing EffectToken<CoordinationEffect>) async throws -> String {
         _ = token
         guard
-            let entry = await system.agentRuntime.entry(forAgentID: sourceAgentID),
+            let entry = try await system.agentRuntime.entry(forAgentID: sourceAgentID),
             let spawnConfig = entry.spawnConfig
         else {
             throw ToolError.notConfigured(

@@ -1,9 +1,9 @@
 import HailCore
 
-/// The outcome of a compaction: the oldest `archivedCount` thread entries
+/// A completed conversation compaction: the oldest `archivedCount` thread entries
 /// were folded into `summary`, which REPLACES the previous rolling summary
 /// (the compactor folds ``PromptContext/contextSummary`` into the new one).
-public struct CompactionResult: Sendable, Equatable {
+public struct ConversationCompaction: Sendable, Equatable {
     public var summary: String
     public var archivedCount: Int
 
@@ -13,8 +13,78 @@ public struct CompactionResult: Sendable, Equatable {
     }
 }
 
-/// Decides — at turn start, for non-session-owning endpoints — whether the
-/// assembled context needs compacting, and produces the rolling summary.
+/// Explicit domain decision returned by a context compactor. “No work” is a
+/// valid decision rather than absence of a result or a suppressed failure.
+public enum CompactionDecision: Sendable, Equatable {
+    case unchanged
+    case compacted(ConversationCompaction)
+}
+
+/// The exact sections of one stateless model request. Keeping these sections
+/// explicit lets a compactor replace only the conversation suffix without
+/// reverse-engineering a prompt policy's output by position.
+public struct PreparedRequest: Sendable {
+    public struct ConversationEntry: Sendable {
+        /// Index of the source ``ChatMessage`` in ``PromptContext``.
+        public let sourceIndex: Int
+        public let message: LLMMessage
+
+        public init(sourceIndex: Int, message: LLMMessage) {
+            self.sourceIndex = sourceIndex
+            self.message = message
+        }
+    }
+
+    public let prefix: [LLMMessage]
+    public let conversation: [ConversationEntry]
+    public let suffix: [LLMMessage]
+    public let tools: [LLMToolSchema]
+
+    public init(
+        prefix: [LLMMessage],
+        conversation: [ConversationEntry],
+        suffix: [LLMMessage] = [],
+        tools: [LLMToolSchema] = []
+    ) {
+        self.prefix = prefix
+        self.conversation = conversation
+        self.suffix = suffix
+        self.tools = tools
+    }
+
+    /// The full request in provider order.
+    public var messages: [LLMMessage] {
+        prefix + conversation.map(\.message) + suffix
+    }
+
+    /// Returns a request with all rendered conversation entries whose source
+    /// messages occur after the archived semantic prefix.
+    public func retainingConversation(after sourceIndex: Int) -> PreparedRequest {
+        PreparedRequest(
+            prefix: prefix,
+            conversation: conversation.filter { $0.sourceIndex >= sourceIndex },
+            suffix: suffix,
+            tools: tools
+        )
+    }
+
+    /// Adds request-local messages and tool schemas without changing the
+    /// policy-owned prefix or conversation mapping.
+    public func appending(
+        suffix additionalMessages: [LLMMessage],
+        tools additionalTools: [LLMToolSchema]
+    ) -> PreparedRequest {
+        PreparedRequest(
+            prefix: prefix,
+            conversation: conversation,
+            suffix: suffix + additionalMessages,
+            tools: tools + additionalTools
+        )
+    }
+}
+
+/// Decides — before each request, for non-session-owning endpoints — whether
+/// the assembled context needs compacting, and produces the rolling summary.
 ///
 /// Session-owning harnesses (kimi/claude/codex) manage context in their own
 /// sessions and are never offered compaction. Stateless chat endpoints
@@ -31,14 +101,14 @@ public struct CompactionResult: Sendable, Equatable {
 /// endpoint; hosts wanting a different (cheaper) summarizer model implement
 /// this protocol themselves or wrap the injected closure.
 public protocol ContextCompactor: Sendable {
-    /// Return nil when the context fits the budget and no compaction is due.
+    /// Return `.unchanged` when the context fits the budget and no compaction is due.
+    /// `request` is the exact request shape that would be sent, with the
+    /// conversation section carrying source indices back to
+    /// `PromptContext.conversationThread`. A compactor must preserve the
+    /// prefix and suffix while replacing only that conversation section.
     func compact(
         context: PromptContext,
-        /// The complete messages that would be sent if compaction did not run,
-        /// including per-turn instructions and the current input.
-        messages: [LLMMessage],
-        /// Tool definitions consume the same model context window as messages.
-        tools: [LLMToolSchema],
+        request: PreparedRequest,
         summarize: @Sendable ([LLMMessage]) async throws -> String
-    ) async throws -> CompactionResult?
+    ) async throws -> CompactionDecision
 }

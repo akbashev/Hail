@@ -102,7 +102,7 @@ public struct AgentTool: Tool {
         _ = token
         switch input.action {
         case .listAgents:
-            let agents = await system.agentRuntime.allAgents()
+            let agents = try await system.agentRuntime.allAgents()
             guard !agents.isEmpty else {
                 return "No active agents."
             }
@@ -143,7 +143,7 @@ public struct AgentTool: Tool {
             // remains: a target that deactivates between this check and
             // `getActor` is re-spawned below, which is legitimate (the id
             // was real moments ago).
-            guard await system.agentRuntime.entry(forAgentID: targetID) != nil else {
+            guard try await system.agentRuntime.entry(forAgentID: targetID) != nil else {
                 throw AgentRuntimeError.modelMisbehavior(
                     "Unknown agent id '\(target.rawValue)'. Use list_agents to discover active agent ids."
                 )
@@ -162,13 +162,24 @@ public struct AgentTool: Tool {
             // can never lose the message and a timeout on our side can
             // never lose the response. The reply arrives as a message.
             Task {
-                let _: String? = try? await other.respond(
-                    ChatMessage.text(
-                        sender: sourceAgentID.rawValue,
-                        content: messageText,
-                        timestamp: Date()
+                do {
+                    let _: String? = try await other.respond(
+                        ChatMessage.text(
+                            sender: sourceAgentID.rawValue,
+                            content: messageText,
+                            timestamp: Date()
+                        )
                     )
-                )
+                } catch {
+                    system.log.error(
+                        "Asynchronous agent delivery failed",
+                        metadata: [
+                            "sourceAgentID": .string(sourceAgentID.rawValue),
+                            "targetAgentID": .string(targetID.rawValue),
+                            "error": .string(String(describing: error)),
+                        ]
+                    )
+                }
             }
             return "Delivered to \(targetID.rawValue). They will respond when done."
         }

@@ -9,7 +9,14 @@ public enum AgentEvent: Codable, Sendable {
     /// The `at` is optional only so journals written before turn timing was
     /// introduced still replay; new events always carry it.
     case turnStarted(at: Date?)
+    /// Identifies the current turn without changing the old turnStarted wire
+    /// shape, so pre-identification journals remain replayable.
+    case turnIdentified(id: TurnID)
     case messageReceived(ChatMessage)
+    /// Assistant text accompanying a tool call. Unlike streamed fragments,
+    /// this is a single semantic message that must survive context rebuilds
+    /// after tool execution and compaction.
+    case assistantText(content: String, at: Date)
     case contextSet(contextID: AgentContextID)
     case toolInvoked(ToolCall, at: Date?)
     case toolResult(ToolResult, at: Date?)
@@ -23,6 +30,28 @@ public enum AgentEvent: Codable, Sendable {
     case responseReceived(sender: String, payload: Data, at: Date)
     case turnFailed(error: AgentRuntimeError, at: Date)
     case turnCompleted(at: Date?)
+    /// Durable per-request accounting. Providers may report only a subset of
+    /// fields; unknown values remain nil in ``ModelUsage``. These events are
+    /// intentionally separate from the conversation transcript so a dashboard
+    /// can project usage without replaying model output.
+    case modelUsage(ModelUsage, at: Date)
+    /// Durable context occupancy for session-owning endpoints.
+    case contextUsage(ContextUsage, at: Date)
+    /// Durable model request lifecycle. The record is intentionally coarse;
+    /// streamed narration remains ephemeral through AgentActivity.
+    case modelRequestStarted(ModelRequestRecord)
+    case modelRequestCompleted(
+        id: ModelRequestID,
+        usage: ModelUsage?,
+        durationMilliseconds: Int,
+        at: Date
+    )
+    case modelRequestFailed(
+        id: ModelRequestID,
+        error: AgentRuntimeError,
+        durationMilliseconds: Int,
+        at: Date
+    )
     /// The harness (kimi/claude CLI) session this agent's turns run in,
     /// journaled so a restart can resume it instead of bootstrapping. The
     /// `identity` is the ``AgentSessionIdentity`` fingerprint the session was
@@ -103,7 +132,7 @@ public struct ToolCall: Codable, Sendable, Equatable {
     }
 }
 
-public struct ToolResult: Codable, Sendable {
+public struct ToolResult: Codable, Sendable, Equatable {
     public let toolCallID: String
     public let name: String
     public let output: String

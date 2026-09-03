@@ -131,7 +131,7 @@ struct ACPHarnessKillTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let (stub, pidURL, readyURL) = try makeStub(directory: directory)
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/usr/bin/python3",
@@ -256,7 +256,7 @@ struct CodexHarnessKillTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let (stub, pidURL, readyURL, requestsURL) = try makeStub(directory: directory)
 
-        let session = CodexAppServerSession(
+        let session = try CodexAppServerSession(
             model: "gpt-test",
             workingDirectory: directory.path,
             agentID: nil,
@@ -391,7 +391,7 @@ struct ProtocolViolatingHarnessTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let stub = try makeMalformedStub(directory: directory)
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/usr/bin/python3",
@@ -476,7 +476,7 @@ struct ProtocolViolatingHarnessTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let stub = try makeGarbageStub(directory: directory)
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/usr/bin/python3",

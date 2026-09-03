@@ -90,7 +90,7 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     private let maxStallDuration: TimeInterval
 
     public init(
-        model: String = "",
+        model: String,
         workingDirectory: String,
         agentID: String? = nil,
         contextLabel: String? = nil,
@@ -100,7 +100,11 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         maxStallDuration: TimeInterval? = nil
-    ) {
+    ) throws(ModelRouterError) {
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            throw .invalidRoute(.missingModel("claude"))
+        }
         self.model = model
         self.executionPolicy = executionPolicy
         self.workingDirectory = workingDirectory
@@ -109,9 +113,11 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
         self.mcpServerConfiguration = mcpServerConfiguration
         self.executablePath = executablePath
         self.authority = authority ?? FullAuthority()
-        self.maxStallDuration =
-            maxStallDuration
-            ?? ProcessEnvironment.timeInterval(from: "HAIL_CLAUDE_MAX_STALL_TIMEOUT", default: 1800)
+        self.maxStallDuration = try ProcessEnvironment.timeInterval(
+            override: maxStallDuration,
+            from: "HAIL_CLAUDE_MAX_STALL_TIMEOUT",
+            default: 1800
+        )
         if let resumeSession {
             sessionState.prime(id: resumeSession.id, identity: resumeSession.identity)
         }

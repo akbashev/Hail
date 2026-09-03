@@ -4,28 +4,126 @@
     import Foundation
 #endif
 
-/// The default model identifier used for all Hail agents when no model is
-/// configured.
+/// Provider identifier used by a model route.
 ///
-/// This is intentionally a single source of truth so every fallback path in
-/// the runtime points at the local Kimi Code provider.
-public let defaultAgentModel: String = "kimi-code/kimi-for-coding"
+/// This is a value type rather than an enum so hosts can introduce a provider
+/// without changing Hail's source or waiting for a new release. The static
+/// values are the providers understood by the built-in router.
+public struct AgentModelProvider: RawRepresentable, Codable, Sendable, Hashable,
+    ExpressibleByStringLiteral, CustomStringConvertible
+{
+    public let rawValue: String
 
-/// Model providers resolved by ``ModelRouter``.
-///
-/// The UI presents these as the provider half of the model identifier; the
-/// model name half is free-form and is passed through to the provider's API.
-public let availableAgentModelProviders: [String] = [
-    "kimi-code",
-    "claude",
-    "moonshot",
-    "openai",
-    "anthropic",
-    "gemini",
-    "ollama",
-    "codex",
-    "system",
-]
+    public init(rawValue: String) {
+        self.rawValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public init(stringLiteral value: String) { self.init(rawValue: value) }
+    public var description: String { rawValue }
+
+    public static let kimiCode = Self(rawValue: "kimi-code")
+    public static let claude = Self(rawValue: "claude")
+    public static let moonshot = Self(rawValue: "moonshot")
+    public static let openAI = Self(rawValue: "openai")
+    public static let anthropic = Self(rawValue: "anthropic")
+    public static let gemini = Self(rawValue: "gemini")
+    public static let ollama = Self(rawValue: "ollama")
+    public static let codex = Self(rawValue: "codex")
+    public static let system = Self(rawValue: "system")
+
+    public static let builtIns: [Self] = [
+        .kimiCode, .claude, .moonshot, .openAI, .anthropic,
+        .gemini, .ollama, .codex, .system,
+    ]
+
+    public static func custom(_ rawValue: String) -> Self {
+        Self(rawValue: rawValue)
+    }
+}
+
+public enum AgentModelRouteError: Error, Sendable, Equatable {
+    case unknownProvider(String)
+    case missingModel(String)
+}
+
+/// A model selection as stored in an agent definition. Construction validates
+/// the serialized `provider/model` identifier, so an invalid reference cannot
+/// enter the domain model.
+public struct AgentModelReference: Codable, Sendable, Hashable, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws(AgentModelReferenceError) {
+        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { throw .empty }
+        do {
+            _ = try AgentModelRoute(identifier: normalized)
+        } catch {
+            throw .invalidRoute(error)
+        }
+        self.rawValue = normalized
+    }
+
+    public var description: String { rawValue }
+
+    public func route() throws(AgentModelRouteError) -> AgentModelRoute {
+        try AgentModelRoute(identifier: rawValue)
+    }
+
+    public init(from decoder: Decoder) throws {
+        try self.init(try decoder.singleValueContainer().decode(String.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+public enum AgentModelReferenceError: Error, Sendable, Equatable {
+    case empty
+    case invalidRoute(AgentModelRouteError)
+}
+
+/// A fully specified provider/model pair. Model names remain free-form so new
+/// provider releases do not require a Hail update, but absence is invalid.
+public struct AgentModelRoute: Sendable, Hashable {
+    public let provider: AgentModelProvider
+    public let model: String
+
+    public init(
+        provider: AgentModelProvider,
+        model: String
+    ) throws(AgentModelRouteError) {
+        guard !provider.rawValue.isEmpty else {
+            throw .unknownProvider(provider.rawValue)
+        }
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            throw .missingModel(provider.rawValue)
+        }
+        self.provider = provider
+        self.model = model
+    }
+
+    public init(identifier: String) throws(AgentModelRouteError) {
+        let parts = identifier.split(
+            separator: "/",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        guard parts.count == 2 else {
+            throw .missingModel(identifier)
+        }
+        let providerName = String(parts[0])
+        let provider = AgentModelProvider(rawValue: providerName)
+        try self.init(provider: provider, model: String(parts[1]))
+    }
+
+    public var identifier: String { "\(provider.rawValue)/\(model)" }
+}
+
+public let availableAgentModelProviders: [String] =
+    AgentModelProvider.builtIns.map(\.rawValue)
 
 /// Provider-neutral execution policy for local model runtimes.
 ///
@@ -104,12 +202,12 @@ public struct AgentDefinition: Codable, Sendable {
 
     public struct Behavior: Codable, Sendable {
         public let systemPrompt: String
-        public let model: String
+        public let model: AgentModelReference
         public let execution: AgentExecutionPolicy
 
         public init(
             systemPrompt: String,
-            model: String,
+            model: AgentModelReference,
             execution: AgentExecutionPolicy = .autonomousWorkspace
         ) {
             self.systemPrompt = systemPrompt
@@ -117,11 +215,23 @@ public struct AgentDefinition: Codable, Sendable {
             self.execution = execution
         }
 
+        public init(
+            systemPrompt: String,
+            model: String,
+            execution: AgentExecutionPolicy = .autonomousWorkspace
+        ) throws(AgentModelReferenceError) {
+            self.init(
+                systemPrompt: systemPrompt,
+                model: try AgentModelReference(model),
+                execution: execution
+            )
+        }
+
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.systemPrompt = try container.decode(String.self, forKey: .systemPrompt)
 
-            self.model = try container.decode(String.self, forKey: .model)
+            self.model = try container.decode(AgentModelReference.self, forKey: .model)
             self.execution =
                 try container.decodeIfPresent(AgentExecutionPolicy.self, forKey: .execution)
                 ?? .autonomousWorkspace
@@ -176,13 +286,18 @@ public struct AgentSummary: Sendable {
 }
 
 extension AgentDefinition {
-    /// The generic fallback used when the host provides no definition.
-    public static func defaultDefinition(for role: Role) -> AgentDefinition {
+    /// Constructs the generic shape used when the host provides no definition.
+    /// The host must supply the model; Hail does not choose a provider or
+    /// model on its behalf.
+    public static func defaultDefinition(
+        for role: Role,
+        model: AgentModelReference
+    ) -> AgentDefinition {
         return AgentDefinition(
             role: role,
             behavior: .init(
                 systemPrompt: "You are the \(role) agent.",
-                model: defaultAgentModel
+                model: model
             ),
             limits: .init()
         )

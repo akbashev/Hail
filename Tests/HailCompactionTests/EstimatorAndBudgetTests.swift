@@ -41,7 +41,7 @@ struct TokenEstimatorTests {
     }
 
     @Test("request estimation includes serialized tool schemas")
-    func requestIncludesTools() async {
+    func requestIncludesTools() async throws {
         let message = LLMMessage(role: .user, content: "hello")
         let tool = LLMToolSchema(
             type: "function",
@@ -52,21 +52,34 @@ struct TokenEstimatorTests {
             )
         )
 
-        let withoutTools = await estimator.estimate(messages: [message], tools: [])
-        let withTools = await estimator.estimate(messages: [message], tools: [tool])
+        let withoutTools = try await estimator.estimate(messages: [message], tools: [])
+        let withTools = try await estimator.estimate(messages: [message], tools: [tool])
         #expect(withTools > withoutTools)
     }
 
     @Test("a model-specific tokenizer can replace the heuristic")
-    func exactTokenizerHook() async {
+    func exactTokenizerHook() async throws {
         let estimator = TokenEstimator(exactCount: { messages, tools in
             messages.count * 100 + tools.count * 10
         })
-        let count = await estimator.estimate(
+        let count = try await estimator.estimate(
             messages: [LLMMessage(role: .user, content: "tiny")],
             tools: []
         )
         #expect(count == 100)
+    }
+
+    @Test("a configured tokenizer failure propagates")
+    func exactTokenizerFailurePropagates() async {
+        struct TokenizerError: Error {}
+        let estimator = TokenEstimator(exactCount: { _, _ in throw TokenizerError() })
+
+        await #expect(throws: TokenizerError.self) {
+            try await estimator.estimate(
+                messages: [LLMMessage(role: .user, content: "tiny")],
+                tools: []
+            )
+        }
     }
 }
 
@@ -77,9 +90,9 @@ struct ContextWindowBudgetTests {
         #expect(ContextWindowBudget().budget(for: "llama3.2") == 4096)
     }
 
-    @Test("known hosted models match by substring")
-    func knownModel() {
-        #expect(ContextWindowBudget().budget(for: "claude-sonnet-4") == 200_000)
+    @Test("unknown models use the conservative default")
+    func unknownHostedModelDefaults() {
+        #expect(ContextWindowBudget().budget(for: "claude-sonnet-4") == 4096)
     }
 
     @Test("host overrides win over the default")

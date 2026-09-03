@@ -16,6 +16,15 @@ import VirtualActors
 
 // MARK: - Agent
 
+/// Explicit result of an attempted passivation. `deferred` preserves the
+/// distinction between an active agent and one that could not be removed from
+/// the directory, instead of collapsing both into `false`.
+public enum AgentDeactivationResult: Sendable, Equatable {
+    case active
+    case deactivated
+    case deferred(String)
+}
+
 @EventSourced
 @VirtualActor
 public distributed actor Agent: AsyncSequence {
@@ -150,7 +159,17 @@ public distributed actor Agent: AsyncSequence {
             Task { [weak self] in
                 guard let self else { return }
                 defer { stream.finish() }
-                try? await self.stream(message, through: stream.connection)
+                do {
+                    try await self.stream(message, through: stream.connection)
+                } catch {
+                    actorSystem.log.error(
+                        "Interrupted turn replay failed",
+                        metadata: [
+                            "agentID": .string(dependency.agentID.rawValue),
+                            "error": .string(String(describing: error)),
+                        ]
+                    )
+                }
             }
         }
 
@@ -176,16 +195,27 @@ public distributed actor Agent: AsyncSequence {
     /// the existence check that keeps `agent send` from spawning phantom
     /// agents (see `AgentTool`). Both actions run before the final `isWorking`
     /// re-check; a turn that slips in mid-way restores the registration.
-    public func shouldDeactivate() async -> Bool {
-        guard !self.isWorking else { return false }
+    public func deactivationResult() async -> AgentDeactivationResult {
+        guard !self.isWorking else { return .active }
         await actorSystem.agentRuntime.evictEndpoint(
-            for: definition.behavior.model,
+            for: definition.behavior.model.rawValue,
             agentID: state.agentID.rawValue,
             contextID: state.agentID.contextID,
             workingDirectory: workspacePath,
             executionPolicy: definition.behavior.execution
         )
-        await actorSystem.agentRuntime.unregister(agentID: state.agentID)
+        do {
+            try await actorSystem.agentRuntime.unregister(agentID: state.agentID)
+        } catch {
+            actorSystem.log.error(
+                "Agent directory unavailable; refusing deactivation",
+                metadata: [
+                    "agentID": .string(state.agentID.rawValue),
+                    "error": .string(String(describing: error)),
+                ]
+            )
+            return .deferred(String(describing: error))
+        }
         // Both calls above suspend and this actor is reentrant: a turn that
         // started during either window must not be torn down. The eviction is
         // harmless — the next turn rebuilds the endpoint cold from the
@@ -193,14 +223,24 @@ public distributed actor Agent: AsyncSequence {
         // registration otherwise happens only on activation. Only after this
         // final check is the commit below (waiter flush + accept) safe.
         guard !self.isWorking else {
-            try? await actorSystem.agentRuntime.register(
-                entry: AgentDirectoryEntry(
-                    agentID: state.agentID,
-                    definition: definition,
-                    spawnConfig: spawnConfig
+            do {
+                try await actorSystem.agentRuntime.register(
+                    entry: AgentDirectoryEntry(
+                        agentID: state.agentID,
+                        definition: definition,
+                        spawnConfig: spawnConfig
+                    )
                 )
-            )
-            return false
+            } catch {
+                actorSystem.log.error(
+                    "Failed to restore active agent directory entry",
+                    metadata: [
+                        "agentID": .string(state.agentID.rawValue),
+                        "error": .string(String(describing: error)),
+                    ]
+                )
+            }
+            return .active
         }
         let waiters = activityWaiters
         activityWaiters.removeAll()
@@ -208,7 +248,14 @@ public distributed actor Agent: AsyncSequence {
         for waiter in waiters.values {
             waiter.resume(returning: nil)
         }
-        return true
+        return .deactivated
+    }
+
+    /// Compatibility projection for lifecycle callers that only need the
+    /// accepted/deferred bit. New code should use ``deactivationResult()``.
+    public func shouldDeactivate() async -> Bool {
+        if case .deactivated = await deactivationResult() { return true }
+        return false
     }
 
     public distributed func getConversationHistory() -> [ChatMessage] {
@@ -217,6 +264,45 @@ public distributed actor Agent: AsyncSequence {
 
     public distributed var persistentAgentID: String {
         state.agentID.rawValue
+    }
+
+    /// Durable model consumption for dashboards and operators. This is a
+    /// projection of journaled request events and is never included in prompts.
+    public distributed var usageSummary: AgentUsageSummary {
+        state.usageSummary
+    }
+
+    /// Latest provider-reported context occupancy for this agent.
+    public distributed var latestContextUsage: ContextUsage? {
+        state.latestContextUsage
+    }
+
+    /// Recent durable model requests for a dashboard. Complete history can be
+    /// projected from journal events with ``AgentHistoryReader``.
+    public distributed var modelRequests: [ModelRequestRecord] {
+        state.modelRequests
+    }
+
+    /// Coarse current state for operators; streamed text and reasoning remain
+    /// available through the activity sequence.
+    public distributed var statusSnapshot: AgentStatusSnapshot {
+        let activeTurnID = state.activeTurn?.id
+        let activeRequest = activeTurnID.flatMap { turnID in
+            state.modelRequests.last { record in
+                guard record.turnID == turnID else { return false }
+                if case .running = record.outcome { return true }
+                return false
+            }
+        }
+        return AgentStatusSnapshot(
+            agentID: state.agentID,
+            phase: state.phase,
+            turnID: state.activeTurn?.id,
+            activeModelRequestID: activeRequest?.id,
+            currentToolName: state.currentToolName,
+            turnStartedAt: state.activeTurn?.startedAt,
+            contextUsage: state.latestContextUsage
+        )
     }
 
     // MARK: - Distributed API
@@ -239,22 +325,37 @@ public distributed actor Agent: AsyncSequence {
         authority lane: TurnAuthorityLane? = nil
     ) async throws {
         let previousTask = processingTask
-        let loop = reasoningLoop(lane: lane)
+        let turnID = TurnID()
+        let loop = reasoningLoop(lane: lane, turnID: turnID)
         let workTask = Task<Void, Error> { [input, connection] in
             await previousTask?.value
             // The turn is bracketed so a crash mid-turn is detectable on
             // replay: `turnStarted` without `turnCompleted` is re-run once
             // after activation (see `resumesInterruptedTurns`).
             try await self.emit(event: .turnStarted(at: Date()))
+            try await self.emit(event: .turnIdentified(id: turnID))
             recordActivity(.turn(.started, at: Date()))
             do {
                 try await loop.run(input, through: connection)
+            } catch let unjournaled as UnjournaledTurnFailure {
+                // Do not manufacture a completed turn when its failure never
+                // reached the journal. The unmatched opening remains
+                // recoverable on replay.
+                recordActivity(.turn(.completed, at: Date()))
+                throw unjournaled.runtimeError
             } catch {
+                let turnError = error
                 // The error is surfaced to the caller, so the turn is closed;
                 // only a crash before this point triggers a re-run.
-                try? await self.emit(event: .turnCompleted(at: Date()))
+                do {
+                    try await self.emit(event: .turnCompleted(at: Date()))
+                } catch {
+                    throw AgentRuntimeError.persistenceFailure(
+                        "Could not close failed turn in the journal: \(error). Original failure: \(turnError)"
+                    )
+                }
                 recordActivity(.turn(.completed, at: Date()))
-                throw error
+                throw turnError
             }
             try await self.emit(event: .turnCompleted(at: Date()))
             recordActivity(.turn(.completed, at: Date()))
@@ -449,12 +550,13 @@ public distributed actor Agent: AsyncSequence {
     /// Because the creation authority never varies by lane, the router's
     /// endpoint cache key needs no authority component — a cached endpoint
     /// can never smuggle a broader authority into a restricted lane.
-    private func reasoningLoop(lane: TurnAuthorityLane?) -> ReasoningLoop {
-        ReasoningLoop(
+    private func reasoningLoop(lane: TurnAuthorityLane?, turnID: TurnID = TurnID()) -> ReasoningLoop<ContinuousClock> {
+        ReasoningLoop<ContinuousClock>(
             agentID: state.agentID,
+            turnID: turnID,
             logger: actorSystem.log,
             authority: lane?.authority ?? authority,
-            context: { await self.buildTurnContext() },
+            context: { try await self.buildTurnContext() },
             endpoint: {
                 let resumeSession = await self.modelSessionResume
                 // Creation authority is the agent's default on purpose — it
@@ -462,7 +564,7 @@ public distributed actor Agent: AsyncSequence {
                 // the lane's authority reaches the endpoint per-stream via
                 // the loop's `authority`.
                 return try await self.actorSystem.agentRuntime.endpoint(
-                    for: self.definition.behavior.model,
+                    for: self.definition.behavior.model.rawValue,
                     agentID: self.state.agentID.rawValue,
                     contextID: self.state.agentID.contextID,
                     workingDirectory: self.workspacePath,
@@ -474,27 +576,17 @@ public distributed actor Agent: AsyncSequence {
             tools: { try await self.toolRegistry(lane: lane) },
             emit: { try await self.emit(event: $0) },
             recordActivity: { await self.recordActivity($0) },
-            compactor: actorSystem.agentRuntime.contextCompactor
+            compactor: actorSystem.agentRuntime.contextCompactor,
+            clock: ContinuousClock()
         )
     }
 
-    private func buildTurnContext() async -> TurnContext {
+    private func buildTurnContext() async throws -> TurnContext {
         let runtime = actorSystem.agentRuntime
-        let policy = runtime.promptPolicy
-        let manifest: ContextManifest
-        do {
-            manifest =
-                try await runtime.contextProvider?.manifest(state.agentID, actorSystem) ?? ContextManifest(items: [])
-        } catch {
-            actorSystem.log.error(
-                "Failed to resolve agent context manifest",
-                metadata: [
-                    "agentID": .string(state.agentID.rawValue),
-                    "error": .string(String(describing: error)),
-                ]
-            )
-            manifest = ContextManifest(items: [])
-        }
+        let assemblePrompt = runtime.assemblePrompt
+        let manifest =
+            try await runtime.contextProvider?.manifest(state.agentID, actorSystem)
+            ?? ContextManifest(items: [])
         let promptContext = PromptContext(
             agentID: state.agentID,
             definition: definition,
@@ -502,14 +594,15 @@ public distributed actor Agent: AsyncSequence {
             workingMemory: workingMemory,
             contextSummary: state.contextSummary,
             conversationThread: conversationThread,
-            contextManifest: manifest
+            contextManifest: manifest,
+            instructions: runtime.promptInstructions
         )
         return TurnContext(
-            messages: policy.build(promptContext),
+            preparedRequest: assemblePrompt(promptContext),
             promptContext: promptContext,
             workingMemory: workingMemory,
             sessionIdentity: AgentSessionIdentity.fingerprint(
-                model: definition.behavior.model,
+                model: definition.behavior.model.rawValue,
                 systemPrompt: definition.behavior.systemPrompt
             ),
             modelSessionID: state.modelSessionID,

@@ -8,13 +8,23 @@ import HailCore
 public struct AnyLanguageModelEndpoint: ModelEndpoint {
     public let model: String
     public let contextOwnership: ModelContextOwnership = .runtime
+    public let effectiveContextWindow: Int?
+    public let tokenCounting: TokenCounting
     private let languageModel: any LanguageModel
     private let temperature: Double
 
-    public init(languageModel: some LanguageModel, modelIdentifier: String, temperature: Double = 0.7) {
+    public init(
+        languageModel: some LanguageModel,
+        modelIdentifier: String,
+        temperature: Double,
+        effectiveContextWindow: Int? = nil,
+        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws -> Int)? = nil
+    ) {
         self.languageModel = languageModel
         self.model = modelIdentifier
         self.temperature = temperature
+        self.effectiveContextWindow = effectiveContextWindow
+        self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
     }
 
     public func stream(
@@ -24,7 +34,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         AsyncStream(ModelEvent<String>.self) { continuation in
             let task = Task {
                 do {
-                    let (transcript, prompt) = TranscriptMapping.transcriptAndPrompt(from: messages)
+                    let (transcript, prompt) = try TranscriptMapping.transcriptAndPrompt(from: messages)
 
                     continuation.yield(.status("Generating..."))
 
@@ -87,7 +97,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         AsyncStream(ModelEvent<T>.self) { continuation in
             let task = Task {
                 do {
-                    let (transcript, prompt) = TranscriptMapping.transcriptAndPrompt(from: messages)
+                    let (transcript, prompt) = try TranscriptMapping.transcriptAndPrompt(from: messages)
 
                     continuation.yield(.status("Generating..."))
 
@@ -116,7 +126,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                             if let typed = snapshot.content as? T {
                                 lastComplete = typed
                             } else {
-                                lastComplete = try? T(snapshot.rawContent)
+                                lastComplete = try T(snapshot.rawContent)
                             }
                         } else {
                             continuation.yield(.partialUpdated(snapshot.content))

@@ -92,7 +92,7 @@ struct CodexAppServerSessionRoutingTests {
         try script.write(to: stub, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
 
-        let endpoint = CodexAppServerEndpoint(
+        let endpoint = try CodexAppServerEndpoint(
             model: "gpt-test",
             workingDirectory: directory.path,
             mcpServerConfiguration: MCPServerConfiguration(
@@ -230,7 +230,7 @@ struct CodexAppServerSessionRoutingTests {
         try script.write(to: stub, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
 
-        let endpoint = CodexAppServerEndpoint(
+        let endpoint = try CodexAppServerEndpoint(
             model: "gpt-test",
             workingDirectory: directory.path,
             executablePath: stub.path
@@ -312,7 +312,7 @@ struct CodexAppServerSessionRoutingTests {
         try script.write(to: stub, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
 
-        let session = CodexAppServerSession(
+        let session = try CodexAppServerSession(
             model: "gpt-test",
             workingDirectory: directory.path,
             agentID: nil,
@@ -392,7 +392,7 @@ struct CodexAppServerSessionRoutingTests {
 
         // Generous stall ceiling: the watchdog must not interfere — only
         // consumer cancellation may end this turn.
-        let session = CodexAppServerSession(
+        let session = try CodexAppServerSession(
             model: "gpt-test",
             workingDirectory: directory.path,
             agentID: nil,

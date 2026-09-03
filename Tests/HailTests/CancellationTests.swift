@@ -67,7 +67,7 @@ struct ACPSessionCancellationTests {
 
         // Generous stall settings: the watchdog must not interfere — only
         // consumer cancellation may end this turn.
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/bin/sh",
@@ -119,7 +119,7 @@ struct ACPSessionCancellationTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
         let log = directory.appendingPathComponent("stub.log")
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/bin/sh",
@@ -173,25 +173,25 @@ struct ACPSessionCancellationTests {
 struct ReasoningLoopCancellationTests {
     @Test("cancellation maps to .cancelled and bypasses turnFailed journaling")
     func cancellationBypassesFailureJournal() {
-        let raw = ReasoningLoop.mapTurnError(CancellationError())
+        let raw = ReasoningLoop<ContinuousClock>.mapTurnError(CancellationError())
         #expect(raw.mapped == .cancelled)
         #expect(!raw.journalsFailure)
 
         // Endpoints report consumer cancellation as `.failed(.cancelled)`,
         // which the loop maps to the same runtime error — same journal rule.
-        let endpointReported = ReasoningLoop.mapTurnError(AgentRuntimeError.cancelled)
+        let endpointReported = ReasoningLoop<ContinuousClock>.mapTurnError(AgentRuntimeError.cancelled)
         #expect(endpointReported.mapped == .cancelled)
         #expect(!endpointReported.journalsFailure)
     }
 
     @Test("genuine failures still journal turnFailed")
     func failuresStillJournal() {
-        let rateLimit = ReasoningLoop.mapTurnError(AgentRuntimeError.rateLimit)
+        let rateLimit = ReasoningLoop<ContinuousClock>.mapTurnError(AgentRuntimeError.rateLimit)
         #expect(rateLimit.mapped == .rateLimit)
         #expect(rateLimit.journalsFailure)
 
         struct UnexpectedError: Error {}
-        let wrapped = ReasoningLoop.mapTurnError(UnexpectedError())
+        let wrapped = ReasoningLoop<ContinuousClock>.mapTurnError(UnexpectedError())
         guard case .modelMisbehavior = wrapped.mapped else {
             Issue.record("unexpected errors must wrap as modelMisbehavior, got \(wrapped.mapped)")
             return

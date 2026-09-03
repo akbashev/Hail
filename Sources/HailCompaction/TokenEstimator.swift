@@ -19,8 +19,8 @@ public struct TokenEstimator: Sendable {
     public var perMessageOverhead: Int
 
     /// Optional model-specific counter. Hosts can wrap a tokenizer already
-    /// owned by their Qwen/MLX/llama.cpp endpoint. If it fails, estimation
-    /// falls back to the conservative character-based calculation.
+    /// owned by their Qwen/MLX/llama.cpp endpoint. Absence uses the heuristic;
+    /// a configured counter failure propagates.
     public var exactCount: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws -> Int)?
 
     public init(
@@ -31,6 +31,24 @@ public struct TokenEstimator: Sendable {
         self.charactersPerToken = charactersPerToken
         self.perMessageOverhead = perMessageOverhead
         self.exactCount = exactCount
+    }
+
+    /// Uses a Hugging Face tokenizer and chat template for the exact request
+    /// shape used by a local model (for example Qwen served by Ollama).
+    /// Provider-reported usage still wins for accounting; this counter is the
+    /// preflight path used to decide whether compaction is needed.
+    public init(
+        tokenizer: TokenCounter,
+        charactersPerToken: Double = 4.0,
+        perMessageOverhead: Int = 4
+    ) {
+        self.init(
+            charactersPerToken: charactersPerToken,
+            perMessageOverhead: perMessageOverhead,
+            exactCount: { messages, tools in
+                try tokenizer.count(messages: messages, tools: tools)
+            }
+        )
     }
 
     public func estimate(_ message: ChatMessage) -> Int {
@@ -47,9 +65,9 @@ public struct TokenEstimator: Sendable {
     public func estimate(
         messages: [LLMMessage],
         tools: [LLMToolSchema]
-    ) async -> Int {
-        if let exactCount, let count = try? await exactCount(messages, tools) {
-            return max(count, 0)
+    ) async throws -> Int {
+        if let exactCount {
+            return max(try await exactCount(messages, tools), 0)
         }
 
         let messageTokens = messages.reduce(0) { total, message in

@@ -1,9 +1,9 @@
 /// Maps a model name to its usable context window, in tokens.
 ///
-/// The default is deliberately small: an Ollama server silently applies
-/// `num_ctx = 4096` per request unless configured, whatever the model's
-/// theoretical window is. Hosts that raised `num_ctx` (or run hosted models)
-/// pass `overrides` — first matching substring wins, longest keys first.
+/// The default is deliberately conservative: an Ollama server commonly uses
+/// `num_ctx = 4096` per request unless configured. Hosts pass explicit
+/// overrides for other effective windows — first matching substring wins,
+/// longest keys first. Endpoint-provided limits take precedence at runtime.
 public struct ContextWindowBudget: Sendable {
     /// Substring → window size, matched against the lowercased model name.
     public var overrides: [(String, Int)]
@@ -20,16 +20,6 @@ public struct ContextWindowBudget: Sendable {
         for (key, budget) in overrides where name.contains(key.lowercased()) {
             return budget
         }
-        for (key, budget) in Self.known where name.contains(key) {
-            return budget
-        }
         return defaultBudget
     }
-
-    /// Widely deployed hosted windows. Local models are intentionally absent:
-    /// their effective window is the server's, hence the conservative default.
-    private static let known: [(String, Int)] = [
-        ("claude", 200_000),
-        ("gpt-4o", 128_000),
-    ]
 }

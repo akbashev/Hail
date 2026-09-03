@@ -179,4 +179,42 @@ struct AgentStateTurnTimingTests {
         #expect(state.conversationThread.count == 2)
         #expect(state.activeTurn == nil)
     }
+
+    @Test("replay normalization clears transient status and interrupts running requests")
+    func replayNormalizationInterruptsRunningRequest() throws {
+        let turnID = TurnID("turn-crashed")
+        let startedAt = Date(timeIntervalSince1970: 3_000)
+        let opening = ChatMessage.text(
+            sender: "user",
+            content: "inspect this",
+            timestamp: startedAt
+        )
+        let record = ModelRequestRecord(
+            id: ModelRequestID("request-crashed"),
+            turnID: turnID,
+            model: "qwen",
+            startedAt: startedAt
+        )
+        var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
+
+        state.apply(.turnStarted(at: startedAt), maxMemoryFragments: 10)
+        state.apply(.turnIdentified(id: turnID), maxMemoryFragments: 10)
+        state.apply(.messageReceived(opening), maxMemoryFragments: 10)
+        state.apply(
+            .toolInvoked(
+                ToolCall(id: "call-crashed", name: "read_file", arguments: ToolArguments(json: "{}")),
+                at: startedAt
+            ),
+            maxMemoryFragments: 10
+        )
+        state.apply(.modelRequestStarted(record), maxMemoryFragments: 10)
+
+        state.normalizeAfterReplay()
+
+        #expect(state.activeTurn == nil)
+        #expect(state.phase == .idle)
+        #expect(state.currentToolName == nil)
+        #expect(state.pendingTurnRerun == opening)
+        #expect(state.modelRequests.first?.outcome == .interrupted)
+    }
 }

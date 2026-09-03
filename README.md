@@ -32,7 +32,7 @@ let scoutDefinition = AgentDefinition(
     role: scoutID.role,
     behavior: .init(
         systemPrompt: "You are a careful signal scout.",
-        model: "codex/gpt-5.6-sol"
+        model: try AgentModelReference("codex/gpt-5.6-sol")
     ),
     limits: .init()
 )
@@ -172,6 +172,8 @@ The host supplies definitions, tools, and policy as values. This keeps product d
 
 ```swift
 let runtime = AgentRuntimePlugin(
+    defaultModel: try AgentModelReference("your-provider/your-model"),
+    routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
     definitionProvider: { spawn in
         await definitions.lookup(spawn.agentID.role)
     },
@@ -210,12 +212,14 @@ Models are equally open. A provider implements `ModelEndpoint` and can be hosted
 
 ### Compact context for stateless endpoints
 
-Session-owning harnesses (Kimi, Claude, Codex) manage context server-side. Stateless endpoints (Ollama, plain chat APIs) have no such memory, so the runtime offers compaction at turn start through the `ContextCompactor` seam. The reference implementation lives in the optional `Packages/HailCompaction` library:
+Session-owning harnesses (Kimi, Claude, Codex) manage context server-side. Stateless endpoints (Ollama, plain chat APIs) have no such memory, so the runtime offers compaction before every model request through the `ContextCompactor` seam. The reference implementation is shipped as the `HailCompaction` product:
 
 ```swift
 import HailCompaction
 
 let runtime = AgentRuntimePlugin(
+    defaultModel: try AgentModelReference("your-provider/your-model"),
+    routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
     // ... providers as above ...
     contextCompactor: SlidingWindowCompactor(
         budget: ContextWindowBudget(overrides: [("llama3.2", 131_072)])
@@ -225,6 +229,18 @@ let runtime = AgentRuntimePlugin(
 
 When the assembled context crosses a fraction of the model's window, the oldest messages are folded into a rolling summary journaled as one `conversationCompacted` event — replay never re-runs the summarizer, and snapshotting checkpoints the compacted state. Note Ollama applies `num_ctx = 4096` per request unless configured, so the budget defaults to that; pass overrides for windows you actually raised.
 
+The built-in `ollama/...` route uses Ollama's native streaming API, preserving
+`prompt_eval_count`/`eval_count` as durable usage events. Set `OLLAMA_BASE_URL`
+(or Ollama's `OLLAMA_HOST`) and `OLLAMA_NUM_CTX` when the server is not on its defaults. For exact local
+preflight counts, load `TokenCounter` from `HailCompaction` and pass
+its `count` closure to `OllamaEndpoint` (or `AnyLanguageModelEndpoint`); if a
+tokenizer is unavailable, Hail uses its conservative estimator.
+
+Model requests also emit durable start/completion/failure records with a
+`TurnID`, `ModelRequestID`, duration, and reported usage. Read the live
+`AgentStatusSnapshot`/`AgentActivity` surfaces for current work, or project
+complete request history from journal events with `AgentHistoryReader`.
+
 ## Package layout
 
 Depend only on the layer you need:
@@ -232,7 +248,8 @@ Depend only on the layer you need:
 | --- | --- |
 | `ScopedEffect` | Capability scopes, authority decisions, auditing, and secret vocabulary |
 | `HailCore` | Agent domain values, model contracts, tools, and effect descriptors |
-| `HailModelRuntime` | Model routing plus Kimi, Claude, Codex, and API endpoint implementations |
+| `HailModelRuntime` | Model routing plus Ollama, Kimi, Claude, Codex, and API endpoint implementations |
+| `HailCompaction` | Context compaction and Hugging Face tokenizer integration |
 | `HailAgentRuntime` | Distributed, virtual, event-sourced agents and the reasoning runtime |
 | `Hail` | Umbrella product that re-exports the complete stack |
 ## Requirements

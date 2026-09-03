@@ -82,7 +82,7 @@ struct ACPSessionResumeTests {
         let logURL = directory.appendingPathComponent("calls.log")
         let stub = try makeStub(directory: directory, logPath: logURL.path, loadBehavior: .succeed)
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/usr/bin/python3",
@@ -113,7 +113,7 @@ struct ACPSessionResumeTests {
         let logURL = directory.appendingPathComponent("calls.log")
         let stub = try makeStub(directory: directory, logPath: logURL.path, loadBehavior: .fail)
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/usr/bin/python3",
@@ -143,7 +143,7 @@ struct ACPSessionResumeTests {
         let logURL = directory.appendingPathComponent("calls.log")
         let stub = try makeStub(directory: directory, logPath: logURL.path, loadBehavior: .succeed)
 
-        let session = ACPSession(
+        let session = try ACPSession(
             model: "",
             workingDirectory: directory.path,
             agentPath: "/usr/bin/python3",

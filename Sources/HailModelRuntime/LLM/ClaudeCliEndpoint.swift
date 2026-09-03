@@ -72,6 +72,7 @@ private final class ClaudeSessionState: Sendable {
 public struct ClaudeCliEndpoint: ModelEndpoint {
     public let model: String
     public let executionPolicy: AgentExecutionPolicy
+    public let reasoningEffort: ReasoningEffort?
 
     private let workingDirectory: String
     private let agentID: String?
@@ -99,14 +100,16 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
         executablePath: String = "/usr/bin/env",
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
-        maxStallDuration: TimeInterval? = nil
+        maxStallDuration: TimeInterval? = nil,
+        reasoningEffort: ReasoningEffort? = nil
     ) throws(ModelRouterError) {
         let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
-            throw .invalidRoute(.missingModel("claude"))
+            throw .invalidRoute(.missingModel(AgentModelProvider.claude.rawValue))
         }
         self.model = model
         self.executionPolicy = executionPolicy
+        self.reasoningEffort = reasoningEffort
         self.workingDirectory = workingDirectory
         self.agentID = agentID
         self.contextLabel = contextLabel
@@ -345,7 +348,7 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
         claudeLogger.info(
             "Running claude -p (MCP-native)",
             metadata: [
-                "model": .string(model.isEmpty ? "<default>" : model),
+                "model": .string(model),
                 "agentID": .string(agentID ?? "-"),
                 "contextLabel": .string(contextLabel ?? "-"),
                 "workingDirectory": .string(workingDirectory),
@@ -513,9 +516,9 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
             // configs.
             arguments.append(contentsOf: ["--strict-mcp-config", "--mcp-config", mcpConfig])
         }
-        // An empty model defers to the user's own `claude` default model.
-        if !model.isEmpty {
-            arguments.append(contentsOf: ["--model", model])
+        arguments.append(contentsOf: ["--model", model])
+        if let reasoningEffort {
+            arguments.append(contentsOf: ["--effort", reasoningEffort.rawValue])
         }
         return arguments
     }

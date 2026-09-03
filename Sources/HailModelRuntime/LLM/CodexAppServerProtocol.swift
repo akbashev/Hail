@@ -210,6 +210,8 @@ struct CodexTurnStartParams: Codable, Sendable {
     let approvalPolicy: String
     let sandboxPolicy: CodexSandboxPolicy
     let runtimeWorkspaceRoots: [String]
+    /// Optional reasoning effort override for this turn and subsequent turns.
+    let effort: String?
     let outputSchema: AnyCodable?
 }
 

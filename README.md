@@ -171,8 +171,9 @@ try await withEffect(request, authority: authority) { token in
 The host supplies definitions, tools, and policy as values. This keeps product decisions—automation, tools, and trust—outside the actor runtime and explicit at composition time.
 
 ```swift
-let runtime = AgentRuntimePlugin(
+let runtime = try AgentRuntimePlugin(
     defaultModel: try AgentModelReference("your-provider/your-model"),
+    maxToolRounds: 25,
     routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
     definitionProvider: { spawn in
         await definitions.lookup(spawn.agentID.role)
@@ -217,8 +218,9 @@ Session-owning harnesses (Kimi, Claude, Codex) manage context server-side. State
 ```swift
 import HailCompaction
 
-let runtime = AgentRuntimePlugin(
+let runtime = try AgentRuntimePlugin(
     defaultModel: try AgentModelReference("your-provider/your-model"),
+    maxToolRounds: 25,
     routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
     // ... providers as above ...
     contextCompactor: SlidingWindowCompactor(

@@ -4,6 +4,8 @@ import ScopedEffect
 /// Returning `nil` delegates to Hail's built-in provider routing.
 public struct ModelEndpointRequest: Sendable {
     public let model: String
+    /// The optional host-selected effort and its wire representation.
+    public let reasoning: ReasoningEffortSelection?
     public let agentID: String?
     public let contextID: AgentContextID?
     public let workingDirectory: String
@@ -18,9 +20,11 @@ public struct ModelEndpointRequest: Sendable {
         workingDirectory: String,
         executionPolicy: AgentExecutionPolicy,
         resumeSession: ModelSessionResume?,
-        authority: (any Authority)?
+        authority: (any Authority)?,
+        reasoning: ReasoningEffortSelection? = nil
     ) {
         self.model = model
+        self.reasoning = reasoning
         self.agentID = agentID
         self.contextID = contextID
         self.workingDirectory = workingDirectory

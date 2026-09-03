@@ -138,4 +138,98 @@ struct ModelRouteTests {
             )
         }
     }
+
+    @Test("host-declared model capabilities reject unsupported effort levels")
+    func rejectsEffortOutsideConfiguredCapabilities() async throws {
+        let model = try AgentModelReference("gemini/gemini-2.5-pro")
+        let router = ModelRouter(
+            configuration: try ModelRouterConfiguration(
+                temperature: 0.7,
+                reasoningCapabilities: [
+                    model: ModelReasoningCapabilities(
+                        supportedEfforts: [.minimal, .low, .medium, .high]
+                    )
+                ]
+            ),
+            projectRootPath: "/tmp"
+        )
+
+        await #expect(
+            throws: ModelRouterError.unsupportedReasoningEffort(
+                provider: .gemini,
+                model: "gemini-2.5-pro",
+                effort: .xhigh
+            )
+        ) {
+            try await router.endpoint(
+                for: model.rawValue,
+                agentID: "coder-main",
+                workingDirectory: "/tmp",
+                reasoningEffort: .xhigh
+            )
+        }
+    }
+
+    @Test("host mappings allow Gemini's non-string thinking controls")
+    func geminiUsesConfiguredThinkingEncoding() async throws {
+        let model = try AgentModelReference("gemini/gemini-2.5-pro")
+        let router = ModelRouter(
+            configuration: try ModelRouterConfiguration(
+                temperature: 0.7,
+                apiKeys: [.gemini: "test-key"],
+                reasoningCapabilities: [
+                    model: ModelReasoningCapabilities(levels: [
+                        ModelReasoningLevel(effort: .high, encoding: .dynamic)
+                    ])
+                ]
+            ),
+            projectRootPath: "/tmp"
+        )
+
+        let endpoint = try await router.endpoint(
+            for: model.rawValue,
+            agentID: "coder-main",
+            workingDirectory: "/tmp",
+            reasoningEffort: .high
+        )
+        #expect(endpoint.model == "gemini-2.5-pro")
+    }
+
+    @Test("reasoning capabilities reject invalid token budgets")
+    func invalidReasoningTokenBudgetThrows() throws {
+        let model = try AgentModelReference("gemini/gemini-2.5-pro")
+        #expect(throws: ModelRouterConfigurationError.invalidReasoningTokenBudget(model, 0)) {
+            try ModelRouterConfiguration(
+                temperature: 0.7,
+                reasoningCapabilities: [
+                    model: ModelReasoningCapabilities(
+                        levels: [
+                            ModelReasoningLevel(
+                                effort: .high,
+                                encoding: .tokenBudget(0)
+                            )
+                        ]
+                    )
+                ]
+            )
+        }
+    }
+
+    @Test("reasoning capabilities reject duplicate effort levels")
+    func duplicateReasoningEffortThrows() throws {
+        let model = try AgentModelReference("gemini/gemini-2.5-pro")
+        #expect(throws: ModelRouterConfigurationError.duplicateReasoningEffort(model, .high)) {
+            try ModelRouterConfiguration(
+                temperature: 0.7,
+                reasoningCapabilities: [
+                    model: ModelReasoningCapabilities(
+                        levels: [
+                            ModelReasoningLevel(effort: .high, encoding: .dynamic),
+                            ModelReasoningLevel(effort: .high, encoding: .tokenBudget(1)),
+                        ]
+                    )
+                ]
+            )
+        }
+    }
 }

@@ -101,7 +101,8 @@ struct CodexAppServerSessionRoutingTests {
                 arguments: ["mcp"],
                 agentIDEnvironmentKey: "HAIL_AGENT_ID"
             ),
-            executablePath: stub.path
+            executablePath: stub.path,
+            reasoningEffort: .xhigh
         )
 
         func turn(_ messages: [LLMMessage], _ delta: [LLMMessage], _ identity: String) async -> (
@@ -163,6 +164,8 @@ struct CodexAppServerSessionRoutingTests {
         #expect(!prompts[1].contains("SYSTEM"))
         #expect(requests[0]["method"] as? String == "thread/start")
         #expect(requests[1]["method"] as? String == "turn/start")
+        let firstTurnParams = requests[1]["params"] as? [String: Any]
+        #expect(firstTurnParams?["effort"] as? String == "xhigh")
         #expect(requests[2]["method"] as? String == "turn/start")
         #expect(requests[3]["method"] as? String == "thread/start")
         #expect(requests[4]["method"] as? String == "turn/start")

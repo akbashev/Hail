@@ -7,8 +7,9 @@ struct AgentDirectoryTests {
 
     @Test("an unavailable directory never looks empty or absent")
     func unavailableDirectoryThrows() async throws {
-        let runtime = AgentRuntimePlugin(
+        let runtime = try AgentRuntimePlugin(
             defaultModel: try AgentModelReference("test/model"),
+            maxToolRounds: 25,
             routerConfiguration: try ModelRouterConfiguration(temperature: 0.7)
         )
 
@@ -23,6 +24,17 @@ struct AgentDirectoryTests {
         }
         await #expect(throws: AgentDirectoryError.unavailable) {
             try await runtime.unregister(agentID: agentID)
+        }
+    }
+
+    @Test("runtime rejects an invalid tool-round limit")
+    func invalidToolRoundLimitThrows() {
+        #expect(throws: AgentRuntimeConfigurationError.invalidMaxToolRounds(0)) {
+            try AgentRuntimePlugin(
+                defaultModel: try AgentModelReference("test/model"),
+                maxToolRounds: 0,
+                routerConfiguration: try ModelRouterConfiguration(temperature: 0.7)
+            )
         }
     }
 }

@@ -37,6 +37,7 @@ actor ACPSession {
     private let mcpServerConfiguration: MCPServerConfiguration?
     private let agentPath: String
     private let agentArguments: [String]
+    private let reasoningEffort: ReasoningEffort?
     /// The authority the harness process spawn is scoped against, fixed at
     /// creation. The spawn is endpoint infrastructure — fixed binary and
     /// arguments from configuration, no model influence — so it deliberately
@@ -162,6 +163,7 @@ actor ACPSession {
         mcpServerConfiguration: MCPServerConfiguration? = nil,
         agentPath: String,
         agentArguments: [String],
+        reasoningEffort: ReasoningEffort? = nil,
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         initializeTimeout: TimeInterval? = nil,
@@ -177,6 +179,7 @@ actor ACPSession {
         self.mcpServerConfiguration = mcpServerConfiguration
         self.agentPath = agentPath
         self.agentArguments = agentArguments
+        self.reasoningEffort = reasoningEffort
         self.resumeSession = resumeSession
         self.authority = authority ?? FullAuthority()
         self.activeAuthority = self.authority
@@ -743,41 +746,35 @@ actor ACPSession {
             )
         }
 
-        // Disable thinking for this ACP session only. This keeps the user's
-        // global kimi-code config unchanged while making Hail responses
-        // faster and less over-planned.
-        if let thinkingOption = response.configOptions?.first(where: {
-            $0.id.value.lowercased() == "thinking"
-                || $0.name.lowercased().contains("thinking")
-        }) {
+        if let reasoningEffort {
+            guard
+                let thinkingOption = response.configOptions?.first(where: {
+                    $0.id.value.lowercased() == "thinking"
+                        || $0.name.lowercased().contains("thinking")
+                })
+            else {
+                throw ModelEndpointError.configuration(
+                    "ACP agent does not advertise a thinking configuration; requested reasoning effort \(reasoningEffort.rawValue)."
+                )
+            }
             do {
                 _ = try await client.setConfigOption(
                     sessionId: response.sessionId,
                     configId: thinkingOption.id,
-                    value: SessionConfigValueId("off")
+                    value: SessionConfigValueId(reasoningEffort.rawValue)
                 )
                 logger.info(
-                    "Disabled ACP thinking for this session",
-                    metadata: ["configId": .string(thinkingOption.id.value)]
-                )
-            } catch {
-                logger.warning(
-                    "Failed to disable ACP thinking; session will use global default",
+                    "Set ACP reasoning effort",
                     metadata: [
                         "configId": .string(thinkingOption.id.value),
-                        "error": .string(String(describing: error)),
+                        "reasoningEffort": .string(reasoningEffort.rawValue),
                     ]
                 )
+            } catch {
+                throw ModelEndpointError.configuration(
+                    "ACP agent rejected reasoning effort \(reasoningEffort.rawValue): \(error)"
+                )
             }
-        } else {
-            logger.info(
-                "No thinking config option reported by ACP; using global default",
-                metadata: [
-                    "availableIDs": .string(
-                        response.configOptions?.map { $0.id.value }.joined(separator: ", ") ?? "none"
-                    )
-                ]
-            )
         }
 
         // Set the session mode to "auto" so tool approvals are handled automatically.

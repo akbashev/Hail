@@ -24,6 +24,7 @@ actor CodexAppServerSession {
     private let workingDirectory: String
     private let mcpServerConfiguration: MCPServerConfiguration?
     private let executionPolicy: AgentExecutionPolicy
+    private let reasoningEffort: ReasoningEffort?
     private let client: CodexAppServerClient
     private let creationAuthority: any Authority
 
@@ -58,6 +59,7 @@ actor CodexAppServerSession {
         contextLabel: String?,
         mcpServerConfiguration: MCPServerConfiguration?,
         executionPolicy: AgentExecutionPolicy,
+        reasoningEffort: ReasoningEffort? = nil,
         executablePath: String,
         resumeSession: ModelSessionResume?,
         authority: any Authority,
@@ -67,6 +69,7 @@ actor CodexAppServerSession {
         self.workingDirectory = workingDirectory
         self.mcpServerConfiguration = mcpServerConfiguration
         self.executionPolicy = executionPolicy
+        self.reasoningEffort = reasoningEffort
         self.creationAuthority = authority
         self.maxStallDuration = try ProcessEnvironment.timeInterval(
             override: maxStallDuration,
@@ -229,6 +232,7 @@ actor CodexAppServerSession {
                 approvalPolicy: "on-request",
                 sandboxPolicy: await adapter.sandboxPolicy(),
                 runtimeWorkspaceRoots: await adapter.workspaceRoots(),
+                effort: reasoningEffort?.rawValue,
                 outputSchema: try outputSchema.map(AnyCodable.decode(from:))
             )
         )

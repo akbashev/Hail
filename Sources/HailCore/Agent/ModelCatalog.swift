@@ -30,27 +30,46 @@ public struct AgentModelID: RawRepresentable, Codable, Sendable, Hashable,
 /// The catalog is advisory only: ``ModelRouter`` passes any
 /// `<provider>/<model-name>` identifier through to the provider verbatim, so
 /// agents can always use model IDs that are not listed here. To surface new
-/// model IDs without a code change, extend the catalog from
-/// `.hail/config.yaml` (`models:` section) — see
-/// ``HailConfiguration/modelCatalog``.
+/// model IDs without a code change, extend the catalog from the host's
+/// configuration source.
 public struct ModelCatalog: Codable, Sendable, Hashable {
-    /// Provider name → suggested model names, in display order.
-    /// Provider names are strings because they are configuration keys; model
-    /// values themselves remain typed IDs.
-    public var suggestions: [String: [AgentModelID]]
+    /// Provider → suggested model names, in display order. Both sides are
+    /// domain values; arbitrary providers remain possible because
+    /// ``AgentModelProvider`` is an open value type rather than an enum.
+    public var suggestions: [AgentModelProvider: [AgentModelID]]
 
-    public init(suggestions: [String: [AgentModelID]]) {
+    public init(suggestions: [AgentModelProvider: [AgentModelID]]) {
         self.suggestions = suggestions
     }
 
-    public init(suggestions: [String: [String]]) {
-        self.suggestions = suggestions.mapValues { $0.map(AgentModelID.init(rawValue:)) }
+    /// Decodes the configuration-facing object map at the boundary, then
+    /// keeps provider identifiers typed in the domain value.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try container.decode([String: [AgentModelID]].self, forKey: .suggestions)
+        self.suggestions = raw.reduce(into: [:]) { result, entry in
+            result[AgentModelProvider(rawValue: entry.key)] = entry.value
+        }
+    }
+
+    /// Encodes a configuration-facing object map without making the domain
+    /// dictionary itself string-keyed.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        let raw = suggestions.reduce(into: [String: [AgentModelID]]()) { result, entry in
+            result[entry.key.rawValue] = entry.value
+        }
+        try container.encode(raw, forKey: .suggestions)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case suggestions
     }
 
     /// Returns a catalog that also suggests the given additional model names.
     /// Per provider the union is deduplicated, keeping built-in suggestions
     /// first and appending new ones in their given order.
-    public func merged(with additions: [String: [AgentModelID]]) -> ModelCatalog {
+    public func merged(with additions: [AgentModelProvider: [AgentModelID]]) -> ModelCatalog {
         var merged = suggestions
         for (provider, names) in additions {
             var seen = Set(merged[provider] ?? [])
@@ -63,16 +82,12 @@ public struct ModelCatalog: Codable, Sendable, Hashable {
         return ModelCatalog(suggestions: merged)
     }
 
-    public func merged(with additions: [String: [String]]) -> ModelCatalog {
-        merged(with: additions.mapValues { $0.map(AgentModelID.init(rawValue:)) })
-    }
-
     /// Suggested model names for a provider, in display order.
-    public func suggestions(for provider: String) -> [AgentModelID] {
+    public func suggestions(for provider: AgentModelProvider) -> [AgentModelID] {
         suggestions[provider] ?? []
     }
 
-    public func modelNames(for provider: String) -> [String] {
+    public func modelNames(for provider: AgentModelProvider) -> [String] {
         suggestions(for: provider).map(\.rawValue)
     }
 }

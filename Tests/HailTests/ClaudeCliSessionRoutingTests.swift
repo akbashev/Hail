@@ -74,7 +74,8 @@ struct ClaudeCliSessionRoutingTests {
         let endpoint = try ClaudeCliEndpoint(
             model: "claude-test",
             workingDirectory: directory.path,
-            executablePath: stub.path
+            executablePath: stub.path,
+            reasoningEffort: .xhigh
         )
 
         let baseMessages = [
@@ -127,6 +128,7 @@ struct ClaudeCliSessionRoutingTests {
         #expect(args.count == 3)
 
         #expect(prompts[0].contains("SYSTEM-PROMPT"))
+        #expect(args[0].contains("--effort xhigh"))
         #expect(!args[0].contains("--resume"))
 
         #expect(args[1].contains("--resume stub-claude-session"))

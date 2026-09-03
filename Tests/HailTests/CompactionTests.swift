@@ -341,7 +341,8 @@ struct ReasoningLoopCompactionTests {
             emit: { await recorder.record($0) },
             recordActivity: { _ in },
             compactor: compactor,
-            clock: ContinuousClock()
+            clock: ContinuousClock(),
+            maxToolRounds: 25
         )
     }
 

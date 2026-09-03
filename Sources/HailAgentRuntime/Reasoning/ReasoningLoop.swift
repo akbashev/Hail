@@ -246,7 +246,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         recordActivity: @escaping @Sendable (AgentActivity) async -> Void,
         compactor: (any ContextCompactor)? = nil,
         clock: ClockType,
-        maxToolRounds: Int = 25
+        maxToolRounds: Int
     ) {
         self.agentID = agentID
         self.turnID = turnID
@@ -260,7 +260,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         self.compactor = compactor
         self.clock = clock
         self.maxToolRounds = maxToolRounds
-        precondition(maxToolRounds > 0, "maxToolRounds must be positive")
     }
 
     /// Runs one full agent turn: builds context, drives the model/tool loop,
@@ -273,6 +272,11 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         through connection: AgentConnection<Output>
     ) async throws {
         do {
+            guard maxToolRounds > 0 else {
+                throw AgentRuntimeError.configurationError(
+                    "maxToolRounds must be positive"
+                )
+            }
             try await runStreamingTurn(input: input, through: connection)
         } catch {
             let (runtimeError, journalsFailure) = Self.mapTurnError(error)

@@ -202,7 +202,8 @@ public distributed actor Agent: AsyncSequence {
             agentID: state.agentID.rawValue,
             contextID: state.agentID.contextID,
             workingDirectory: workspacePath,
-            executionPolicy: definition.behavior.execution
+            executionPolicy: definition.behavior.execution,
+            reasoningEffort: definition.behavior.reasoningEffort
         )
         do {
             try await actorSystem.agentRuntime.unregister(agentID: state.agentID)
@@ -570,14 +571,16 @@ public distributed actor Agent: AsyncSequence {
                     workingDirectory: self.workspacePath,
                     executionPolicy: self.definition.behavior.execution,
                     resumeSession: resumeSession,
-                    authority: self.authority
+                    authority: self.authority,
+                    reasoningEffort: self.definition.behavior.reasoningEffort
                 )
             },
             tools: { try await self.toolRegistry(lane: lane) },
             emit: { try await self.emit(event: $0) },
             recordActivity: { await self.recordActivity($0) },
             compactor: actorSystem.agentRuntime.contextCompactor,
-            clock: ContinuousClock()
+            clock: ContinuousClock(),
+            maxToolRounds: actorSystem.agentRuntime.maxToolRounds
         )
     }
 

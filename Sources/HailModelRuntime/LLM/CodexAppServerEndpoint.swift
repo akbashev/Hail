@@ -21,6 +21,7 @@ private let codexLogger = Logger(label: "CodexAppServerEndpoint")
 public struct CodexAppServerEndpoint: ModelEndpoint {
     public let model: String
     public let executionPolicy: AgentExecutionPolicy
+    public let reasoningEffort: ReasoningEffort?
 
     private let session: CodexAppServerSession
 
@@ -34,14 +35,16 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         executablePath: String = "/usr/bin/env",
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
-        maxStallDuration: TimeInterval? = nil
+        maxStallDuration: TimeInterval? = nil,
+        reasoningEffort: ReasoningEffort? = nil
     ) throws(ModelRouterError) {
         let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
-            throw .invalidRoute(.missingModel("codex"))
+            throw .invalidRoute(.missingModel(AgentModelProvider.codex.rawValue))
         }
         self.model = model
         self.executionPolicy = executionPolicy
+        self.reasoningEffort = reasoningEffort
         self.session = try CodexAppServerSession(
             model: model,
             workingDirectory: workingDirectory,
@@ -49,6 +52,7 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
             contextLabel: contextLabel,
             mcpServerConfiguration: mcpServerConfiguration,
             executionPolicy: executionPolicy,
+            reasoningEffort: reasoningEffort,
             executablePath: executablePath,
             resumeSession: resumeSession,
             authority: authority ?? FullAuthority(),

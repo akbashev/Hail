@@ -52,6 +52,11 @@ public enum AgentModelRouteError: Error, Sendable, Equatable {
 public struct AgentModelReference: Codable, Sendable, Hashable, CustomStringConvertible {
     public let rawValue: String
 
+    /// Creates a reference from an already validated route.
+    public init(route: AgentModelRoute) {
+        self.rawValue = route.identifier
+    }
+
     public init(_ rawValue: String) throws(AgentModelReferenceError) {
         let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { throw .empty }
@@ -203,27 +208,34 @@ public struct AgentDefinition: Codable, Sendable {
     public struct Behavior: Codable, Sendable {
         public let systemPrompt: String
         public let model: AgentModelReference
+        /// Optional host-selected reasoning effort. When absent, the model
+        /// provider chooses its own default for the selected model.
+        public let reasoningEffort: ReasoningEffort?
         public let execution: AgentExecutionPolicy
 
         public init(
             systemPrompt: String,
             model: AgentModelReference,
-            execution: AgentExecutionPolicy = .autonomousWorkspace
+            execution: AgentExecutionPolicy = .autonomousWorkspace,
+            reasoningEffort: ReasoningEffort? = nil
         ) {
             self.systemPrompt = systemPrompt
             self.model = model
+            self.reasoningEffort = reasoningEffort
             self.execution = execution
         }
 
         public init(
             systemPrompt: String,
             model: String,
-            execution: AgentExecutionPolicy = .autonomousWorkspace
+            execution: AgentExecutionPolicy = .autonomousWorkspace,
+            reasoningEffort: ReasoningEffort? = nil
         ) throws(AgentModelReferenceError) {
             self.init(
                 systemPrompt: systemPrompt,
                 model: try AgentModelReference(model),
-                execution: execution
+                execution: execution,
+                reasoningEffort: reasoningEffort
             )
         }
 
@@ -232,6 +244,10 @@ public struct AgentDefinition: Codable, Sendable {
             self.systemPrompt = try container.decode(String.self, forKey: .systemPrompt)
 
             self.model = try container.decode(AgentModelReference.self, forKey: .model)
+            self.reasoningEffort = try container.decodeIfPresent(
+                ReasoningEffort.self,
+                forKey: .reasoningEffort
+            )
             self.execution =
                 try container.decodeIfPresent(AgentExecutionPolicy.self, forKey: .execution)
                 ?? .autonomousWorkspace
@@ -240,6 +256,7 @@ public struct AgentDefinition: Codable, Sendable {
         enum CodingKeys: String, CodingKey {
             case systemPrompt = "system_prompt"
             case model
+            case reasoningEffort = "reasoning_effort"
             case execution
         }
     }
@@ -291,13 +308,15 @@ extension AgentDefinition {
     /// model on its behalf.
     public static func defaultDefinition(
         for role: Role,
-        model: AgentModelReference
+        model: AgentModelReference,
+        reasoningEffort: ReasoningEffort? = nil
     ) -> AgentDefinition {
         return AgentDefinition(
             role: role,
             behavior: .init(
                 systemPrompt: "You are the \(role) agent.",
-                model: model
+                model: model,
+                reasoningEffort: reasoningEffort
             ),
             limits: .init()
         )

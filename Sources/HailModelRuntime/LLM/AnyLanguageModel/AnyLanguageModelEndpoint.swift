@@ -11,18 +11,19 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     public let effectiveContextWindow: Int?
     public let tokenCounting: TokenCounting
     private let languageModel: any LanguageModel
-    private let temperature: Double
+    private let generationOptions: GenerationOptions
 
     public init(
         languageModel: some LanguageModel,
         modelIdentifier: String,
         temperature: Double,
         effectiveContextWindow: Int? = nil,
-        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws -> Int)? = nil
+        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws -> Int)? = nil,
+        generationOptions: GenerationOptions? = nil
     ) {
         self.languageModel = languageModel
         self.model = modelIdentifier
-        self.temperature = temperature
+        self.generationOptions = generationOptions ?? GenerationOptions(temperature: temperature)
         self.effectiveContextWindow = effectiveContextWindow
         self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
     }
@@ -49,13 +50,10 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                     let delegate = StopOnToolCallsDelegate()
                     session.toolExecutionDelegate = delegate
 
-                    var options = GenerationOptions()
-                    options.temperature = temperature
-
                     let response = try await session.respond(
                         to: prompt,
                         generating: String.self,
-                        options: options
+                        options: generationOptions
                     )
 
                     let generatedCalls = await delegate.generatedToolCalls
@@ -111,13 +109,10 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                     let delegate = StopOnToolCallsDelegate()
                     session.toolExecutionDelegate = delegate
 
-                    var options = GenerationOptions()
-                    options.temperature = temperature
-
                     let stream = session.streamResponse(
                         to: prompt,
                         generating: responseType,
-                        options: options
+                        options: generationOptions
                     )
 
                     var lastComplete: T?

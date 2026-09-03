@@ -22,6 +22,7 @@ public actor ModelRouter {
 
     private struct CacheKey: Hashable, Sendable {
         let model: String
+        let reasoningEffort: ReasoningEffort?
         let agentID: String
         let contextID: AgentContextID?
         let workingDirectory: String
@@ -58,7 +59,8 @@ public actor ModelRouter {
         workingDirectory: String? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         resumeSession: ModelSessionResume? = nil,
-        authority: (any Authority)? = nil
+        authority: (any Authority)? = nil,
+        reasoningEffort: ReasoningEffort? = nil
     ) throws(ModelRouterError) -> any ModelEndpoint {
         try cachedEndpoint(
             for: model,
@@ -67,7 +69,8 @@ public actor ModelRouter {
             workingDirectory: workingDirectory,
             executionPolicy: executionPolicy,
             resumeSession: resumeSession,
-            authority: authority
+            authority: authority,
+            reasoningEffort: reasoningEffort
         )
     }
 
@@ -78,13 +81,15 @@ public actor ModelRouter {
         workingDirectory: String? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         resumeSession: ModelSessionResume? = nil,
-        authority: (any Authority)? = nil
+        authority: (any Authority)? = nil,
+        reasoningEffort: ReasoningEffort? = nil
     ) throws(ModelRouterError) -> any ModelEndpoint {
         guard let effectiveWorkingDirectory = workingDirectory ?? projectRootPath else {
             throw ModelRouterError.missingProjectRoot
         }
         let key = CacheKey(
             model: model,
+            reasoningEffort: reasoningEffort,
             agentID: agentID,
             contextID: contextID,
             workingDirectory: effectiveWorkingDirectory,
@@ -102,7 +107,8 @@ public actor ModelRouter {
             workingDirectory: effectiveWorkingDirectory,
             executionPolicy: executionPolicy,
             resumeSession: resumeSession,
-            authority: authority
+            authority: authority,
+            reasoningEffort: reasoningEffort
         )
         cache[key] = endpoint
         return endpoint
@@ -121,11 +127,13 @@ public actor ModelRouter {
         agentID: String,
         contextID: AgentContextID? = nil,
         workingDirectory: String? = nil,
-        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace
+        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
+        reasoningEffort: ReasoningEffort? = nil
     ) async {
         guard let effectiveWorkingDirectory = workingDirectory ?? projectRootPath else { return }
         let key = CacheKey(
             model: model,
+            reasoningEffort: reasoningEffort,
             agentID: agentID,
             contextID: contextID,
             workingDirectory: effectiveWorkingDirectory,
@@ -143,13 +151,15 @@ public actor ModelRouter {
         agentID: String,
         contextID: AgentContextID? = nil,
         workingDirectory: String? = nil,
-        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace
+        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
+        reasoningEffort: ReasoningEffort? = nil
     ) throws(ModelRouterError) {
         guard let effectiveWorkingDirectory = workingDirectory ?? projectRootPath else {
             throw ModelRouterError.missingProjectRoot
         }
         let key = CacheKey(
             model: model,
+            reasoningEffort: reasoningEffort,
             agentID: agentID,
             contextID: contextID,
             workingDirectory: effectiveWorkingDirectory,
@@ -180,12 +190,19 @@ public actor ModelRouter {
         workingDirectory: String,
         executionPolicy: AgentExecutionPolicy,
         resumeSession: ModelSessionResume? = nil,
-        authority: (any Authority)? = nil
+        authority: (any Authority)? = nil,
+        reasoningEffort: ReasoningEffort? = nil
     ) throws(ModelRouterError) -> any ModelEndpoint {
         let effectiveModel = effectiveModelIdentifier(model)
         guard !effectiveModel.isEmpty else {
             throw ModelRouterError.invalidRoute(.missingModel(""))
         }
+        let route = try Self.parseRoute(effectiveModel)
+        let reasoning = configuration.selection(
+            for: reasoningEffort,
+            route: route
+        )
+        try configuration.validate(reasoning: reasoning, for: route)
         if let endpoint = modelEndpointProvider?(
             ModelEndpointRequest(
                 model: effectiveModel,
@@ -194,18 +211,23 @@ public actor ModelRouter {
                 workingDirectory: workingDirectory,
                 executionPolicy: executionPolicy,
                 resumeSession: resumeSession,
-                authority: authority
+                authority: authority,
+                reasoning: reasoning
             )
         ) {
             return endpoint
         }
-        let route = try Self.parseRoute(effectiveModel)
         let provider = route.provider
         let modelName = route.model
         let providerContextLabel = contextID?.rawValue
 
         switch provider {
         case .codex:
+            try Self.requireRawReasoningEncoding(
+                reasoning,
+                provider: provider,
+                model: modelName
+            )
             return try CodexAppServerEndpoint(
                 model: modelName,
                 workingDirectory: workingDirectory,
@@ -214,10 +236,16 @@ public actor ModelRouter {
                 mcpServerConfiguration: mcpServerConfiguration,
                 executionPolicy: executionPolicy,
                 resumeSession: resumeSession,
-                authority: authority
+                authority: authority,
+                reasoningEffort: reasoning?.effort
             )
 
         case .kimiCode:
+            try Self.requireRawReasoningEncoding(
+                reasoning,
+                provider: provider,
+                model: modelName
+            )
             return try KimiCodeEndpoint(
                 model: modelName,
                 workingDirectory: workingDirectory,
@@ -226,10 +254,16 @@ public actor ModelRouter {
                 mcpServerConfiguration: mcpServerConfiguration,
                 executionPolicy: executionPolicy,
                 resumeSession: resumeSession,
-                authority: authority
+                authority: authority,
+                reasoningEffort: reasoning?.effort
             )
 
         case .claude:
+            try Self.requireRawReasoningEncoding(
+                reasoning,
+                provider: provider,
+                model: modelName
+            )
             return try ClaudeCliEndpoint(
                 model: modelName,
                 workingDirectory: workingDirectory,
@@ -238,7 +272,8 @@ public actor ModelRouter {
                 mcpServerConfiguration: mcpServerConfiguration,
                 executionPolicy: executionPolicy,
                 resumeSession: resumeSession,
-                authority: authority
+                authority: authority,
+                reasoningEffort: reasoning?.effort
             )
 
         case .moonshot:
@@ -251,7 +286,13 @@ public actor ModelRouter {
                     model: modelName
                 ),
                 modelIdentifier: modelName,
-                temperature: configuration.temperature
+                temperature: configuration.temperature,
+                generationOptions: try Self.generationOptions(
+                    provider: provider,
+                    model: modelName,
+                    temperature: configuration.temperature,
+                    reasoning: reasoning
+                )
             )
 
         case .openAI:
@@ -262,7 +303,13 @@ public actor ModelRouter {
                     model: modelName
                 ),
                 modelIdentifier: modelName,
-                temperature: configuration.temperature
+                temperature: configuration.temperature,
+                generationOptions: try Self.generationOptions(
+                    provider: provider,
+                    model: modelName,
+                    temperature: configuration.temperature,
+                    reasoning: reasoning
+                )
             )
 
         case .anthropic:
@@ -273,7 +320,13 @@ public actor ModelRouter {
                     model: modelName
                 ),
                 modelIdentifier: modelName,
-                temperature: configuration.temperature
+                temperature: configuration.temperature,
+                generationOptions: try Self.generationOptions(
+                    provider: provider,
+                    model: modelName,
+                    temperature: configuration.temperature,
+                    reasoning: reasoning
+                )
             )
 
         case .gemini:
@@ -284,12 +337,22 @@ public actor ModelRouter {
                     model: modelName
                 ),
                 modelIdentifier: modelName,
-                temperature: configuration.temperature
+                temperature: configuration.temperature,
+                generationOptions: try Self.geminiGenerationOptions(
+                    model: modelName,
+                    temperature: configuration.temperature,
+                    reasoning: reasoning
+                )
             )
 
         case .ollama:
             let baseURL = try configuration.baseURL(for: .ollama)
             let numContext = configuration.contextWindow(for: .ollama)
+            try Self.rejectReasoningEffort(
+                reasoning,
+                provider: provider,
+                model: modelName
+            )
             return OllamaEndpoint(
                 model: modelName,
                 baseURL: baseURL,
@@ -299,6 +362,11 @@ public actor ModelRouter {
 
         case .system:
             #if canImport(FoundationModels)
+                try Self.rejectReasoningEffort(
+                    reasoning,
+                    provider: provider,
+                    model: modelName
+                )
                 return AnyLanguageModelEndpoint(
                     languageModel: SystemLanguageModel.default,
                     modelIdentifier: modelName,
@@ -319,6 +387,104 @@ public actor ModelRouter {
         } catch {
             throw ModelRouterError.invalidRoute(error)
         }
+    }
+
+    private static func generationOptions(
+        provider: AgentModelProvider,
+        model: String,
+        temperature: Double,
+        reasoning: ReasoningEffortSelection?
+    ) throws(ModelRouterError) -> GenerationOptions {
+        var options = GenerationOptions(temperature: temperature)
+        guard let reasoning else { return options }
+
+        guard reasoning.encoding == .raw else {
+            throw ModelRouterError.unsupportedReasoningEffort(
+                provider: provider,
+                model: model,
+                effort: reasoning.effort
+            )
+        }
+
+        switch provider {
+        case .openAI, .moonshot:
+            // OpenAI-compatible chat endpoints use the vendor's raw effort
+            // value. Keeping this in `extraBody` preserves newer values such
+            // as `xhigh` and `max` even when the client package's typed enum
+            // has not caught up yet.
+            options[custom: OpenAILanguageModel.self] = .init(
+                extraBody: ["reasoning_effort": .string(reasoning.effort.rawValue)]
+            )
+        case .anthropic:
+            options[custom: AnthropicLanguageModel.self] = .init(
+                extraBody: [
+                    "output_config": .object([
+                        "effort": .string(reasoning.effort.rawValue)
+                    ])
+                ]
+            )
+        default:
+            throw ModelRouterError.unsupportedReasoningEffort(
+                provider: provider,
+                model: model,
+                effort: reasoning.effort
+            )
+        }
+        return options
+    }
+
+    private static func geminiGenerationOptions(
+        model: String,
+        temperature: Double,
+        reasoning: ReasoningEffortSelection?
+    ) throws(ModelRouterError) -> GenerationOptions {
+        var options = GenerationOptions(temperature: temperature)
+        guard let reasoning else { return options }
+
+        let thinking: GeminiLanguageModel.CustomGenerationOptions.Thinking
+        switch reasoning.encoding {
+        case .disabled:
+            thinking = .disabled
+        case .dynamic:
+            thinking = .dynamic
+        case .tokenBudget(let budget) where budget > 0:
+            thinking = .budget(budget)
+        case .raw, .tokenBudget(_):
+            throw .unsupportedReasoningEffort(
+                provider: .gemini,
+                model: model,
+                effort: reasoning.effort
+            )
+        }
+        options[custom: GeminiLanguageModel.self] = .init(thinking: thinking)
+        return options
+    }
+
+    private static func requireRawReasoningEncoding(
+        _ reasoning: ReasoningEffortSelection?,
+        provider: AgentModelProvider,
+        model: String
+    ) throws(ModelRouterError) {
+        guard let reasoning else { return }
+        guard reasoning.encoding != .raw else { return }
+        throw .unsupportedReasoningEffort(
+            provider: provider,
+            model: model,
+            effort: reasoning.effort
+        )
+    }
+
+    private static func rejectReasoningEffort(
+        _ reasoning: ReasoningEffortSelection?,
+        provider: AgentModelProvider,
+        model: String
+    ) throws(ModelRouterError) {
+        guard let reasoning else { return }
+        throw .unsupportedReasoningEffort(
+            provider: provider,
+            model: model,
+            effort: reasoning.effort
+        )
     }
 
 }

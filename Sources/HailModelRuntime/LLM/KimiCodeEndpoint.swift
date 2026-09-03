@@ -32,7 +32,8 @@ public struct KimiCodeEndpoint: ModelEndpoint {
         authority: (any Authority)? = nil,
         // `-y`/`--yolo` and `--auto` auto-approves kimi-code's own permission
         // prompts so the agent can run non-interactively as a Hail subprocess.
-        agentArguments: [String]? = nil
+        agentArguments: [String]? = nil,
+        reasoningEffort: ReasoningEffort? = nil
     ) throws(ModelRouterError) {
         let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
@@ -50,6 +51,7 @@ public struct KimiCodeEndpoint: ModelEndpoint {
                 mcpServerConfiguration: mcpServerConfiguration,
                 agentPath: agentPath,
                 agentArguments: agentArguments ?? Self.defaultAgentArguments(for: executionPolicy),
+                reasoningEffort: reasoningEffort,
                 resumeSession: resumeSession,
                 authority: authority
             )

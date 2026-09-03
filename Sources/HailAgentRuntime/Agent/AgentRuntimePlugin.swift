@@ -29,6 +29,10 @@ public enum AgentDirectoryError: Error, Sendable, Equatable {
     case unavailable
 }
 
+public enum AgentRuntimeConfigurationError: Error, Sendable, Equatable {
+    case invalidMaxToolRounds(Int)
+}
+
 // MARK: - Singleton store
 
 /// A cluster singleton that holds the in-memory agent directory. No event
@@ -95,6 +99,13 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     private let modelRouter: ModelRouter
     /// Host-selected model used only when no definition provider is supplied.
     public let defaultModel: AgentModelReference
+    /// Host-selected effort used only when no definition provider is supplied.
+    /// `nil` leaves the selected provider/model default unchanged.
+    public let defaultReasoningEffort: ReasoningEffort?
+    /// Host-selected ceiling on tool-call rounds within a single turn.
+    /// There is intentionally no runtime fallback: this is an application
+    /// safety policy supplied at composition time.
+    public let maxToolRounds: Int
 
     /// Optional closure that returns extra tools an agent should register.
     /// Invoked **once per turn** (the registry is rebuilt fresh each turn —
@@ -129,6 +140,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     public init(
         defaultModel: AgentModelReference,
+        maxToolRounds: Int,
         routerConfiguration: ModelRouterConfiguration,
         projectRootPath: String? = nil,
         mcpServerConfiguration: MCPServerConfiguration? = nil,
@@ -139,8 +151,12 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         contextProvider: AgentContextProvider? = nil,
         contextCompactor: (any ContextCompactor)? = nil,
         promptInstructions: PromptAssemblyInstructions = PromptAssemblyInstructions(),
-        assemblePrompt: @escaping PromptAssembler = assembleStandardPrompt
-    ) {
+        assemblePrompt: @escaping PromptAssembler = assembleStandardPrompt,
+        defaultReasoningEffort: ReasoningEffort? = nil
+    ) throws(AgentRuntimeConfigurationError) {
+        guard maxToolRounds > 0 else {
+            throw .invalidMaxToolRounds(maxToolRounds)
+        }
         self.modelRouter = ModelRouter(
             configuration: routerConfiguration,
             projectRootPath: projectRootPath,
@@ -148,6 +164,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             modelEndpointProvider: modelEndpointProvider
         )
         self.defaultModel = defaultModel
+        self.defaultReasoningEffort = defaultReasoningEffort
+        self.maxToolRounds = maxToolRounds
         self.extraToolsProvider = extraToolsProvider
         self.authorityProvider = authorityProvider
         self.definitionProvider = definitionProvider
@@ -170,7 +188,11 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     public func definition(for spawnConfig: AgentSpawnConfig) async throws -> AgentDefinition {
         try await definitionProvider?(spawnConfig)
-            ?? .defaultDefinition(for: spawnConfig.agentID.role, model: defaultModel)
+            ?? .defaultDefinition(
+                for: spawnConfig.agentID.role,
+                model: defaultModel,
+                reasoningEffort: defaultReasoningEffort
+            )
     }
 
     // MARK: Model endpoints
@@ -194,7 +216,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         workingDirectory: String? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         resumeSession: ModelSessionResume? = nil,
-        authority: (any Authority)? = nil
+        authority: (any Authority)? = nil,
+        reasoningEffort: ReasoningEffort? = nil
     ) async throws(ModelRouterError) -> any ModelEndpoint {
         try await modelRouter.endpoint(
             for: model,
@@ -203,7 +226,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             workingDirectory: workingDirectory,
             executionPolicy: executionPolicy,
             resumeSession: resumeSession,
-            authority: authority
+            authority: authority,
+            reasoningEffort: reasoningEffort
         )
     }
 
@@ -215,14 +239,16 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         agentID: String,
         contextID: AgentContextID? = nil,
         workingDirectory: String? = nil,
-        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace
+        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
+        reasoningEffort: ReasoningEffort? = nil
     ) async {
         await modelRouter.evict(
             for: model,
             agentID: agentID,
             contextID: contextID,
             workingDirectory: workingDirectory,
-            executionPolicy: executionPolicy
+            executionPolicy: executionPolicy,
+            reasoningEffort: reasoningEffort
         )
     }
 

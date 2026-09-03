@@ -24,7 +24,6 @@ import DistributedCluster
 import Hail
 import VirtualActors
 
-let projectRoot = "/path/to/project"
 let scoutID = AgentID(role: Role("scout"), contextID: AgentContextID("mission-7"))
 
 // The host's definition selects the provider and model.
@@ -41,8 +40,7 @@ let scoutDefinition = AgentDefinition(
 let scout: Agent = try await system.virtualActors.getActor(
     identifiedBy: VirtualActorID(rawValue: scoutID.rawValue),
     dependency: AgentSpawnConfig(
-        agentID: scoutID,
-        projectRootPath: projectRoot
+        agentID: scoutID
     )
 )
 ```
@@ -175,15 +173,18 @@ let runtime = try AgentRuntimePlugin(
     defaultModel: try AgentModelReference("your-provider/your-model"),
     maxToolRounds: 25,
     routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
+    workspaceProvider: { _ in
+        AgentWorkspace(rootPath: "/path/to/project")
+    },
     definitionProvider: { spawn in
         await definitions.lookup(spawn.agentID.role)
     },
     extraToolsProvider: { agentID, sourceAgentID, system in
         makeHostTools(for: agentID, calledBy: sourceAgentID, in: system)
     },
-    authorityProvider: { spawn in
+    authorityProvider: { _, workspace in
         CompositeAuthority.workspaceDefault(
-            root: spawn.scope.path ?? spawn.projectRootPath
+            root: workspace.rootPath
         )
     }
 )

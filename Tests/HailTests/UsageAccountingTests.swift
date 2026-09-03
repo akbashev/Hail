@@ -173,12 +173,12 @@ struct UsageAccountingTests {
             configuration: try ModelRouterConfiguration(
                 temperature: 0.7,
                 baseURLs: [.ollama: URL(string: "http://localhost:11434")!]
-            ),
-            projectRootPath: "/tmp"
+            )
         )
         let routed = try await router.endpoint(
             for: "ollama/qwen2.5",
-            agentID: agentID.rawValue
+            agentID: agentID.rawValue,
+            workspace: AgentWorkspace(rootPath: "/tmp")
         )
         #expect(routed is OllamaEndpoint)
     }

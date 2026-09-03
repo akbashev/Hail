@@ -77,11 +77,17 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             _ actorSystem: ClusterSystem
         ) async throws -> [any Tool]
 
-    /// Derives the effect ``Authority`` for one agent from its spawn config.
-    /// The config is `Codable` (journaled), so authority — a value of
-    /// closures — is resolved here at activation instead of riding on it.
+    /// Derives the effect ``Authority`` for one agent from its durable spawn
+    /// intent and activation-resolved workspace. The authority — a value of
+    /// closures — is resolved here instead of riding on the `Codable` config.
     public typealias AuthorityProvider =
-        @Sendable (_ spawnConfig: AgentSpawnConfig) async -> any Authority
+        @Sendable (_ spawnConfig: AgentSpawnConfig, _ workspace: AgentWorkspace) async -> any Authority
+
+    /// Resolves the host's physical workspace for an agent's logical scope.
+    /// The result is activation-time state and is never persisted with the
+    /// distributed spawn config.
+    public typealias WorkspaceProvider =
+        @Sendable (_ spawnConfig: AgentSpawnConfig) async throws(AgentRuntimeError) -> AgentWorkspace
 
     /// Loads a definition from the host's chosen configuration store. Returning
     /// `nil` selects Hail's generic role default.
@@ -119,6 +125,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// is open (``CompositeAuthority/workspaceDefault(root:)``).
     public var authorityProvider: AuthorityProvider?
 
+    public let workspaceProvider: WorkspaceProvider
+
     public var definitionProvider: DefinitionProvider?
 
     /// Pure transformation that assembles an agent's model request.
@@ -142,11 +150,11 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         defaultModel: AgentModelReference,
         maxToolRounds: Int,
         routerConfiguration: ModelRouterConfiguration,
-        projectRootPath: String? = nil,
         mcpServerConfiguration: MCPServerConfiguration? = nil,
         modelEndpointProvider: ModelEndpointProvider? = nil,
         extraToolsProvider: ExtraToolsProvider? = nil,
         authorityProvider: AuthorityProvider? = nil,
+        workspaceProvider: @escaping WorkspaceProvider,
         definitionProvider: DefinitionProvider? = nil,
         contextProvider: AgentContextProvider? = nil,
         contextCompactor: (any ContextCompactor)? = nil,
@@ -159,7 +167,6 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         }
         self.modelRouter = ModelRouter(
             configuration: routerConfiguration,
-            projectRootPath: projectRootPath,
             mcpServerConfiguration: mcpServerConfiguration,
             modelEndpointProvider: modelEndpointProvider
         )
@@ -168,6 +175,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         self.maxToolRounds = maxToolRounds
         self.extraToolsProvider = extraToolsProvider
         self.authorityProvider = authorityProvider
+        self.workspaceProvider = workspaceProvider
         self.definitionProvider = definitionProvider
         self.contextProvider = contextProvider
         self.contextCompactor = contextCompactor
@@ -175,15 +183,24 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         self.assemblePrompt = assemblePrompt
     }
 
+    /// Resolves the host workspace for one activation.
+    public func workspace(for spawnConfig: AgentSpawnConfig) async throws(AgentRuntimeError) -> AgentWorkspace {
+        let workspace = try await workspaceProvider(spawnConfig)
+        guard !workspace.rootPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw .configurationError("Workspace provider returned an empty root")
+        }
+        return workspace
+    }
+
     /// Resolves the effect authority for one agent. Defaults to
     /// ``CompositeAuthority/workspaceDefault(root:)`` — file effects pinned
-    /// to the agent's workspace, everything else open: the behavior every
-    /// agent had before authorities existed.
-    public func authority(for spawnConfig: AgentSpawnConfig) async -> any Authority {
-        await authorityProvider?(spawnConfig)
-            ?? CompositeAuthority.workspaceDefault(
-                root: spawnConfig.scope.path ?? spawnConfig.projectRootPath
-            )
+    /// to the resolved workspace, everything else open.
+    public func authority(
+        for spawnConfig: AgentSpawnConfig,
+        workspace: AgentWorkspace
+    ) async -> any Authority {
+        await authorityProvider?(spawnConfig, workspace)
+            ?? CompositeAuthority.workspaceDefault(root: workspace.rootPath)
     }
 
     public func definition(for spawnConfig: AgentSpawnConfig) async throws -> AgentDefinition {
@@ -213,7 +230,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         for model: String,
         agentID: String,
         contextID: AgentContextID? = nil,
-        workingDirectory: String? = nil,
+        workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
@@ -223,7 +240,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             for: model,
             agentID: agentID,
             contextID: contextID,
-            workingDirectory: workingDirectory,
+            workspace: workspace,
             executionPolicy: executionPolicy,
             resumeSession: resumeSession,
             authority: authority,
@@ -238,7 +255,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         for model: String,
         agentID: String,
         contextID: AgentContextID? = nil,
-        workingDirectory: String? = nil,
+        workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         reasoningEffort: ReasoningEffort? = nil
     ) async {
@@ -246,7 +263,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             for: model,
             agentID: agentID,
             contextID: contextID,
-            workingDirectory: workingDirectory,
+            workspace: workspace,
             executionPolicy: executionPolicy,
             reasoningEffort: reasoningEffort
         )
@@ -258,14 +275,14 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         for model: String,
         agentID: String,
         contextID: AgentContextID? = nil,
-        workingDirectory: String? = nil
+        workspace: AgentWorkspace? = nil
     ) async throws(ModelRouterError) {
         try await modelRouter.register(
             endpoint,
             for: model,
             agentID: agentID,
             contextID: contextID,
-            workingDirectory: workingDirectory
+            workspace: workspace
         )
     }
 

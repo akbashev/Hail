@@ -37,7 +37,6 @@ public struct PromptMeasurement: Sendable {
 public struct PromptContext: Sendable {
     public let agentID: AgentID
     public let definition: AgentDefinition
-    public let projectRootPath: String
     public let workingMemory: [String]
     /// The rolling summary of compacted-away history, if any compaction ran.
     /// Compactors read it to fold the old summary into the new one.
@@ -55,7 +54,6 @@ public struct PromptContext: Sendable {
     public init(
         agentID: AgentID,
         definition: AgentDefinition,
-        projectRootPath: String,
         workingMemory: [String],
         contextSummary: String? = nil,
         conversationThread: [ChatMessage],
@@ -67,7 +65,6 @@ public struct PromptContext: Sendable {
     ) {
         self.agentID = agentID
         self.definition = definition
-        self.projectRootPath = projectRootPath
         self.workingMemory = workingMemory
         self.contextSummary = contextSummary
         self.conversationThread = conversationThread
@@ -84,7 +81,6 @@ public struct PromptContext: Sendable {
         PromptContext(
             agentID: agentID,
             definition: definition,
-            projectRootPath: projectRootPath,
             workingMemory: workingMemory,
             contextSummary: contextSummary,
             conversationThread: conversationThread,

@@ -26,7 +26,6 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: .chat),
             definition: definition,
-            projectRootPath: "/workspace",
             workingMemory: [],
             conversationThread: [
                 .response(sender: "assistant", payload: payload, timestamp: Date())
@@ -56,7 +55,6 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: .chat),
             definition: definition,
-            projectRootPath: "/workspace",
             workingMemory: [],
             conversationThread: [],
             contextManifest: ContextManifest(items: [])
@@ -101,7 +99,6 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: AgentContextID("build")),
             definition: definition,
-            projectRootPath: "/workspace",
             workingMemory: [],
             conversationThread: [],
             contextManifest: ContextManifest(items: []),

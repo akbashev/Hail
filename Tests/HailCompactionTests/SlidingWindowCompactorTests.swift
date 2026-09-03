@@ -43,7 +43,6 @@ struct SlidingWindowCompactorTests {
                 ),
                 limits: .init()
             ),
-            projectRootPath: "/tmp",
             workingMemory: memory,
             contextSummary: summary,
             conversationThread: thread,

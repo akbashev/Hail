@@ -70,14 +70,15 @@ public distributed actor Agent: AsyncSequence {
         return ModelSessionResume(id: id, identity: identity)
     }
 
-    // Injected at spawn, immutable, deterministic
+    // Durable definition plus activation-resolved host capabilities.
     /// The agent's configuration, loaded from the definition journal at
     /// activation (the journal is the truth; nothing caches it). A revived
     /// agent picks up edits made while it was passivated.
     let definition: AgentDefinition
-    let projectRootPath: String
     let scope: AgentScope
-    let workspacePath: String
+    /// Resolved by the host workspace effect for this activation. It is not
+    /// part of the durable spawn dependency.
+    let workspace: AgentWorkspace
     let agentDirectoryID: AgentDirectoryID
     let resumesInterruptedTurns: Bool
     /// The spawn configuration this agent was created with. Kept so
@@ -123,17 +124,20 @@ public distributed actor Agent: AsyncSequence {
         self.actorSystem = actorSystem
         self._agentID = dependency.agentID
         self.state = AgentState(agentID: dependency.agentID)
+        let workspace = try await actorSystem.agentRuntime.workspace(for: dependency)
         // Configuration is supplied by the embedding host. Hail neither knows
         // nor assumes where definitions are persisted.
         let definition = try await actorSystem.agentRuntime.definition(for: dependency)
         self.definition = definition
-        self.projectRootPath = dependency.projectRootPath
         self.scope = dependency.scope
-        self.workspacePath = dependency.scope.path ?? dependency.projectRootPath
+        self.workspace = workspace
         self.agentDirectoryID = dependency.agentDirectoryID
         self.resumesInterruptedTurns = dependency.resumesInterruptedTurns
         self.spawnConfig = dependency
-        self.authority = await actorSystem.agentRuntime.authority(for: dependency)
+        self.authority = await actorSystem.agentRuntime.authority(
+            for: dependency,
+            workspace: workspace
+        )
 
         // The virtual actor and its event-sourced state share one canonical
         // identity. A separate persistence key could drift and revive the same
@@ -201,7 +205,7 @@ public distributed actor Agent: AsyncSequence {
             for: definition.behavior.model.rawValue,
             agentID: state.agentID.rawValue,
             contextID: state.agentID.contextID,
-            workingDirectory: workspacePath,
+            workspace: workspace,
             executionPolicy: definition.behavior.execution,
             reasoningEffort: definition.behavior.reasoningEffort
         )
@@ -592,7 +596,7 @@ public distributed actor Agent: AsyncSequence {
                         for: self.definition.behavior.model.rawValue,
                         agentID: self.state.agentID.rawValue,
                         contextID: self.state.agentID.contextID,
-                        workingDirectory: self.workspacePath,
+                        workspace: self.workspace,
                         executionPolicy: self.definition.behavior.execution,
                         resumeSession: resumeSession,
                         authority: self.authority,
@@ -629,7 +633,6 @@ public distributed actor Agent: AsyncSequence {
         let promptContext = PromptContext(
             agentID: state.agentID,
             definition: definition,
-            projectRootPath: projectRootPath,
             workingMemory: workingMemory,
             contextSummary: state.contextSummary,
             conversationThread: conversationThread,
@@ -668,13 +671,12 @@ public distributed actor Agent: AsyncSequence {
     private func registerTools(in registry: ToolRegistry) async throws(AgentRuntimeError) {
         await registry.register(NowTool())
         await registry.register(
-            FileTool(projectRoot: URL(fileURLWithPath: scope.path ?? projectRootPath))
+            FileTool(projectRoot: URL(fileURLWithPath: workspace.rootPath))
         )
         await registry.register(tools: [
             AgentTool(
                 sourceAgentID: state.agentID,
                 system: actorSystem,
-                projectRootPath: projectRootPath,
                 scope: scope,
                 agentDirectoryID: agentDirectoryID
             )

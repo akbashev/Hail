@@ -50,8 +50,7 @@ struct ModelRouteTests {
     @Test("the built-in router rejects providers without an endpoint")
     func routerRejectsUnknownProvider() async throws {
         let router = ModelRouter(
-            configuration: try ModelRouterConfiguration(temperature: 0.7),
-            projectRootPath: "/tmp"
+            configuration: try ModelRouterConfiguration(temperature: 0.7)
         )
         await #expect(
             throws: ModelRouterError.invalidRoute(.unknownProvider("mystery"))
@@ -59,7 +58,7 @@ struct ModelRouteTests {
             try await router.endpoint(
                 for: "mystery/model",
                 agentID: "coder-main",
-                workingDirectory: "/tmp"
+                workspace: AgentWorkspace(rootPath: "/tmp")
             )
         }
     }
@@ -88,8 +87,7 @@ struct ModelRouteTests {
     @Test("the router does not invent an application model default")
     func routerRejectsEmptyModel() async throws {
         let router = ModelRouter(
-            configuration: try ModelRouterConfiguration(temperature: 0.7),
-            projectRootPath: "/tmp"
+            configuration: try ModelRouterConfiguration(temperature: 0.7)
         )
 
         await #expect(
@@ -98,7 +96,7 @@ struct ModelRouteTests {
             try await router.endpoint(
                 for: " ",
                 agentID: "coder-main",
-                workingDirectory: "/tmp"
+                workspace: AgentWorkspace(rootPath: "/tmp")
             )
         }
     }
@@ -106,15 +104,28 @@ struct ModelRouteTests {
     @Test("provider policy is supplied by the host")
     func providerPolicyIsExplicit() async throws {
         let router = ModelRouter(
-            configuration: try ModelRouterConfiguration(temperature: 0.7),
-            projectRootPath: "/tmp"
+            configuration: try ModelRouterConfiguration(temperature: 0.7)
         )
 
         await #expect(throws: ModelRouterError.missingAPIKey(.openAI)) {
             try await router.endpoint(
                 for: "openai/gpt-test",
                 agentID: "coder-main",
-                workingDirectory: "/tmp"
+                workspace: AgentWorkspace(rootPath: "/tmp")
+            )
+        }
+    }
+
+    @Test("local process routes require resolved workspace context")
+    func localRouteRequiresWorkspace() async throws {
+        let router = ModelRouter(
+            configuration: try ModelRouterConfiguration(temperature: 0.7)
+        )
+
+        await #expect(throws: ModelRouterError.missingWorkingDirectory) {
+            try await router.endpoint(
+                for: "codex/gpt-test",
+                agentID: "coder-main"
             )
         }
     }
@@ -150,8 +161,7 @@ struct ModelRouteTests {
                         supportedEfforts: [.minimal, .low, .medium, .high]
                     )
                 ]
-            ),
-            projectRootPath: "/tmp"
+            )
         )
 
         await #expect(
@@ -164,7 +174,7 @@ struct ModelRouteTests {
             try await router.endpoint(
                 for: model.rawValue,
                 agentID: "coder-main",
-                workingDirectory: "/tmp",
+                workspace: AgentWorkspace(rootPath: "/tmp"),
                 reasoningEffort: .xhigh
             )
         }
@@ -182,14 +192,13 @@ struct ModelRouteTests {
                         ModelReasoningLevel(effort: .high, encoding: .dynamic)
                     ])
                 ]
-            ),
-            projectRootPath: "/tmp"
+            )
         )
 
         let endpoint = try await router.endpoint(
             for: model.rawValue,
             agentID: "coder-main",
-            workingDirectory: "/tmp",
+            workspace: AgentWorkspace(rootPath: "/tmp"),
             reasoningEffort: .high
         )
         #expect(endpoint.model == "gemini-2.5-pro")

@@ -14,7 +14,6 @@ import ScopedEffect
 /// long-lived connections (e.g. the local `kimi-code` ACP session) are created
 /// once and shared across agents that target the same configuration.
 public actor ModelRouter {
-    private let projectRootPath: String?
     private let mcpServerConfiguration: MCPServerConfiguration?
     private let modelEndpointProvider: ModelEndpointProvider?
     private let configuration: ModelRouterConfiguration
@@ -25,18 +24,16 @@ public actor ModelRouter {
         let reasoningEffort: ReasoningEffort?
         let agentID: String
         let contextID: AgentContextID?
-        let workingDirectory: String
+        let workspace: AgentWorkspace?
         let executionPolicy: AgentExecutionPolicy
     }
 
     public init(
         configuration: ModelRouterConfiguration,
-        projectRootPath: String? = nil,
         mcpServerConfiguration: MCPServerConfiguration? = nil,
         modelEndpointProvider: ModelEndpointProvider? = nil
     ) {
         self.configuration = configuration
-        self.projectRootPath = projectRootPath
         self.mcpServerConfiguration = mcpServerConfiguration
         self.modelEndpointProvider = modelEndpointProvider
     }
@@ -56,7 +53,7 @@ public actor ModelRouter {
         for model: String,
         agentID: String,
         contextID: AgentContextID? = nil,
-        workingDirectory: String? = nil,
+        workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
@@ -66,7 +63,7 @@ public actor ModelRouter {
             for: model,
             agentID: agentID,
             contextID: contextID,
-            workingDirectory: workingDirectory,
+            workspace: workspace,
             executionPolicy: executionPolicy,
             resumeSession: resumeSession,
             authority: authority,
@@ -78,21 +75,18 @@ public actor ModelRouter {
         for model: String,
         agentID: String,
         contextID: AgentContextID? = nil,
-        workingDirectory: String? = nil,
+        workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         reasoningEffort: ReasoningEffort? = nil
     ) throws(ModelRouterError) -> any ModelEndpoint {
-        guard let effectiveWorkingDirectory = workingDirectory ?? projectRootPath else {
-            throw ModelRouterError.missingProjectRoot
-        }
         let key = CacheKey(
             model: model,
             reasoningEffort: reasoningEffort,
             agentID: agentID,
             contextID: contextID,
-            workingDirectory: effectiveWorkingDirectory,
+            workspace: workspace,
             executionPolicy: executionPolicy
         )
 
@@ -104,7 +98,7 @@ public actor ModelRouter {
             for: model,
             agentID: agentID,
             contextID: contextID,
-            workingDirectory: effectiveWorkingDirectory,
+            workspace: workspace,
             executionPolicy: executionPolicy,
             resumeSession: resumeSession,
             authority: authority,
@@ -120,23 +114,22 @@ public actor ModelRouter {
     /// Called when the owning agent deactivates: the cache pins endpoints
     /// independently of actor lifetime, so without eviction a passivated agent
     /// would keep an idle harness process alive forever. The next
-    /// ``endpoint(for:agentID:contextID:workingDirectory:executionPolicy:resumeSession:authority:)``
+    /// ``endpoint(for:agentID:contextID:workspace:executionPolicy:resumeSession:authority:)``
     /// call rebuilds the endpoint cold, resuming from the journaled session.
     public func evict(
         for model: String,
         agentID: String,
         contextID: AgentContextID? = nil,
-        workingDirectory: String? = nil,
+        workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         reasoningEffort: ReasoningEffort? = nil
     ) async {
-        guard let effectiveWorkingDirectory = workingDirectory ?? projectRootPath else { return }
         let key = CacheKey(
             model: model,
             reasoningEffort: reasoningEffort,
             agentID: agentID,
             contextID: contextID,
-            workingDirectory: effectiveWorkingDirectory,
+            workspace: workspace,
             executionPolicy: executionPolicy
         )
         guard let endpoint = cache.removeValue(forKey: key) else { return }
@@ -150,19 +143,16 @@ public actor ModelRouter {
         for model: String,
         agentID: String,
         contextID: AgentContextID? = nil,
-        workingDirectory: String? = nil,
+        workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         reasoningEffort: ReasoningEffort? = nil
     ) throws(ModelRouterError) {
-        guard let effectiveWorkingDirectory = workingDirectory ?? projectRootPath else {
-            throw ModelRouterError.missingProjectRoot
-        }
         let key = CacheKey(
             model: model,
             reasoningEffort: reasoningEffort,
             agentID: agentID,
             contextID: contextID,
-            workingDirectory: effectiveWorkingDirectory,
+            workspace: workspace,
             executionPolicy: executionPolicy
         )
         cache[key] = endpoint
@@ -187,7 +177,7 @@ public actor ModelRouter {
         for model: String,
         agentID: String?,
         contextID: AgentContextID?,
-        workingDirectory: String,
+        workspace: AgentWorkspace?,
         executionPolicy: AgentExecutionPolicy,
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
@@ -208,7 +198,7 @@ public actor ModelRouter {
                 model: effectiveModel,
                 agentID: agentID,
                 contextID: contextID,
-                workingDirectory: workingDirectory,
+                workspace: workspace,
                 executionPolicy: executionPolicy,
                 resumeSession: resumeSession,
                 authority: authority,
@@ -223,6 +213,7 @@ public actor ModelRouter {
 
         switch provider {
         case .codex:
+            let workingDirectory = try Self.requireWorkingDirectory(workspace)
             try Self.requireRawReasoningEncoding(
                 reasoning,
                 provider: provider,
@@ -241,6 +232,7 @@ public actor ModelRouter {
             )
 
         case .kimiCode:
+            let workingDirectory = try Self.requireWorkingDirectory(workspace)
             try Self.requireRawReasoningEncoding(
                 reasoning,
                 provider: provider,
@@ -259,6 +251,7 @@ public actor ModelRouter {
             )
 
         case .claude:
+            let workingDirectory = try Self.requireWorkingDirectory(workspace)
             try Self.requireRawReasoningEncoding(
                 reasoning,
                 provider: provider,
@@ -387,6 +380,17 @@ public actor ModelRouter {
         } catch {
             throw ModelRouterError.invalidRoute(error)
         }
+    }
+
+    private static func requireWorkingDirectory(
+        _ workspace: AgentWorkspace?
+    ) throws(ModelRouterError) -> String {
+        guard let workspace,
+            !workspace.rootPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw .missingWorkingDirectory
+        }
+        return workspace.rootPath
     }
 
     private static func generationOptions(

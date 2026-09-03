@@ -103,7 +103,6 @@ struct PromptAssemblySummaryTests {
                 ),
                 limits: .init()
             ),
-            projectRootPath: "/tmp",
             workingMemory: [],
             contextSummary: summary,
             conversationThread: thread,
@@ -297,7 +296,6 @@ struct ReasoningLoopCompactionTests {
                 ),
                 limits: .init()
             ),
-            projectRootPath: "/tmp",
             workingMemory: [],
             conversationThread: thread,
             contextManifest: ContextManifest(items: [])

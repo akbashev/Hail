@@ -8,7 +8,9 @@ public struct ModelEndpointRequest: Sendable {
     public let reasoning: ReasoningEffortSelection?
     public let agentID: String?
     public let contextID: AgentContextID?
-    public let workingDirectory: String
+    /// Resolved workspace context for host/process-backed endpoints. HTTP
+    /// model endpoints can ignore it.
+    public let workspace: AgentWorkspace?
     public let executionPolicy: AgentExecutionPolicy
     public let resumeSession: ModelSessionResume?
     public let authority: (any Authority)?
@@ -17,7 +19,7 @@ public struct ModelEndpointRequest: Sendable {
         model: String,
         agentID: String?,
         contextID: AgentContextID?,
-        workingDirectory: String,
+        workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy,
         resumeSession: ModelSessionResume?,
         authority: (any Authority)?,
@@ -27,7 +29,7 @@ public struct ModelEndpointRequest: Sendable {
         self.reasoning = reasoning
         self.agentID = agentID
         self.contextID = contextID
-        self.workingDirectory = workingDirectory
+        self.workspace = workspace
         self.executionPolicy = executionPolicy
         self.resumeSession = resumeSession
         self.authority = authority

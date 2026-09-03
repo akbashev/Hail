@@ -76,20 +76,17 @@ public struct AgentTool: Tool {
 
     private let sourceAgentID: AgentID
     private let system: ClusterSystem
-    private let projectRootPath: String
     private let scope: AgentScope
     private let agentDirectoryID: AgentDirectoryID
 
     public init(
         sourceAgentID: AgentID,
         system: ClusterSystem,
-        projectRootPath: String,
         scope: AgentScope,
         agentDirectoryID: AgentDirectoryID
     ) {
         self.sourceAgentID = sourceAgentID
         self.system = system
-        self.projectRootPath = projectRootPath
         self.scope = scope
         self.agentDirectoryID = agentDirectoryID
     }
@@ -152,7 +149,6 @@ public struct AgentTool: Tool {
                 identifiedBy: VirtualActorID(rawValue: targetID.rawValue),
                 dependency: AgentSpawnConfig(
                     agentID: targetID,
-                    projectRootPath: projectRootPath,
                     scope: scope,
                     agentDirectoryID: agentDirectoryID
                 )

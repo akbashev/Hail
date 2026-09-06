@@ -6,7 +6,8 @@ import AnyLanguageModel
 /// text or by calling a dedicated reporting tool. The runtime uses this
 /// contract to drive the model adapter without knowing the domain meaning of
 /// the value.
-public protocol AgentOutput: Codable & Sendable & Generable {
+public protocol AgentOutput: Codable & Sendable & Generable
+where PartiallyGenerated: Codable & Sendable {
     /// Describes how the model must produce this output.
     static var outputContract: AgentOutputContract { get }
 }

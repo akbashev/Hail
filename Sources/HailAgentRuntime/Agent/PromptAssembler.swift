@@ -209,11 +209,18 @@ private func modelMessage(from msg: ChatMessage, context: PromptContext) -> LLMM
     switch msg {
     case .text(let sender, let content, _):
         let llmRole: LLMMessage.Role = sender == context.agentID.rawValue ? .assistant : .user
-        return LLMMessage(role: llmRole, content: content)
+        // Preserve the sender on historical text messages. The live input
+        // path already supplies `name`; dropping it during context rebuild
+        // made multi-participant conversations indistinguishable after the
+        // first turn.
+        let name = sender == context.agentID.rawValue ? nil : sender
+        return LLMMessage(role: llmRole, content: content, name: name)
     case .response(let sender, let payload, _):
         let content = modelResponseContent(payload)
         guard !content.isEmpty else { return nil }
-        return LLMMessage(role: sender == context.agentID.rawValue ? .assistant : .user, content: content)
+        let role: LLMMessage.Role = sender == context.agentID.rawValue ? .assistant : .user
+        let name = sender == context.agentID.rawValue ? nil : sender
+        return LLMMessage(role: role, content: content, name: name)
     case .toolCall(let calls, _):
         return LLMMessage(
             role: .assistant,
@@ -234,15 +241,46 @@ private func modelMessage(from msg: ChatMessage, context: PromptContext) -> LLMM
     }
 }
 
-/// Renders a journaled typed response for a subsequent model request. String
-/// outputs lose their JSON quotes; structured outputs keep their encoded JSON
-/// instead of disappearing merely because they are not strings.
+/// Renders a journaled response for a subsequent model request.
+///
+/// Plain `String` outputs are stored as JSON strings. Older chat turns were
+/// sometimes stored as Hail's `ChatResponse` wrapper, and a model can then
+/// repeat that wrapper as literal text. Decode that known legacy shape,
+/// including one or more nested wrappers, while leaving unrelated structured
+/// output objects untouched.
 func modelResponseContent(_ payload: Data) -> String {
-    do {
-        return try JSONDecoder().decode(String.self, from: payload)
-    } catch {
-        return String(decoding: payload, as: UTF8.self)
+    if let content = exactLegacyChatResponseContent(in: payload) {
+        return unwrappedLegacyChatResponse(content)
     }
+    if let text = try? JSONDecoder().decode(String.self, from: payload) {
+        return unwrappedLegacyChatResponse(text)
+    }
+    return String(decoding: payload, as: UTF8.self)
+}
+
+private func unwrappedLegacyChatResponse(_ text: String) -> String {
+    guard let nestedPayload = text.data(using: .utf8),
+          let content = exactLegacyChatResponseContent(in: nestedPayload)
+    else {
+        return text
+    }
+    return unwrappedLegacyChatResponse(content)
+}
+
+/// `Codable` ignores unknown keys by default. That is useful for normal model
+/// decoding, but unsafe for this migration path: an unrelated structured
+/// response such as `{ "content": "x", "citations": [...] }` must not be
+/// mistaken for the old one-field ChatResponse envelope.
+private func exactLegacyChatResponseContent(in payload: Data) -> String? {
+    guard
+        let object = try? JSONSerialization.jsonObject(with: payload),
+        let dictionary = object as? [String: Any],
+        dictionary.keys.count == 1,
+        dictionary["content"] is String
+    else {
+        return nil
+    }
+    return dictionary["content"] as? String
 }
 
 extension LLMToolCall {

@@ -7,15 +7,14 @@ import HailCore
 /// keeps the most recent ones verbatim.
 ///
 /// Boundary rules:
-/// - the newest `keepRecent` messages are never archived — at minimum the
-///   last one, which opened the turn currently running;
+/// - the newest `keepRecent` messages are preferred verbatim, but the
+///   preference can be relaxed when that suffix cannot fit;
 /// - a cut never splits a ``ChatMessage/toolCall`` from its
 ///   ``ChatMessage/toolResult``(s): a trailing tool call in the archived
 ///   prefix backs the cut off until the prefix ends cleanly;
 /// - the existing ``PromptContext/contextSummary`` is folded into the new
 ///   summary by the summarize closure, so the window carries at most one.
 public struct SlidingWindowCompactor: ContextCompactor {
-    public var budget: ContextWindowBudget
     public var estimator: TokenEstimator
     /// Fraction of the window at which compaction triggers.
     public var threshold: Double
@@ -28,14 +27,12 @@ public struct SlidingWindowCompactor: ContextCompactor {
     public var toolResultReserve: Int
 
     public init(
-        budget: ContextWindowBudget = .init(),
         estimator: TokenEstimator = .init(),
         threshold: Double = 0.7,
         keepRecent: Int = 10,
         outputReserve: Int = 512,
         toolResultReserve: Int = 512
     ) {
-        self.budget = budget
         self.estimator = estimator
         self.threshold = threshold
         self.keepRecent = keepRecent
@@ -46,23 +43,38 @@ public struct SlidingWindowCompactor: ContextCompactor {
     public func compact(
         context: PromptContext,
         request: PreparedRequest,
+        budget: CompactionBudget,
         summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
     ) async throws(AgentRuntimeError) -> CompactionDecision {
-        let window =
-            context.measurement.effectiveContextWindow
-            ?? budget.budget(for: context.definition.behavior.model.rawValue)
-        let trigger = Int(Double(window) * threshold)
+        try await compact(
+            context: context,
+            request: request,
+            budget: budget,
+            summarize: summarize,
+            trigger: .threshold
+        )
+    }
+
+    public func compact(
+        context: PromptContext,
+        request: PreparedRequest,
+        budget: CompactionBudget,
+        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String,
+        trigger: ContextCompactionTrigger
+    ) async throws(AgentRuntimeError) -> CompactionDecision {
+        let window = budget.contextWindow
+        let thresholdTrigger = Int(Double(window) * threshold)
 
         let used: Int
         if let projected = context.measurement.projectedTokenCount {
             used = projected
         } else {
-            used = try await measure(context: context, messages: request.messages, tools: request.tools)
+            used = try await measure(context: context, request: request)
         }
-        guard used >= trigger else { return .unchanged }
+        guard trigger == .contextLengthExceeded || used >= thresholdTrigger else { return .unchanged }
 
-        let minimumTail = max(keepRecent, 1)
-        guard context.conversationThread.count > minimumTail else { return .unchanged }
+        let preferredTail = max(keepRecent, 1)
+        guard context.conversationThread.count > 1 else { return .unchanged }
         guard !request.conversation.isEmpty else {
             throw AgentRuntimeError.configurationError(
                 "Context compaction requires a prepared conversation section"
@@ -71,42 +83,53 @@ public struct SlidingWindowCompactor: ContextCompactor {
 
         let hardLimit = max(window, 1)
         let retainedTarget = max(0, hardLimit - outputReserve - toolResultReserve)
-        let validCuts = Self.validCuts(
+        let preferredCuts = Self.validCuts(
             in: context.conversationThread,
-            maximum: context.conversationThread.count - minimumTail,
+            maximum: context.conversationThread.count - preferredTail,
             assistantSender: context.agentID.rawValue
         )
-        guard !validCuts.isEmpty else { return .unchanged }
+        let forced = trigger == .contextLengthExceeded
+        var selectedCut = try await selectCut(
+            from: preferredCuts,
+            context: context,
+            request: request,
+            retainedTarget: retainedTarget,
+            requireProgress: forced
+        )
 
-        // Find the smallest archive prefix whose complete request fits the
-        // retained target. Since removing an older prefix only removes tokens,
-        // valid cuts are monotonic and can be searched without trying every
-        // possible suffix.
-        var lower = 0
-        var upper = validCuts.count - 1
-        var selectedCut: Int?
-        while lower <= upper {
-            let middle = (lower + upper) / 2
-            let cut = validCuts[middle]
-            let candidate = request.retainingConversation(after: cut)
-            let count = try await measure(
-                context: context,
-                messages: candidate.messages,
-                tools: candidate.tools
+        // `keepRecent` is a preference, not a hard safety gate. If the
+        // preferred suffix cannot fit, retain the smallest complete suffix
+        // that can, down to one semantic message. This also gives a forced
+        // recovery request a way to make progress when the normal estimate
+        // missed provider-side costs.
+        if selectedCut == nil {
+            let fallbackCuts = Self.validCuts(
+                in: context.conversationThread,
+                maximum: context.conversationThread.count - 1,
+                assistantSender: context.agentID.rawValue
             )
-            if count <= retainedTarget {
-                selectedCut = cut
-                upper = middle - 1
-            } else {
-                lower = middle + 1
+            selectedCut = try await selectCut(
+                from: fallbackCuts,
+                context: context,
+                request: request,
+                retainedTarget: retainedTarget,
+                requireProgress: forced
+            )
+            if selectedCut == nil, forced {
+                // The provider has already established that the request is
+                // too large. In recovery mode, progress is more important
+                // than satisfying Hail's estimate: archive the largest
+                // complete prefix available and let the bounded summarizer
+                // decide whether that prefix itself is representable.
+                selectedCut = fallbackCuts.last(where: { $0 > 0 })
             }
         }
 
         guard let archivedCount = selectedCut else {
-            // Even the minimum semantic tail cannot fit with the required
-            // reserve. Sending this request would knowingly overflow the
-            // configured window, so fail before the provider sees it.
-            throw AgentRuntimeError.contextLengthExceeded
+            // Hail does not turn an estimate into a terminal provider error.
+            // The endpoint gets to make the final decision; a reported
+            // overflow can come back through the trigger-aware path above.
+            return .unchanged
         }
         guard archivedCount > 0 else { return .unchanged }
 
@@ -120,6 +143,38 @@ public struct SlidingWindowCompactor: ContextCompactor {
         return .compacted(
             ConversationCompaction(summary: summary, archivedCount: archivedCount)
         )
+    }
+
+    private func selectCut(
+        from cuts: [Int],
+        context: PromptContext,
+        request: PreparedRequest,
+        retainedTarget: Int,
+        requireProgress: Bool
+    ) async throws(AgentRuntimeError) -> Int? {
+        let candidates = requireProgress ? cuts.filter { $0 > 0 } : cuts
+        guard !candidates.isEmpty else { return nil }
+
+        // Find the smallest archive prefix whose complete request fits the
+        // retained target. Since removing an older prefix only removes tokens,
+        // valid cuts are monotonic and can be searched without trying every
+        // possible suffix.
+        var lower = 0
+        var upper = candidates.count - 1
+        var selectedCut: Int?
+        while lower <= upper {
+            let middle = (lower + upper) / 2
+            let cut = candidates[middle]
+            let candidate = request.retainingConversation(after: cut)
+            let count = try await measure(context: context, request: candidate)
+            if count <= retainedTarget {
+                selectedCut = cut
+                upper = middle - 1
+            } else {
+                lower = middle + 1
+            }
+        }
+        return selectedCut
     }
 
     /// Summarizes an archived prefix in bounded groups. A single large tool
@@ -136,8 +191,14 @@ public struct SlidingWindowCompactor: ContextCompactor {
         let summaryBudget = max(1, window - outputReserve)
         var rollingSummary = context.contextSummary
         var pending: [ChatMessage] = []
+        var groups = Self.messageGroups(
+            archived,
+            assistantSender: context.agentID.rawValue
+        )
+        var groupIndex = 0
 
-        for group in Self.messageGroups(archived, assistantSender: context.agentID.rawValue) {
+        while groupIndex < groups.count {
+            let group = groups[groupIndex]
             let candidate = pending + group
             let candidatePrompt = SummaryPrompt.messages(
                 priorSummary: rollingSummary,
@@ -151,32 +212,35 @@ public struct SlidingWindowCompactor: ContextCompactor {
             )
             if candidateCost <= summaryBudget {
                 pending = candidate
+                groupIndex += 1
                 continue
             }
 
-            guard !pending.isEmpty else {
-                // The smallest indivisible group cannot fit even after
-                // reserving output space; sending it would knowingly exceed
-                // the model window.
-                throw AgentRuntimeError.contextLengthExceeded
+            if !pending.isEmpty {
+                rollingSummary = try await summarize(
+                    SummaryPrompt.messages(
+                        priorSummary: rollingSummary,
+                        archived: pending,
+                        agentID: context.agentID
+                    ))
+                pending = []
+                // Re-evaluate the same group with the newly folded summary.
+                // The summary itself consumes input space too.
+                continue
             }
 
-            rollingSummary = try await summarize(
-                SummaryPrompt.messages(
-                    priorSummary: rollingSummary,
-                    archived: pending,
-                    agentID: context.agentID
-                ))
-            pending = group
-
-            let singlePrompt = SummaryPrompt.messages(
+            // A semantic interaction is normally kept indivisible, but the
+            // summary request has a different boundary from the retained
+            // transcript. Split only its summary representation here. The
+            // journaled conversation and the tool-call/result relationship
+            // remain untouched in the resulting compaction event.
+            let fragments = try await summaryFragments(
+                group,
+                context: context,
                 priorSummary: rollingSummary,
-                archived: pending,
-                agentID: context.agentID
+                budget: summaryBudget
             )
-            guard try await measure(context: context, messages: singlePrompt, tools: []) <= summaryBudget else {
-                throw AgentRuntimeError.contextLengthExceeded
-            }
+            groups.replaceSubrange(groupIndex...groupIndex, with: fragments)
         }
 
         guard !pending.isEmpty else {
@@ -188,6 +252,100 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 archived: pending,
                 agentID: context.agentID
             ))
+    }
+
+    /// Breaks an oversized semantic interaction into bounded summary-only
+    /// fragments. This is deliberately separate from `validCuts`: a retained
+    /// conversation must not split a tool interaction, but a summarization
+    /// prompt may represent a large tool result in several ordered pieces.
+    private func summaryFragments(
+        _ group: [ChatMessage],
+        context: PromptContext,
+        priorSummary: String?,
+        budget: Int
+    ) async throws(AgentRuntimeError) -> [[ChatMessage]] {
+        var maximumCharacters = max(32, budget * 2)
+
+        while true {
+            let fragments = group.flatMap {
+                Self.splitForSummary(
+                    $0,
+                    maximumCharacters: maximumCharacters,
+                    agentID: context.agentID
+                )
+            }.map { [$0] }
+
+            var fits = true
+            for fragment in fragments {
+                let prompt = SummaryPrompt.messages(
+                    priorSummary: priorSummary,
+                    archived: fragment,
+                    agentID: context.agentID
+                )
+                if try await measure(context: context, messages: prompt, tools: []) > budget {
+                    fits = false
+                    break
+                }
+            }
+            if fits {
+                return fragments
+            }
+            guard maximumCharacters > 1 else {
+                throw AgentRuntimeError.contextLengthExceeded
+            }
+            maximumCharacters = max(1, maximumCharacters / 2)
+        }
+    }
+
+    private static func splitForSummary(
+        _ message: ChatMessage,
+        maximumCharacters: Int,
+        agentID: AgentID
+    ) -> [ChatMessage] {
+        switch message {
+        case .text(let sender, let content, let timestamp):
+            return contentChunks(content, maximumCharacters: maximumCharacters).map {
+                .text(sender: sender, content: $0, timestamp: timestamp)
+            }
+
+        case .response(let sender, let payload, let timestamp):
+            let content = String(decoding: payload, as: UTF8.self)
+            return contentChunks(content, maximumCharacters: maximumCharacters).map {
+                .text(sender: sender, content: $0, timestamp: timestamp)
+            }
+
+        case .toolResult(let id, let content, let timestamp):
+            return contentChunks(content, maximumCharacters: maximumCharacters).map {
+                .toolResult(id: id, content: $0, timestamp: timestamp)
+            }
+
+        case .toolCall(let calls, let timestamp):
+            let rendered = calls.map {
+                "\($0.name)(\($0.arguments.json))"
+            }.joined(separator: ", ")
+            return contentChunks(
+                "assistant called tools: \(rendered)",
+                maximumCharacters: maximumCharacters
+            ).map {
+                .text(sender: agentID.rawValue, content: $0, timestamp: timestamp)
+            }
+
+        case .failure, .decisionRequest, .decisionResolved:
+            return [message]
+        }
+    }
+
+    private static func contentChunks(
+        _ content: String,
+        maximumCharacters: Int
+    ) -> [String] {
+        let characters = Array(content)
+        guard !characters.isEmpty else { return [""] }
+        let size = max(1, maximumCharacters)
+        return stride(from: 0, to: characters.count, by: size).map { start in
+            let end = min(start + size, characters.count)
+            return String(characters[start..<end])
+        }
     }
 
     // MARK: - Budget fitting
@@ -291,11 +449,30 @@ public struct SlidingWindowCompactor: ContextCompactor {
         messages: [LLMMessage],
         tools: [LLMToolSchema]
     ) async throws(AgentRuntimeError) -> Int {
+        try await measure(
+            context: context,
+            request: PreparedRequest(
+                prefix: [],
+                conversation: messages.enumerated().map {
+                    PreparedRequest.ConversationEntry(sourceIndex: $0.offset, message: $0.element)
+                },
+                tools: tools
+            )
+        )
+    }
+
+    private func measure(
+        context: PromptContext,
+        request: PreparedRequest
+    ) async throws(AgentRuntimeError) -> Int {
+        let input = request.input(for: request.messages)
         switch context.measurement.tokenCounting {
         case .available(let counter):
-            return max(0, try await counter(messages, tools))
+            return max(0, try await counter(request.messages, request.tools))
+        case .availableInput(let counter):
+            return max(0, try await counter(input, request.tools))
         case .unavailable:
-            return try await estimator.estimate(messages: messages, tools: tools)
+            return try await estimator.estimate(messages: request.messages, tools: request.tools)
         }
     }
 }

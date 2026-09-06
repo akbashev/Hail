@@ -38,6 +38,121 @@ struct PromptAssemblyPersonaTests {
         #expect(request.conversation.map(\.message.content) == [#"{"answer":42}"#])
     }
 
+    @Test("structured responses with extra fields are not mistaken for legacy chat wrappers")
+    func structuredResponseWithExtraFieldsIsPreserved() throws {
+        let definition = AgentDefinition(
+            role: Role("conversation"),
+            behavior: .init(
+                systemPrompt: "Chat.",
+                model: try AgentModelReference("test/model")
+            ),
+            limits: .init()
+        )
+        let payload = Data(#"{"content":"hello","citations":["source-1"]}"#.utf8)
+        let context = PromptContext(
+            agentID: AgentID(role: Role("conversation"), contextID: .chat),
+            definition: definition,
+            workingMemory: [],
+            conversationThread: [
+                .response(sender: "conversation", payload: payload, timestamp: Date())
+            ],
+            contextManifest: ContextManifest(items: [])
+        )
+
+        let message = try #require(assembleStandardPrompt(context).conversation.first?.message)
+
+        #expect(message.content == String(decoding: payload, as: UTF8.self))
+    }
+
+    @Test("historical response keeps its external sender identity")
+    func historicalResponsePreservesSender() throws {
+        let definition = AgentDefinition(
+            role: Role("conversation"),
+            behavior: .init(
+                systemPrompt: "Chat.",
+                model: try AgentModelReference("test/model")
+            ),
+            limits: .init()
+        )
+        let payload = Data(#""hello""#.utf8)
+        let context = PromptContext(
+            agentID: AgentID(role: Role("conversation"), contextID: .chat),
+            definition: definition,
+            workingMemory: [],
+            conversationThread: [
+                .response(sender: "participant:telegram:42", payload: payload, timestamp: Date())
+            ],
+            contextManifest: ContextManifest(items: [])
+        )
+
+        let message = try #require(assembleStandardPrompt(context).conversation.first?.message)
+
+        #expect(message.role == .user)
+        #expect(message.name == "participant:telegram:42")
+        #expect(message.content == "hello")
+    }
+
+    @Test("historical text keeps its sender identity")
+    func historicalTextPreservesSender() throws {
+        let definition = AgentDefinition(
+            role: Role("conversation"),
+            behavior: .init(
+                systemPrompt: "Chat.",
+                model: try AgentModelReference("test/model")
+            ),
+            limits: .init()
+        )
+        let context = PromptContext(
+            agentID: AgentID(role: Role("conversation"), contextID: .chat),
+            definition: definition,
+            workingMemory: [],
+            conversationThread: [
+                .text(
+                    sender: "participant:telegram:42",
+                    content: "hello",
+                    timestamp: Date(timeIntervalSince1970: 1)
+                )
+            ],
+            contextManifest: ContextManifest(items: [])
+        )
+
+        let message = assembleStandardPrompt(context).conversation[0].message
+
+        #expect(message.role == .user)
+        #expect(message.content == "hello")
+        #expect(message.name == "participant:telegram:42")
+    }
+
+    @Test("legacy chat response wrappers are rendered as text")
+    func legacyChatResponseIsUnwrapped() throws {
+        let definition = AgentDefinition(
+            role: Role("conversation"),
+            behavior: .init(
+                systemPrompt: "Chat.",
+                model: try AgentModelReference("test/model")
+            ),
+            limits: .init()
+        )
+        let legacyResponse = ChatResponse(content: "{\"content\":\"hello\"}")
+        let context = PromptContext(
+            agentID: AgentID(role: Role("conversation"), contextID: .chat),
+            definition: definition,
+            workingMemory: [],
+            conversationThread: [
+                .response(
+                    sender: "conversation",
+                    payload: try JSONEncoder().encode(legacyResponse),
+                    timestamp: Date(timeIntervalSince1970: 1)
+                )
+            ],
+            contextManifest: ContextManifest(items: [])
+        )
+
+        let message = assembleStandardPrompt(context).conversation[0].message
+
+        #expect(message.content == "hello")
+    }
+
     @Test("adds durable persona identity after the operational system prompt")
     func addsPersonaIdentity() throws {
         let definition = AgentDefinition(

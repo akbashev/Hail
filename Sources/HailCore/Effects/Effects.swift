@@ -79,7 +79,19 @@ public struct CoordinationEffect: ScopedEffect, Sendable {
 
 public struct ClockEffect: ScopedEffect, Sendable {
     public let name = "clock"
-    public init() {}
+
+    fileprivate let now: @Sendable () -> Date
+
+    public init(now: @escaping @Sendable () -> Date = Date.init) {
+        self.now = now
+    }
+}
+
+extension EffectToken where Effect == ClockEffect {
+    /// Reads the clock only while the clock capability is in scope.
+    public func now() -> Date {
+        withConfiguration { $0.now() }
+    }
 }
 
 public enum EffectPath {

@@ -7,8 +7,9 @@ import HailModelRuntime
 /// caller without the caller conforming to a generic peer protocol.
 ///
 /// `AgentConnection` is intentionally dumb: it only holds a closure. The caller
-/// creates it, passes it to ``Agent/stream(_:connection:)``, and consumes updates
-/// through the closure or via ``AgentStream``.
+/// creates it, passes it to ``Agent/stream(_:connection:)``, and consumes
+/// updates through the closure or via ``AgentStream``. Updates include typed
+/// structured partial snapshots as well as the final result.
 public distributed actor AgentConnection<Output: AgentOutput> {
     public typealias ActorSystem = ClusterSystem
 
@@ -55,8 +56,9 @@ public actor AgentStream<Output: AgentOutput> {
 
 extension AgentStream {
     /// Sends a typed input through this stream's connection. Live updates are
-    /// yielded to ``updates``; the final response appears as a
-    /// ``AgentRunEvent/responseRecorded`` event.
+    /// yielded to ``updates``; structured partial snapshots appear as
+    /// ``AgentRunEvent/modelOutputPartialUpdated(content:at:)`` events and the
+    /// final response appears as a ``AgentRunEvent/responseRecorded`` event.
     public func send<Input: AgentInput>(_ input: Input, to agent: Agent) async throws {
         try await agent.stream(input, through: connection)
     }

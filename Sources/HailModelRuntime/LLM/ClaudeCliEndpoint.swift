@@ -129,12 +129,13 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     // MARK: - ModelEndpoint
 
     public func stream(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?
     ) -> AsyncStream<ModelEvent<String>> {
         AsyncStream(ModelEvent<String>.self) { continuation in
             let task = Task {
                 do {
+                    let messages = try input.textMessages(for: model)
                     continuation.yield(.status("Claude CLI is running."))
                     let prompt = Self.formatPrompt(messages: messages, reportToolName: nil)
                     let outcome = try await runTurn(
@@ -166,25 +167,26 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     }
 
     public func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         switch T.outputContract {
         case .plainText:
-            return streamPlainText(messages: messages, responseType: T.self)
+            return streamPlainText(input: input, responseType: T.self)
         case .reportTool(let name, _):
-            return streamStructured(messages: messages, reportToolName: name, responseType: T.self)
+            return streamStructured(input: input, reportToolName: name, responseType: T.self)
         }
     }
 
     private func streamPlainText<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         AsyncStream(ModelEvent<T>.self) { continuation in
             let task = Task {
                 do {
+                    let messages = try input.textMessages(for: model)
                     continuation.yield(.status("Claude CLI is running."))
                     let prompt = Self.formatPrompt(messages: messages, reportToolName: nil)
                     let outcome = try await runTurn(
@@ -224,13 +226,14 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     }
 
     private func streamStructured<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         reportToolName: String,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         AsyncStream(ModelEvent<T>.self) { continuation in
             let task = Task {
                 do {
+                    let messages = try input.textMessages(for: model)
                     continuation.yield(.status("Claude CLI is running."))
                     let prompt = Self.formatPrompt(messages: messages, reportToolName: reportToolName)
                     let reportToolNames = [reportToolName, "mcp__hail__\(reportToolName)"]
@@ -613,7 +616,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
     /// reach Hail through the MCP tools, not through a delegate), and the
     /// process spawn is infrastructure scoped against the creation authority.
     public func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         delta turnDelta: TurnDelta,
         authority: any Authority,
         tools: [LLMToolSchema]?,
@@ -627,7 +630,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
             reportToolName = name
         }
         return sessionStream(
-            messages: messages,
+            input: input,
             delta: turnDelta,
             reportToolName: reportToolName,
             responseType: T.self
@@ -644,7 +647,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
     /// the endpoint's creation authority — a deny-everything lane must not
     /// make the turn itself impossible.
     private func sessionStream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         delta turnDelta: TurnDelta,
         reportToolName: String?,
         responseType: T.Type
@@ -652,6 +655,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
         AsyncStream(ModelEvent<T>.self) { continuation in
             let task = Task {
                 do {
+                    let messages = try input.textMessages(for: model)
                     continuation.yield(.status("Claude CLI is running."))
 
                     let memorySnapshot =

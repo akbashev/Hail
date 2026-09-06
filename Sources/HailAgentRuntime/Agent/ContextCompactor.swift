@@ -20,6 +20,33 @@ public enum CompactionDecision: Sendable, Equatable {
     case compacted(ConversationCompaction)
 }
 
+/// Explains why a compactor was asked to make a decision. A provider-reported
+/// context failure is different from the normal occupancy threshold: it must
+/// be allowed to compact even when Hail's fallback estimate did not predict
+/// the failure.
+public enum ContextCompactionTrigger: Sendable, Equatable {
+    case threshold
+    case contextLengthExceeded
+}
+
+/// The validated context capacity for one compaction decision.
+///
+/// It is resolved by the runtime from the selected model boundary before the
+/// functional compaction policy runs. The policy therefore never has to look
+/// up a model or invent a fallback window.
+public struct CompactionBudget: Sendable, Equatable {
+    public let contextWindow: Int
+
+    public init(contextWindow: Int) throws(AgentRuntimeError) {
+        guard contextWindow > 0 else {
+            throw .configurationError(
+                "Context compaction requires a positive context window, got (contextWindow)."
+            )
+        }
+        self.contextWindow = contextWindow
+    }
+}
+
 /// The exact sections of one stateless model request. Keeping these sections
 /// explicit lets a compactor replace only the conversation suffix without
 /// reverse-engineering a prompt policy's output by position.
@@ -39,17 +66,23 @@ public struct PreparedRequest: Sendable {
     public let conversation: [ConversationEntry]
     public let suffix: [LLMMessage]
     public let tools: [LLMToolSchema]
+    /// Rich request input for provider-aware token counting. Ordinary prompt
+    /// assembly leaves this nil; the reasoning loop supplies it after a tool
+    /// round so artifact bodies are included in the budget.
+    public let input: ModelInput?
 
     public init(
         prefix: [LLMMessage],
         conversation: [ConversationEntry],
         suffix: [LLMMessage] = [],
-        tools: [LLMToolSchema] = []
+        tools: [LLMToolSchema] = [],
+        input: ModelInput? = nil
     ) {
         self.prefix = prefix
         self.conversation = conversation
         self.suffix = suffix
         self.tools = tools
+        self.input = input
     }
 
     /// The full request in provider order.
@@ -64,7 +97,8 @@ public struct PreparedRequest: Sendable {
             prefix: prefix,
             conversation: conversation.filter { $0.sourceIndex >= sourceIndex },
             suffix: suffix,
-            tools: tools
+            tools: tools,
+            input: input
         )
     }
 
@@ -78,8 +112,39 @@ public struct PreparedRequest: Sendable {
             prefix: prefix,
             conversation: conversation,
             suffix: suffix + additionalMessages,
-            tools: tools + additionalTools
+            tools: tools + additionalTools,
+            input: input
         )
+    }
+
+    public func withInput(_ input: ModelInput?) -> PreparedRequest {
+        PreparedRequest(
+            prefix: prefix,
+            conversation: conversation,
+            suffix: suffix,
+            tools: tools,
+            input: input
+        )
+    }
+
+    /// Rebuilds rich input for a candidate whose semantic conversation has
+    /// been trimmed by a compactor. Live artifact outputs are retained only
+    /// when their corresponding tool messages remain in the candidate.
+    public func input(for messages: [LLMMessage]) -> ModelInput {
+        guard let input else { return ModelInput(messages: messages) }
+
+        var candidateMessages = messages
+        let existingToolCallIDs = Set(
+            candidateMessages.compactMap { message in
+                message.role == .tool ? message.toolCallID : nil
+            }
+        )
+        for message in input.richOutputMessages where
+            !existingToolCallIDs.contains(message.toolCallID ?? "")
+        {
+            candidateMessages.append(message)
+        }
+        return input.rebased(on: candidateMessages)
     }
 }
 
@@ -109,6 +174,36 @@ public protocol ContextCompactor: Sendable {
     func compact(
         context: PromptContext,
         request: PreparedRequest,
+        budget: CompactionBudget,
         summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
     ) async throws(AgentRuntimeError) -> CompactionDecision
+
+    /// Gives the compactor an opportunity to recover from a provider-reported
+    /// overflow. Existing compactors get the ordinary threshold behavior by
+    /// default; compactors that can make progress after an actual overflow can
+    /// implement the trigger-aware overload.
+    func compact(
+        context: PromptContext,
+        request: PreparedRequest,
+        budget: CompactionBudget,
+        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String,
+        trigger: ContextCompactionTrigger
+    ) async throws(AgentRuntimeError) -> CompactionDecision
+}
+
+public extension ContextCompactor {
+    func compact(
+        context: PromptContext,
+        request: PreparedRequest,
+        budget: CompactionBudget,
+        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String,
+        trigger: ContextCompactionTrigger
+    ) async throws(AgentRuntimeError) -> CompactionDecision {
+        try await compact(
+            context: context,
+            request: request,
+            budget: budget,
+            summarize: summarize
+        )
+    }
 }

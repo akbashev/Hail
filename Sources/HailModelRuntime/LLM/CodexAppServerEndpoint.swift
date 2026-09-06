@@ -61,12 +61,12 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
     }
 
     public func stream(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?
     ) -> AsyncStream<ModelEvent<String>> {
         _ = tools
         return makeStream(
-            messages: messages,
+            input: input,
             delta: nil,
             sessionIdentity: nil,
             workingMemory: [],
@@ -76,13 +76,13 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
     }
 
     public func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         _ = tools
         return makeStream(
-            messages: messages,
+            input: input,
             delta: nil,
             sessionIdentity: nil,
             workingMemory: [],
@@ -92,7 +92,7 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
     }
 
     private func makeStream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         delta: [LLMMessage]?,
         sessionIdentity: SessionIdentity?,
         workingMemory: [String],
@@ -107,6 +107,7 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         return AsyncStream { continuation in
             let task = Task {
                 do {
+                    let messages = try input.textMessages(for: model)
                     let schema =
                         structured
                         ? try CLIEndpointSupport.finalOutputSchema(for: T.self)
@@ -194,7 +195,7 @@ extension CodexAppServerEndpoint: SessionOwningEndpoint {
     }
 
     public func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         delta turnDelta: TurnDelta,
         authority: any Authority,
         tools: [LLMToolSchema]?,
@@ -202,7 +203,7 @@ extension CodexAppServerEndpoint: SessionOwningEndpoint {
     ) -> AsyncStream<ModelEvent<T>> {
         _ = tools
         return makeStream(
-            messages: messages,
+            input: input,
             delta: turnDelta.messages,
             sessionIdentity: turnDelta.sessionIdentity,
             workingMemory: turnDelta.workingMemory,

@@ -16,9 +16,12 @@ import VirtualActors
 
 // MARK: - Agent
 
-/// Explicit result of an attempted passivation. `deferred` preserves the
-/// distinction between an active agent and one that could not be removed from
-/// the directory, instead of collapsing both into `false`.
+/// Explicit result of an attempted passivation.
+///
+/// The active-agent index is only a liveness projection, so an index outage
+/// must not prevent the actor from passivating. `deferred` remains in the
+/// public enum for source compatibility with older callers; current runtime
+/// code does not use it for directory failures.
 public enum AgentDeactivationResult: Sendable, Equatable {
     case active
     case deactivated
@@ -39,22 +42,11 @@ public distributed actor Agent: AsyncSequence {
     // `EventSourced` protocol witness — do not mutate directly.
     public var state: AgentState
 
-    // Snapshot policy: checkpoint right after a compaction shrank the state
-    // (the cheapest snapshot, covering the longest prefix), with a fixed
-    // cadence as a fallback so long uncompacted runs still bound replay.
-    // The rule fires repeatedly, so retention prunes to the newest two —
-    // without it the store would grow one snapshot per compaction forever.
-    // Snapshots are a best-effort replay optimization; the journal stays the
-    // source of truth. Without a configured SnapshotStore this degrades to a
-    // log warning per boundary — behavior is unchanged.
-    public let snapshotting: Snapshotting<AgentEvent, AgentState> = .every(
-        numberOfEvents: 50,
-        retention: .keepLast(2),
-        orWhen: { event, _, _ in
-            if case .conversationCompacted = event { return true }
-            return false
-        }
-    )
+    /// Snapshot policy selected by the spawn dependency and interpreted by the
+    /// embedding runtime at activation.
+    /// Snapshots are a best-effort replay optimization; the journal remains
+    /// the source of truth.
+    public let snapshotting: Snapshotting<AgentEvent, AgentState>
 
     // Convenience accessors for the event-sourced state.
     var role: Role { state.agentID.role }
@@ -82,7 +74,7 @@ public distributed actor Agent: AsyncSequence {
     let agentDirectoryID: AgentDirectoryID
     let resumesInterruptedTurns: Bool
     /// The spawn configuration this agent was created with. Kept so
-    /// ``shouldDeactivate()`` can restore its directory entry when a turn
+    /// ``shouldDeactivate()`` can restore its active-index entry when a turn
     /// starts mid-deactivation — registration otherwise happens only on
     /// activation.
     let spawnConfig: AgentSpawnConfig
@@ -124,6 +116,7 @@ public distributed actor Agent: AsyncSequence {
         self.actorSystem = actorSystem
         self._agentID = dependency.agentID
         self.state = AgentState(agentID: dependency.agentID)
+        self.snapshotting = await actorSystem.agentRuntime.snapshotting(for: dependency)
         let workspace = try await actorSystem.agentRuntime.workspace(for: dependency)
         // Configuration is supplied by the embedding host. Hail neither knows
         // nor assumes where definitions are persisted.
@@ -144,13 +137,26 @@ public distributed actor Agent: AsyncSequence {
         // logical agent with different history.
         try await actorSystem.journal.register(actor: self, with: dependency.agentID.rawValue)
 
-        try await actorSystem.agentRuntime.register(
-            entry: AgentDirectoryEntry(
-                agentID: dependency.agentID,
-                definition: definition,
-                spawnConfig: dependency
+        do {
+            try await actorSystem.agentRuntime.register(
+                entry: AgentDirectoryEntry(
+                    agentID: dependency.agentID,
+                    definition: definition,
+                    spawnConfig: dependency
+                )
             )
-        )
+        } catch {
+            // The active-agent index is a disposable liveness projection. It
+            // must never prevent a durable agent from activating after a
+            // singleton restart or temporary directory outage.
+            actorSystem.log.warning(
+                "Active agent index unavailable during activation",
+                metadata: [
+                    "agentID": .string(dependency.agentID.rawValue),
+                    "error": .string(String(describing: error)),
+                ]
+            )
+        }
 
         try await emit(event: .contextSet(contextID: dependency.agentID.contextID))
 
@@ -194,11 +200,12 @@ public distributed actor Agent: AsyncSequence {
     /// endpoint (and its harness subprocess) independently of this actor's
     /// lifetime, so deactivating without eviction would leak the process. The
     /// next turn rebuilds the endpoint and resumes from the journaled session.
-    /// Acceptance also unregisters from the agent directory, so `list_agents`
-    /// stops reporting a passivated agent — and the directory stays usable as
-    /// the existence check that keeps `agent send` from spawning phantom
-    /// agents (see `AgentTool`). Both actions run before the final `isWorking`
-    /// re-check; a turn that slips in mid-way restores the registration.
+    /// Acceptance also unregisters from the active-agent index, so
+    /// `list_agents` stops reporting a passivated agent. The index is only a
+    /// discovery projection; it is not consulted when addressing an agent,
+    /// and its availability never controls actor lifecycle. Both actions run
+    /// before the final `isWorking` re-check; a turn that slips in mid-way
+    /// restores the registration.
     public func deactivationResult() async -> AgentDeactivationResult {
         guard !self.isWorking else { return .active }
         await actorSystem.agentRuntime.evictEndpoint(
@@ -212,21 +219,21 @@ public distributed actor Agent: AsyncSequence {
         do {
             try await actorSystem.agentRuntime.unregister(agentID: state.agentID)
         } catch {
-            actorSystem.log.error(
-                "Agent directory unavailable; refusing deactivation",
+            actorSystem.log.warning(
+                "Active agent index unavailable during passivation",
                 metadata: [
                     "agentID": .string(state.agentID.rawValue),
                     "error": .string(String(describing: error)),
                 ]
             )
-            return .deferred(String(describing: error))
         }
         // Both calls above suspend and this actor is reentrant: a turn that
         // started during either window must not be torn down. The eviction is
         // harmless — the next turn rebuilds the endpoint cold from the
-        // journaled session — but the directory removal must be undone, since
-        // registration otherwise happens only on activation. Only after this
-        // final check is the commit below (waiter flush + accept) safe.
+        // journaled session — but an active-index removal must be undone when
+        // possible, since registration otherwise happens only on activation.
+        // Only after this final check is the commit below (waiter flush +
+        // accept) safe.
         guard !self.isWorking else {
             do {
                 try await actorSystem.agentRuntime.register(
@@ -238,7 +245,7 @@ public distributed actor Agent: AsyncSequence {
                 )
             } catch {
                 actorSystem.log.error(
-                    "Failed to restore active agent directory entry",
+                    "Failed to restore active agent index entry",
                     metadata: [
                         "agentID": .string(state.agentID.rawValue),
                         "error": .string(String(describing: error)),
@@ -606,8 +613,8 @@ public distributed actor Agent: AsyncSequence {
                     throw Self.mapEndpointDependencyError(error)
                 }
             },
-            tools: { () async throws(AgentRuntimeError) -> ToolRegistry in
-                try await self.toolRegistry(lane: lane)
+            tools: { (turnContext: AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry in
+                try await self.toolRegistry(lane: lane, turnContext: turnContext)
             },
             emit: { (event: AgentEvent) async throws(AgentRuntimeError) in
                 try await self.emitReasoningEvent(event)
@@ -652,23 +659,29 @@ public distributed actor Agent: AsyncSequence {
         )
     }
 
-    /// The tool registry for one turn, built fresh on every turn: extra
-    /// tools derive from journaled state (registered external tools), and a
+    /// The tool registry for one turn, built fresh on every turn: host tools
+    /// derive from the current turn context, and a
     /// cache of journaled state is a staleness bug in a distributed world —
     /// a tool registered while this agent was idle must appear on its very
     /// next turn. Rebuilding is cheap: value-type tool construction plus the
     /// providers' journal replays, against turns that are seconds apart.
     /// A laned turn builds under the lane's authority, an unlaned one under
     /// the agent's plugin-derived authority.
-    private func toolRegistry(lane: TurnAuthorityLane?) async throws(AgentRuntimeError) -> ToolRegistry {
+    private func toolRegistry(
+        lane: TurnAuthorityLane?,
+        turnContext: AgentTurnContext
+    ) async throws(AgentRuntimeError) -> ToolRegistry {
         let registry = ToolRegistry(authority: lane?.authority ?? authority)
-        try await registerTools(in: registry)
+        try await registerTools(in: registry, turnContext: turnContext)
         return registry
     }
 
-    /// Registers the agent's default tools and the runtime's extra tools into
+    /// Registers the agent's default tools and the host's turn tools into
     /// `registry`. Runs once per turn (see ``toolRegistry(lane:)``).
-    private func registerTools(in registry: ToolRegistry) async throws(AgentRuntimeError) {
+    private func registerTools(
+        in registry: ToolRegistry,
+        turnContext: AgentTurnContext
+    ) async throws(AgentRuntimeError) {
         await registry.register(NowTool())
         await registry.register(
             FileTool(projectRoot: URL(fileURLWithPath: workspace.rootPath))
@@ -683,17 +696,16 @@ public distributed actor Agent: AsyncSequence {
         ])
 
         let runtime = actorSystem.agentRuntime
-        let extraTools: [any HailCore.Tool]
+        let turnTools: [any HailCore.Tool]
         do {
-            extraTools = try await runtime.extraTools(
-                forAgentID: state.agentID,
-                sourceAgentID: state.agentID,
+            turnTools = try await runtime.turnTools(
+                for: turnContext,
                 actorSystem: actorSystem
             )
         } catch {
             throw mapInfrastructureDependencyError(error, operation: "Could not load agent tools")
         }
-        await registry.register(tools: extraTools)
+        await registry.register(tools: turnTools)
     }
 
     private static func mapEndpointDependencyError(_ error: any Error) -> AgentRuntimeError {

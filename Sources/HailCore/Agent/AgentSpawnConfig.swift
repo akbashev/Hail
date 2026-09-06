@@ -21,16 +21,47 @@ public struct AgentSpawnConfig: Codable, Sendable {
     public let scope: AgentScope
     public let agentDirectoryID: AgentDirectoryID
     public let resumesInterruptedTurns: Bool
+    public let snapshotPolicy: AgentSnapshotPolicy
+
+    private enum CodingKeys: String, CodingKey {
+        case agentID
+        case scope
+        case agentDirectoryID
+        case resumesInterruptedTurns
+        case snapshotPolicy
+    }
 
     public init(
         agentID: AgentID,
         scope: AgentScope = .sharedRoot,
         agentDirectoryID: AgentDirectoryID = "agent-directory",
-        resumesInterruptedTurns: Bool = true
+        resumesInterruptedTurns: Bool = true,
+        snapshotPolicy: AgentSnapshotPolicy = .default
     ) {
         self.agentID = agentID
         self.scope = scope
         self.agentDirectoryID = agentDirectoryID
         self.resumesInterruptedTurns = resumesInterruptedTurns
+        self.snapshotPolicy = snapshotPolicy
+    }
+
+    /// Decoding remains compatible with spawn configurations written before
+    /// snapshot policy became part of the dependency.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.agentID = try container.decode(AgentID.self, forKey: .agentID)
+        self.scope = try container.decode(AgentScope.self, forKey: .scope)
+        self.agentDirectoryID = try container.decode(
+            AgentDirectoryID.self,
+            forKey: .agentDirectoryID
+        )
+        self.resumesInterruptedTurns = try container.decode(
+            Bool.self,
+            forKey: .resumesInterruptedTurns
+        )
+        self.snapshotPolicy = try container.decodeIfPresent(
+            AgentSnapshotPolicy.self,
+            forKey: .snapshotPolicy
+        ) ?? .default
     }
 }

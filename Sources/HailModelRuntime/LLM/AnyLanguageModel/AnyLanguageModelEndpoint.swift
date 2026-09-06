@@ -3,8 +3,7 @@ import HailCore
 
 /// A `ModelEndpoint` adapter that routes requests through AnyLanguageModel's
 /// `LanguageModelSession`. This gives native tool calling and structured output
-/// for any provider supported by AnyLanguageModel (OpenAI, Anthropic, Gemini,
-/// Ollama, Open Responses, etc.).
+/// for any provider supported by AnyLanguageModel.
 public struct AnyLanguageModelEndpoint: ModelEndpoint {
     public let model: String
     public let contextOwnership: ModelContextOwnership = .runtime
@@ -19,23 +18,28 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         temperature: Double,
         effectiveContextWindow: Int? = nil,
         countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
+        countInputTokens: (@Sendable (ModelInput, [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
         generationOptions: GenerationOptions? = nil
     ) {
         self.languageModel = languageModel
         self.model = modelIdentifier
         self.generationOptions = generationOptions ?? GenerationOptions(temperature: temperature)
         self.effectiveContextWindow = effectiveContextWindow
-        self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
+        if let countInputTokens {
+            self.tokenCounting = .availableInput(countInputTokens)
+        } else {
+            self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
+        }
     }
 
     public func stream(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?
     ) -> AsyncStream<ModelEvent<String>> {
         AsyncStream(ModelEvent<String>.self) { continuation in
             let task = Task {
                 do {
-                    let (transcript, prompt) = try TranscriptMapping.transcriptAndPrompt(from: messages)
+                    let mapped = try TranscriptMapping.transcriptAndPrompt(from: input)
 
                     continuation.yield(.status("Generating..."))
 
@@ -43,18 +47,32 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                     let session = LanguageModelSession(
                         model: languageModel,
                         tools: adaptedTools,
-                        transcript: transcript
+                        transcript: mapped.transcript
                     )
 
                     // Keep Hail in control of tool execution.
                     let delegate = StopOnToolCallsDelegate()
                     session.toolExecutionDelegate = delegate
 
-                    let response = try await session.respond(
-                        to: prompt,
+                    let stream = session.streamResponse(
+                        to: mapped.prompt,
                         generating: String.self,
                         options: generationOptions
                     )
+
+                    var accumulatedText = ""
+                    for try await snapshot in stream {
+                        guard case .string(let snapshotText) = snapshot.rawContent.kind else {
+                            continue
+                        }
+                        let delta = Self.textDelta(
+                            from: snapshotText,
+                            after: &accumulatedText
+                        )
+                        if !delta.isEmpty {
+                            continuation.yield(.text(delta))
+                        }
+                    }
 
                     let generatedCalls = await delegate.generatedToolCalls
                     if !generatedCalls.isEmpty {
@@ -69,9 +87,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                                     )))
                         }
                     } else {
-                        let text = response.content
-                        continuation.yield(.text(text))
-                        continuation.yield(.generated(text))
+                        continuation.yield(.generated(accumulatedText))
                     }
 
                     continuation.finish()
@@ -88,14 +104,14 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     }
 
     public func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         AsyncStream(ModelEvent<T>.self) { continuation in
             let task = Task {
                 do {
-                    let (transcript, prompt) = try TranscriptMapping.transcriptAndPrompt(from: messages)
+                    let mapped = try TranscriptMapping.transcriptAndPrompt(from: input)
 
                     continuation.yield(.status("Generating..."))
 
@@ -103,28 +119,51 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                     let session = LanguageModelSession(
                         model: languageModel,
                         tools: adaptedTools,
-                        transcript: transcript
+                        transcript: mapped.transcript
                     )
 
                     let delegate = StopOnToolCallsDelegate()
                     session.toolExecutionDelegate = delegate
 
                     let stream = session.streamResponse(
-                        to: prompt,
+                        to: mapped.prompt,
                         generating: responseType,
                         options: generationOptions
                     )
 
                     var lastComplete: T?
+                    var accumulatedText = ""
+                    let isPlainText: Bool
+                    switch T.outputContract {
+                    case .plainText:
+                        isPlainText = true
+                    case .reportTool:
+                        isPlainText = false
+                    }
                     for try await snapshot in stream {
+                        if isPlainText,
+                           case .string(let snapshotText) = snapshot.rawContent.kind {
+                            let delta = Self.textDelta(
+                                from: snapshotText,
+                                after: &accumulatedText
+                            )
+                            if !delta.isEmpty {
+                                continuation.yield(.text(delta))
+                            }
+                            // String is itself Generable. Keep the text delta
+                            // for chat consumers, while also exposing the
+                            // cumulative typed snapshot to generic clients.
+                            continuation.yield(.partialUpdated(snapshot.content))
+                        } else if !snapshot.rawContent.isComplete {
+                            continuation.yield(.partialUpdated(snapshot.content))
+                        }
+
                         if snapshot.rawContent.isComplete {
                             if let typed = snapshot.content as? T {
                                 lastComplete = typed
                             } else {
                                 lastComplete = try T(snapshot.rawContent)
                             }
-                        } else {
-                            continuation.yield(.partialUpdated(snapshot.content))
                         }
                     }
 
@@ -158,6 +197,27 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// AnyLanguageModel response streams expose the content generated so far,
+    /// rather than a token delta. Hail's model-event contract uses deltas, so
+    /// calculate the suffix before forwarding the fragment.
+    private static func textDelta(
+        from snapshot: String,
+        after accumulated: inout String
+    ) -> String {
+        guard !snapshot.isEmpty else { return "" }
+        if snapshot.hasPrefix(accumulated) {
+            let start = snapshot.index(snapshot.startIndex, offsetBy: accumulated.count)
+            let delta = String(snapshot[start...])
+            accumulated = snapshot
+            return delta
+        }
+
+        // A provider that replaces its partial snapshot is still represented
+        // faithfully: reset the accumulator and publish the replacement.
+        accumulated = snapshot
+        return snapshot
     }
 }
 

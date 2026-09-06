@@ -74,12 +74,15 @@ struct SlidingWindowCompactorTests {
         outputReserve: Int = 850
     ) -> SlidingWindowCompactor {
         SlidingWindowCompactor(
-            budget: ContextWindowBudget(overrides: [("fake", 1_000)]),
             threshold: 0.1,
             keepRecent: keepRecent,
             outputReserve: outputReserve,
             toolResultReserve: 0
         )
+    }
+
+    private func budget() throws -> CompactionBudget {
+        try CompactionBudget(contextWindow: 1_000)
     }
 
     // MARK: Tests
@@ -92,7 +95,8 @@ struct SlidingWindowCompactorTests {
 
         let result = try await compactor.compact(
             context: ctx,
-            request: preparedRequest(for: ctx)
+            request: preparedRequest(for: ctx),
+            budget: try budget()
         ) { _ in "unused" }
         #expect(result == .unchanged)
     }
@@ -107,14 +111,42 @@ struct SlidingWindowCompactorTests {
         let result = try requireCompaction(
             await compactor.compact(
                 context: ctx,
-                request: preparedRequest(for: ctx)
+                request: preparedRequest(for: ctx),
+                budget: try budget()
             ) { _ in "rolled" }
         )
 
         #expect(result.summary == "rolled")
-        // The budget-fitting selector keeps the largest safe suffix, which
-        // is one message for this fixture.
+        // The preferred tail is kept when it fits; the exact cut follows the
+        // serialized request estimate, including prompt framing.
+        #expect(result.archivedCount == 2)
+    }
+
+    @Test("an oversized archived message is chunked for summarization")
+    func oversizedArchivedMessageIsChunked() async throws {
+        let compactor = makeCompactor(keepRecent: 2)
+        let thread = [
+            text(String(repeating: "a", count: 12_000), 0),
+            text("recent one", 1),
+            text("recent two", 2),
+        ]
+        let calls = Box<Int>()
+        calls.value = 0
+
+        let ctx = try context(thread: thread)
+        let result = try requireCompaction(
+            await compactor.compact(
+                context: ctx,
+                request: preparedRequest(for: ctx),
+                budget: try budget()
+            ) { _ in
+                calls.value = (calls.value ?? 0) + 1
+                return "rolled"
+            }
+        )
+
         #expect(result.archivedCount == 1)
+        #expect(calls.value ?? 0 > 1)
     }
 
     @Test("the existing rolling summary is folded into the summarize prompt")
@@ -126,7 +158,8 @@ struct SlidingWindowCompactorTests {
         let ctx = try context(thread: thread, summary: "v1")
         _ = try await compactor.compact(
             context: ctx,
-            request: preparedRequest(for: ctx)
+            request: preparedRequest(for: ctx),
+            budget: try budget()
         ) { messages in
             box.value = messages
             return "v2"
@@ -157,8 +190,9 @@ struct SlidingWindowCompactorTests {
         let result = try requireCompaction(
             await compactor.compact(
                 context: ctx,
-                request: preparedRequest(for: ctx)
-            ) { _ in "rolled" }
+                request: preparedRequest(for: ctx),
+                budget: try budget()
+        ) { _ in "rolled" }
         )
 
         // The cut backs off before the trailing toolCall, so its result stays
@@ -184,7 +218,8 @@ struct SlidingWindowCompactorTests {
         let result = try requireCompaction(
             await compactor.compact(
                 context: ctx,
-                request: preparedRequest(for: ctx)
+                request: preparedRequest(for: ctx),
+                budget: try budget()
             ) { _ in "rolled" }
         )
 
@@ -202,12 +237,13 @@ struct SlidingWindowCompactorTests {
         let result = try requireCompaction(
             await compactor.compact(
                 context: ctx,
-                request: preparedRequest(for: ctx)
+                request: preparedRequest(for: ctx),
+                budget: try budget()
             ) { _ in "rolled" }
         )
         // The newest message is protected, while the budget determines how
         // much additional recent history can remain.
-        #expect(result.archivedCount == 2)
+        #expect(result.archivedCount == 3)
     }
 
     @Test("nothing to archive when the whole thread fits the kept tail")
@@ -220,7 +256,8 @@ struct SlidingWindowCompactorTests {
         let ctx = try context(thread: thread, memory: memory)
         let result = try await compactor.compact(
             context: ctx,
-            request: preparedRequest(for: ctx)
+            request: preparedRequest(for: ctx),
+            budget: try budget()
         ) { _ in
             "unused"
         }
@@ -243,7 +280,11 @@ struct SlidingWindowCompactorTests {
 
         let request = assembleStandardPrompt(ctx)
         let result = try requireCompaction(
-            await compactor.compact(context: ctx, request: request) { _ in "rolled" }
+            await compactor.compact(
+                context: ctx,
+                request: request,
+                budget: try budget()
+            ) { _ in "rolled" }
         )
 
         // The task prompt has two stable system messages. With a 200-token
@@ -273,7 +314,11 @@ struct SlidingWindowCompactorTests {
 
         let request = assembleStandardPrompt(ctx)
         let result = try requireCompaction(
-            await compactor.compact(context: ctx, request: request) { _ in "rolled" }
+            await compactor.compact(
+                context: ctx,
+                request: request,
+                budget: try budget()
+            ) { _ in "rolled" }
         )
 
         // A cut after the narration would orphan the tool call. The next
@@ -304,7 +349,11 @@ struct SlidingWindowCompactorTests {
         let request = assembleStandardPrompt(ctx)
 
         let result = try requireCompaction(
-            await compactor.compact(context: ctx, request: request) { _ in "rolled" }
+            await compactor.compact(
+                context: ctx,
+                request: request,
+                budget: try budget()
+            ) { _ in "rolled" }
         )
 
         // The first call/result pair is archivable independently. A global

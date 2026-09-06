@@ -81,6 +81,10 @@ public struct CompositeAuthority: Authority {
     }
 
     public func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision {
+        if let composite = effect as? any CompositeScopedEffect {
+            return composite.decision(using: self)
+        }
+
         guard let decide = decisions[ObjectIdentifier(Effect.self)] else {
             return .denied("the '\(effect.name)' effect is not granted by this authority")
         }

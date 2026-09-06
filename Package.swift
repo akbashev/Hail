@@ -25,6 +25,7 @@ let package = Package(
         .package(url: "https://github.com/wiedymi/swift-acp.git", branch: "main"),
         .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.21.0"),
     ],
     targets: [
         .target(
@@ -53,6 +54,7 @@ let package = Package(
                 .product(name: "ACP", package: "swift-acp"),
                 .product(name: "Subprocess", package: "swift-subprocess"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
             ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")

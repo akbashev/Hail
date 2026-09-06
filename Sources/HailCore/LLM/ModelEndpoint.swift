@@ -67,9 +67,9 @@ public enum ModelEvent<Output: AgentOutput>: Sendable {
     /// feeds the result back into the next turn.
     case toolCall(ToolCall)
 
-    /// A partial structured value as it is being generated. Providers that
-    /// support native structured streaming yield these while the response is
-    /// still incomplete.
+    /// A partial generated value as it is being generated. Providers that
+    /// support native streaming yield cumulative snapshots; plain-text typed
+    /// streams may also emit these alongside their text deltas.
     case partialUpdated(Output.PartiallyGenerated)
 
     /// Token consumption for the request, when the endpoint can report it.
@@ -99,6 +99,14 @@ public enum ModelContextOwnership: Sendable, Equatable {
     case endpointSession
 }
 
+/// The semantic purpose of a model request. Providers can use this to apply
+/// operation-specific limits without making compaction a provider-specific
+/// concern in the reasoning loop.
+public enum ModelRequestPurpose: Sendable, Equatable {
+    case generation
+    case compaction
+}
+
 /// Exact-token-counting capability of a model endpoint. Unsupported counting
 /// is represented as domain data; once a counter is available, failure to use
 /// it remains an error rather than being encoded as another optional value.
@@ -107,6 +115,144 @@ public enum TokenCounting: Sendable {
     case available(
         @Sendable (_ messages: [LLMMessage], _ tools: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int
     )
+    /// Provider-specific counting that can inspect the rich input before it is
+    /// projected onto the provider wire format. This is the capability used
+    /// when a tool returns an image, audio file, document, or other artifact.
+    case availableInput(
+        @Sendable (_ input: ModelInput, _ tools: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int
+    )
+}
+
+/// The ordered, live input to one model request.
+///
+/// Conversation messages remain plain, durable values. A binary tool output is
+/// represented by its own entry and exists only while Hail continues the
+/// current reasoning turn. Its semantic `ToolResult` is journaled, but the
+/// fetched body is not embedded in journal events or snapshots.
+public struct ModelInput: Sendable {
+    public enum Entry: Sendable {
+        case message(LLMMessage)
+        case toolOutput(callID: String, name: String, output: ToolOutput)
+    }
+
+    public private(set) var entries: [Entry]
+
+    public init(messages: [LLMMessage]) {
+        self.entries = messages.map(Entry.message)
+    }
+
+    public init(entries: [Entry]) {
+        self.entries = entries
+    }
+
+    public mutating func append(_ message: LLMMessage) {
+        entries.append(.message(message))
+    }
+
+    public mutating func appendToolOutput(
+        callID: String,
+        name: String,
+        output: ToolOutput
+    ) {
+        entries.append(.toolOutput(callID: callID, name: name, output: output))
+    }
+
+    /// Plain semantic projection used for persistence, compaction and
+    /// text-only endpoints. Binary tool bodies are reduced to metadata.
+    public var messages: [LLMMessage] {
+        entries.map { entry in
+            switch entry {
+            case .message(let message):
+                return message
+            case .toolOutput(let callID, _, let output):
+                let content: String
+                switch output {
+                case .text(let text):
+                    content = text
+                case .data(let data) where data.isTextLike:
+                    content = String(decoding: data.body, as: UTF8.self)
+                case .data:
+                    content = output.transcript
+                }
+                return LLMMessage(
+                    role: .tool,
+                    content: content,
+                    toolCallID: callID
+                )
+            }
+        }
+    }
+
+    /// Semantic messages for rich outputs produced during the live reasoning
+    /// turn. These can be attached to a rebuilt durable request when the
+    /// compactor has not retained their metadata message.
+    public var richOutputMessages: [LLMMessage] {
+        entries.compactMap { entry in
+            guard case .toolOutput(let callID, _, let output) = entry else { return nil }
+            let content: String
+            switch output {
+            case .text(let text):
+                content = text
+            case .data(let data) where data.isTextLike:
+                content = String(decoding: data.body, as: UTF8.self)
+            case .data:
+                content = output.transcript
+            }
+            return LLMMessage(role: .tool, content: content, toolCallID: callID)
+        }
+    }
+
+    public var containsData: Bool {
+        entries.contains { entry in
+            guard case .toolOutput(_, _, .data) = entry else { return false }
+            return true
+        }
+    }
+
+    public var containsUnsupportedData: Bool {
+        entries.contains { entry in
+            guard case .toolOutput(_, _, .data(let data)) = entry else { return false }
+            return !data.isTextLike
+        }
+    }
+
+    /// Projects this request for an endpoint that cannot consume rich tool
+    /// output. It fails explicitly instead of pretending resource metadata is
+    /// the fetched content.
+    public func textMessages(for model: String) throws(ModelEndpointError) -> [LLMMessage] {
+        guard !containsUnsupportedData else {
+            throw .invalidRequest(
+                "Model endpoint \(model) cannot consume the data returned by this tool."
+            )
+        }
+        return messages
+    }
+
+    /// Rebuilds compacted context while retaining matching live tool outputs.
+    public func rebased(on messages: [LLMMessage]) -> ModelInput {
+        var outputs: [String: [Entry]] = [:]
+        for entry in entries {
+            guard case .toolOutput(let callID, _, _) = entry else { continue }
+            outputs[callID, default: []].append(entry)
+        }
+        var outputIndices: [String: Int] = [:]
+        return ModelInput(
+            entries: messages.map { message in
+                guard message.role == .tool,
+                      let callID = message.toolCallID,
+                      let matchingOutputs = outputs[callID]
+                else {
+                    return .message(message)
+                }
+                let index = outputIndices[callID, default: 0]
+                guard matchingOutputs.indices.contains(index) else {
+                    return .message(message)
+                }
+                outputIndices[callID] = index + 1
+                return matchingOutputs[index]
+            }
+        )
+    }
 }
 
 public protocol ModelEndpoint: Sendable {
@@ -128,18 +274,26 @@ public protocol ModelEndpoint: Sendable {
     /// The caller executes any tool calls, appends the results to `messages`, and
     /// invokes `stream` again for the next turn.
     func stream(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?
+    ) -> AsyncStream<ModelEvent<String>>
+
+    /// Streams a plain-text request with an explicit semantic purpose.
+    /// Compaction requests are separate so a provider can bound summarizer
+    /// output without silently changing ordinary generation limits.
+    func stream(
+        input: ModelInput,
+        tools: [LLMToolSchema]?,
+        purpose: ModelRequestPurpose
     ) -> AsyncStream<ModelEvent<String>>
 
     /// Streams one structured model turn, decoding the final response as `T`.
     ///
-    /// Providers that support native structured output (OpenAI, Anthropic,
-    /// Gemini, Ollama, etc. through AnyLanguageModel) use their schema mechanism.
-    /// The local `kimi-code` endpoint uses a dedicated tool call as structured
-    /// output. The stream terminates with exactly one of `.generated(T)` or `.failed(...)`.
+    /// Providers with native structured output may use their schema mechanism.
+    /// Providers without it may use the portable report-tool contract. The
+    /// stream terminates with exactly one of `.generated(T)` or `.failed(...)`.
     func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>>
@@ -152,17 +306,25 @@ extension ModelEndpoint {
 
     public var tokenCounting: TokenCounting { .unavailable }
 
+    public func stream(
+        input: ModelInput,
+        tools: [LLMToolSchema]?,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<String>> {
+        stream(input: input, tools: tools)
+    }
+
     /// Default implementation for endpoints that do not provide native structured
     /// output: stream the text form and attempt to decode the final string as JSON
     /// matching `T`.
     public func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         AsyncStream(ModelEvent<T>.self) { continuation in
             let task = Task {
-                for await event in stream(messages: messages, tools: tools) {
+                for await event in stream(input: input, tools: tools) {
                     switch event {
                     case .text(let text):
                         continuation.yield(.text(text))
@@ -203,6 +365,7 @@ extension ModelEndpoint {
 public enum ModelEndpointError: Error, Sendable, Equatable {
     case configuration(String)
     case authentication
+    case unavailable
     case rateLimit
     case contextLengthExceeded
     case invalidRequest(String)
@@ -228,6 +391,8 @@ public enum HailErrorFormatter {
         switch error {
         case .modelMisbehavior(let reason):
             "Model error: \(sanitizedModelOutput(reason))"
+        case .modelUnavailable:
+            "The model service is currently unavailable."
         case .rateLimit:
             "Rate limit hit. Please retry later."
         case .contextLengthExceeded:
@@ -253,6 +418,8 @@ public enum HailErrorFormatter {
             return "Configuration error: \(reason)"
         case .authentication:
             return "Authentication failed. Check your API key or credentials."
+        case .unavailable:
+            return "The model service is currently unavailable."
         case .rateLimit:
             return "Rate limit hit. Please retry later."
         case .contextLengthExceeded:

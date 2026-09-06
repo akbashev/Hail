@@ -1,3 +1,5 @@
+import AnyLanguageModel
+
 #if canImport(FoundationEssentials)
     import FoundationEssentials
 #else
@@ -6,6 +8,7 @@
 
 public enum AgentRuntimeError: Error, Sendable, Equatable, Codable {
     case modelMisbehavior(String)
+    case modelUnavailable
     case rateLimit
     case contextLengthExceeded
     case configurationError(String)
@@ -29,6 +32,11 @@ public struct AgentWorkerReference: Sendable {
 public enum AgentRunEvent<Output: AgentOutput>: Codable, Sendable {
     case runStarted(agentID: AgentID, at: Date)
     case messageHandled(message: ChatMessage, at: Date)
+    /// A cumulative structured snapshot produced while the model is still
+    /// generating. Consumers should replace their current preview with this
+    /// value; the final typed result arrives separately as
+    /// ``responseRecorded(content:at:)``.
+    case modelOutputPartialUpdated(content: Output.PartiallyGenerated, at: Date)
     case modelOutputGenerated(content: Output, at: Date)
     case toolRequested(toolCall: ToolCall, at: Date)
     case toolCompleted(result: ToolResult, at: Date)
@@ -52,8 +60,9 @@ public enum AgentRunChange<Output: AgentOutput>: Codable, Sendable {
     case snapshot(AgentRunSnapshot<Output>)
 }
 
-/// The typed turn channel: control and the typed outcome only. Ephemeral
-/// narration (status/thinking/text/tool) rides ``AgentActivity`` instead.
+/// The typed turn channel: control, typed partial snapshots, and the typed
+/// outcome. Ephemeral narration (status/thinking/text/tool) rides
+/// ``AgentActivity`` instead.
 public enum AgentUpdate<Output: AgentOutput>: Codable, Sendable {
     case run(AgentRunChange<Output>)
 }

@@ -14,6 +14,70 @@ public protocol ScopedEffect: Sendable {
     var name: String { get }
 }
 
+/// An effect whose authority is determined by its component effects.
+///
+/// Composite effects are useful when one operation needs several capabilities
+/// at once. The component values remain ordinary ``ScopedEffect`` values, so
+/// existing per-domain authority policies continue to apply. A composite
+/// effect does not introduce a new authority domain of its own.
+public protocol CompositeScopedEffect: ScopedEffect {
+    func decision(using authority: any Authority) -> EffectDecision
+}
+
+/// The product of two effect requirements.
+///
+/// Composition is intentionally binary. Repeated composition gives us an
+/// arbitrary, statically typed effect tree without requiring heterogeneous
+/// collections or a variadic-generic public API:
+///
+/// ```swift
+/// let requirements = clock
+///     .combined(with: scheduler)
+///     .combined(with: weather)
+///     .combined(with: fetch)
+/// ```
+public struct CombinedEffect<Left: ScopedEffect, Right: ScopedEffect>:
+    CompositeScopedEffect,
+    Sendable
+{
+    public let left: Left
+    public let right: Right
+
+    public var name: String {
+        "\(left.name)+\(right.name)"
+    }
+
+    public init(left: Left, right: Right) {
+        self.left = left
+        self.right = right
+    }
+
+    public func decision(using authority: any Authority) -> EffectDecision {
+        let decisions = [
+            (left.name, authority.decision(on: left)),
+            (right.name, authority.decision(on: right)),
+        ]
+
+        let denials = decisions.compactMap { name, decision -> String? in
+            guard case .denied(let reason) = decision else { return nil }
+            return "\(name): \(reason)"
+        }
+
+        return denials.isEmpty
+            ? .granted
+            : .denied(denials.joined(separator: "; "))
+    }
+}
+
+extension ScopedEffect {
+    /// Combines this effect requirement with another one.
+    public func combined<Other: ScopedEffect>(
+        with other: Other
+    ) -> CombinedEffect<Self, Other> {
+        CombinedEffect(left: self, right: other)
+    }
+}
+
 /// The live capability for an ``ScopedEffect``, valid only inside the scope
 /// that vended it.
 ///
@@ -48,5 +112,26 @@ public struct EffectToken<Effect: ScopedEffect>: ~Escapable, ~Sendable {
         _ body: (borrowing Effect) throws -> Result
     ) rethrows -> Result {
         try body(effect)
+    }
+}
+
+extension EffectToken {
+    /// Re-enters the left capability contained by a combined effect.
+    ///
+    /// The child token is minted only inside the parent token's lexical scope;
+    /// it cannot outlive this operation or cross an isolation boundary.
+    public func withLeft<Left: ScopedEffect, Right: ScopedEffect, Result>(
+        _ operation: (borrowing EffectToken<Left>) async throws -> Result
+    ) async rethrows -> Result where Effect == CombinedEffect<Left, Right> {
+        let left = withConfiguration { $0.left }
+        return try await _withEffectUnchecked(left, operation: operation)
+    }
+
+    /// Re-enters the right capability contained by a combined effect.
+    public func withRight<Left: ScopedEffect, Right: ScopedEffect, Result>(
+        _ operation: (borrowing EffectToken<Right>) async throws -> Result
+    ) async rethrows -> Result where Effect == CombinedEffect<Left, Right> {
+        let right = withConfiguration { $0.right }
+        return try await _withEffectUnchecked(right, operation: operation)
     }
 }

@@ -1,5 +1,15 @@
 import ScopedEffect
 
+public struct ToolExecution: Sendable {
+    public let result: ToolResult
+    public let output: ToolOutput
+
+    public init(result: ToolResult, output: ToolOutput) {
+        self.result = result
+        self.output = output
+    }
+}
+
 public actor ToolRegistry: Sendable {
     private var tools: [String: AnyTool] = [:]
 
@@ -53,73 +63,73 @@ public actor ToolRegistry: Sendable {
     }
 
     public func execute(_ toolCalls: [ToolCall]) async throws(AgentRuntimeError) -> [ToolResult] {
-        var results: [ToolResult] = []
+        try await executeWithOutputs(toolCalls).map(\.result)
+    }
+
+    public func executeWithOutputs(
+        _ toolCalls: [ToolCall]
+    ) async throws(AgentRuntimeError) -> [ToolExecution] {
+        var executions: [ToolExecution] = []
 
         for call in toolCalls {
             guard let tool = tool(named: call.name) else {
-                results.append(
-                    ToolResult(
-                        toolCallID: call.id,
-                        name: call.name,
-                        output: "Error: unknown tool: \(call.name)",
-                        isError: true
-                    ))
+                let result = ToolResult(
+                    toolCallID: call.id,
+                    name: call.name,
+                    output: "Error: unknown tool: \(call.name)",
+                    isError: true
+                )
+                executions.append(ToolExecution(result: result, output: .text(result.output)))
                 continue
             }
 
             do {
-                let output: String
-                output = try await tool.execute(input: call.arguments, authority: authority)
-                results.append(
-                    ToolResult(
-                        toolCallID: call.id,
-                        name: call.name,
-                        output: output,
-                        isError: false
-                    ))
+                let output = try await tool.executeOutput(input: call.arguments, authority: authority)
+                let result = ToolResult(
+                    toolCallID: call.id,
+                    name: call.name,
+                    output: output.transcript,
+                    isError: false
+                )
+                executions.append(ToolExecution(result: result, output: output))
             } catch let denial as EffectDenied {
-                // Denial is model-visible: the refusal is ordinary feedback.
-                results.append(
-                    ToolResult(
-                        toolCallID: call.id,
-                        name: call.name,
-                        output: "Error: \(denial)",
-                        isError: true
-                    ))
+                let result = ToolResult(
+                    toolCallID: call.id,
+                    name: call.name,
+                    output: "Error: \(denial)",
+                    isError: true
+                )
+                executions.append(ToolExecution(result: result, output: .text(result.output)))
             } catch let error as ToolError {
-                results.append(
-                    ToolResult(
-                        toolCallID: call.id,
-                        name: call.name,
-                        output: Self.toolErrorMessage(error, toolName: call.name),
-                        isError: true
-                    ))
+                let result = ToolResult(
+                    toolCallID: call.id,
+                    name: call.name,
+                    output: Self.toolErrorMessage(error, toolName: call.name),
+                    isError: true
+                )
+                executions.append(ToolExecution(result: result, output: .text(result.output)))
             } catch let error as DecodingError {
-                results.append(
-                    ToolResult(
-                        toolCallID: call.id,
-                        name: call.name,
-                        output: "Error: tool \(call.name) received invalid arguments: \(Self.decodingMessage(error))",
-                        isError: true
-                    ))
+                let result = ToolResult(
+                    toolCallID: call.id,
+                    name: call.name,
+                    output: "Error: tool \(call.name) received invalid arguments: \(Self.decodingMessage(error))",
+                    isError: true
+                )
+                executions.append(ToolExecution(result: result, output: .text(result.output)))
             } catch is CancellationError {
-                // Cancellation is the turn being abandoned, not tool feedback:
-                // it must abort the round, not continue as a model-visible
-                // error. Surfaced as `.cancelled` because the typed `throws`
-                // cannot rethrow a raw `CancellationError`.
                 throw AgentRuntimeError.cancelled
             } catch {
-                results.append(
-                    ToolResult(
-                        toolCallID: call.id,
-                        name: call.name,
-                        output: "Error: \(error)",
-                        isError: true
-                    ))
+                let result = ToolResult(
+                    toolCallID: call.id,
+                    name: call.name,
+                    output: "Error: \(error)",
+                    isError: true
+                )
+                executions.append(ToolExecution(result: result, output: .text(result.output)))
             }
         }
 
-        return results
+        return executions
     }
 
     private static func toolErrorMessage(_ error: ToolError, toolName: String) -> String {

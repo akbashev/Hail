@@ -20,6 +20,10 @@ private struct FarewellEffect: ScopedEffect {
     let name = "farewell"
 }
 
+private struct SchedulingEffect: ScopedEffect {
+    let name = "scheduler"
+}
+
 extension EffectToken where Effect == DecisionGreeterEffect {
     func greet(_ who: String) -> String {
         withConfiguration { "\($0.greeting), \(who)!" }
@@ -67,6 +71,65 @@ struct EffectAuthorityTests {
         let extended = base.grantingAll(for: DecisionGreeterEffect.self)
         #expect(base.decision(on: DecisionGreeterEffect(greeting: "Hi")) != .granted)
         #expect(extended.decision(on: DecisionGreeterEffect(greeting: "Hi")) == .granted)
+    }
+
+    @Test("Combined effects delegate authority to every component")
+    func combinedEffects() {
+        let authority = CompositeAuthority()
+            .grantingAll(for: DecisionGreeterEffect.self)
+            .grantingAll(for: SchedulingEffect.self)
+
+        let requirements = DecisionGreeterEffect(greeting: "Hello")
+            .combined(with: SchedulingEffect())
+
+        #expect(authority.decision(on: requirements) == .granted)
+
+        let denied = CompositeAuthority()
+            .grantingAll(for: DecisionGreeterEffect.self)
+            .granting(for: SchedulingEffect.self) { _ in .denied("scheduler is disabled") }
+
+        #expect(
+            denied.decision(on: requirements)
+                == .denied("scheduler: scheduler is disabled")
+        )
+    }
+
+    @Test("Combined effects compose recursively")
+    func nestedCombinedEffects() {
+        let requirements = DecisionGreeterEffect(greeting: "Hello")
+            .combined(with: SchedulingEffect())
+            .combined(with: FarewellEffect())
+
+        let authority = CompositeAuthority()
+            .grantingAll(for: DecisionGreeterEffect.self)
+            .grantingAll(for: SchedulingEffect.self)
+            .granting(for: FarewellEffect.self) { _ in .denied("farewell is disabled") }
+
+        #expect(
+            authority.decision(on: requirements)
+                == .denied("farewell: farewell is disabled")
+        )
+    }
+
+    @Test("A combined token can re-enter either component capability")
+    func combinedTokenComponents() async throws {
+        let requirements = DecisionGreeterEffect(greeting: "Hello")
+            .combined(with: SchedulingEffect())
+        let authority = CompositeAuthority()
+            .grantingAll(for: DecisionGreeterEffect.self)
+            .grantingAll(for: SchedulingEffect.self)
+
+        let names = try await withEffect(requirements, authority: authority) { token in
+            await token.withLeft { leftToken in
+                let leftName = leftToken.withConfiguration { $0.name }
+                return await token.withRight { rightToken in
+                    let rightName = rightToken.withConfiguration { $0.name }
+                    return "\(leftName),\(rightName)"
+                }
+            }
+        }
+
+        #expect(names == "greeter,scheduler")
     }
 
     @Test("FullAuthority grants any domain")

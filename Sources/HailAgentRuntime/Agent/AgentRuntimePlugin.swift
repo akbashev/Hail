@@ -1,4 +1,5 @@
 import DistributedCluster
+import EventSourcing
 import HailCore
 import HailModelRuntime
 import ScopedEffect
@@ -33,11 +34,17 @@ public enum AgentRuntimeConfigurationError: Error, Sendable, Equatable {
     case invalidMaxToolRounds(Int)
 }
 
-// MARK: - Singleton store
+// MARK: - Active-agent index
 
-/// A cluster singleton that holds the in-memory agent directory. No event
-/// sourcing — the directory is rebuilt on activation by agents re-registering.
-public distributed actor AgentDirectoryStore: ClusterSingleton {
+/// A cluster singleton that holds the in-memory active-agent directory.
+///
+/// This is deliberately a liveness index, not a durable existence catalog:
+/// passivation removes an entry, and a process/node restart may temporarily
+/// lose entries until actors activate and register again. Durable agent state
+/// remains in each agent's event journal. It is used for active-agent
+/// discovery and observability only; actor routing and lifecycle do not depend
+/// on it.
+public distributed actor ActiveAgentIndex: ClusterSingleton {
     private var entries: [AgentID: AgentDirectoryEntry] = [:]
 
     public distributed func register(entry: AgentDirectoryEntry) {
@@ -63,17 +70,22 @@ public distributed actor AgentDirectoryStore: ClusterSingleton {
 
 // MARK: - Runtime plugin
 
-/// The single cluster plugin that hosts the agent directory, resolves model
+/// The single cluster plugin that hosts the active-agent index, resolves model
 /// endpoints, and delegates tool injection and prompt strategy to configurable
 /// closures.
 ///
 /// A host configures these closures at bootstrap, keeping product-specific
 /// persistence, tools, and policy outside Hail.
 public actor AgentRuntimePlugin: ActorLifecyclePlugin {
-    public typealias ExtraToolsProvider =
+    /// Selects the event-sourcing snapshot policy for one agent activation.
+    /// Keeping this in the runtime plugin lets hosts choose cadence and
+    /// retention without putting executable closures into `AgentSpawnConfig`.
+    public typealias SnapshottingProvider =
+        @Sendable (_ spawnConfig: AgentSpawnConfig) -> Snapshotting<AgentEvent, AgentState>
+
+    public typealias TurnToolsProvider =
         @Sendable (
-            _ agentID: AgentID,
-            _ sourceAgentID: AgentID,
+            _ context: AgentTurnContext,
             _ actorSystem: ClusterSystem
         ) async throws -> [any Tool]
 
@@ -101,7 +113,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     }
 
     private var actorSystem: ClusterSystem!
-    private var store: AgentDirectoryStore?
+    private var activeAgentIndex: ActiveAgentIndex?
+    private let deliveryTracker: AgentDeliveryTracker
     private let modelRouter: ModelRouter
     /// Host-selected model used only when no definition provider is supplied.
     public let defaultModel: AgentModelReference
@@ -113,12 +126,11 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// safety policy supplied at composition time.
     public let maxToolRounds: Int
 
-    /// Optional closure that returns extra tools an agent should register.
-    /// Invoked **once per turn** (the registry is rebuilt fresh each turn —
-    /// see `docs/plans/per-turn-tool-registry.md`), so implementations must
-    /// be cheap and side-effect-free: journal replays and value construction
-    /// are fine, network calls are not.
-    public var extraToolsProvider: ExtraToolsProvider?
+    /// Optional closure that returns the host's tools for one turn.
+    /// Invoked once per turn after the input has been normalized to a
+    /// ``AgentTurnContext``. Tool construction should be cheap and
+    /// side-effect-free: value construction is fine, network calls are not.
+    public var turnToolsProvider: TurnToolsProvider?
 
     /// Optional closure that derives an agent's effect authority. When nil,
     /// file effects are pinned to the agent's workspace and everything else
@@ -142,6 +154,11 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// own context and are never offered compaction.
     public let contextCompactor: (any ContextCompactor)?
 
+    /// Host-selected executable snapshot policy. The default interprets the
+    /// serializable policy in ``AgentSpawnConfig``; hosts may inject a custom
+    /// provider for rules that cannot be represented by that value.
+    public let snapshottingProvider: SnapshottingProvider
+
     /// Provider that resolves external context documents for an agent turn.
     /// When nil, the runtime falls back to inline context.
     public let contextProvider: AgentContextProvider?
@@ -152,12 +169,15 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         routerConfiguration: ModelRouterConfiguration,
         mcpServerConfiguration: MCPServerConfiguration? = nil,
         modelEndpointProvider: ModelEndpointProvider? = nil,
-        extraToolsProvider: ExtraToolsProvider? = nil,
+        turnToolsProvider: TurnToolsProvider? = nil,
         authorityProvider: AuthorityProvider? = nil,
         workspaceProvider: @escaping WorkspaceProvider,
         definitionProvider: DefinitionProvider? = nil,
         contextProvider: AgentContextProvider? = nil,
         contextCompactor: (any ContextCompactor)? = nil,
+        snapshottingProvider: @escaping SnapshottingProvider = { spawnConfig in
+            AgentRuntimePlugin.defaultSnapshotting(for: spawnConfig.snapshotPolicy)
+        },
         promptInstructions: PromptAssemblyInstructions = PromptAssemblyInstructions(),
         assemblePrompt: @escaping PromptAssembler = assembleStandardPrompt,
         defaultReasoningEffort: ReasoningEffort? = nil
@@ -170,17 +190,70 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             mcpServerConfiguration: mcpServerConfiguration,
             modelEndpointProvider: modelEndpointProvider
         )
+        self.deliveryTracker = AgentDeliveryTracker()
         self.defaultModel = defaultModel
         self.defaultReasoningEffort = defaultReasoningEffort
         self.maxToolRounds = maxToolRounds
-        self.extraToolsProvider = extraToolsProvider
+        self.turnToolsProvider = turnToolsProvider
         self.authorityProvider = authorityProvider
         self.workspaceProvider = workspaceProvider
         self.definitionProvider = definitionProvider
         self.contextProvider = contextProvider
         self.contextCompactor = contextCompactor
+        self.snapshottingProvider = snapshottingProvider
         self.promptInstructions = promptInstructions
         self.assemblePrompt = assemblePrompt
+    }
+
+    public func snapshotting(
+        for spawnConfig: AgentSpawnConfig
+    ) -> Snapshotting<AgentEvent, AgentState> {
+        snapshottingProvider(spawnConfig)
+    }
+
+    /// Translates the Codable spawn intent into the executable event-sourcing
+    /// policy. This is the only place where Hail's compaction event is coupled
+    /// to the generic snapshotting predicate.
+    public static func defaultSnapshotting(
+        for policy: AgentSnapshotPolicy
+    ) -> Snapshotting<AgentEvent, AgentState> {
+        switch policy {
+        case .disabled:
+            return .disabled
+
+        case .periodic(let every, let retention):
+            return .every(
+                numberOfEvents: max(1, every),
+                retention: retentionCriteria(for: retention)
+            )
+
+        case .periodicOrWhenCompacted(let every, let retention):
+            return .every(
+                numberOfEvents: max(1, every),
+                retention: retentionCriteria(for: retention),
+                orWhen: snapshotOnCompaction
+            )
+
+        case .whenCompacted:
+            return .when(snapshotOnCompaction)
+        }
+    }
+
+    private static let snapshotOnCompaction:
+        @Sendable (AgentEvent, AgentState, Int64) -> Bool = { event, _, _ in
+            if case .conversationCompacted = event { return true }
+            return false
+        }
+
+    private static func retentionCriteria(
+        for retention: AgentSnapshotRetention
+    ) -> RetentionCriteria {
+        switch retention {
+        case .keepAll:
+            return .keepAll
+        case .keepLast(let count):
+            return .keepLast(max(1, count))
+        }
     }
 
     /// Resolves the host workspace for one activation.
@@ -288,55 +361,82 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     // MARK: Agent directory
 
+    /// Adds an active-agent entry to the liveness index. Failure means the
+    /// index is unavailable; it does not mean the agent failed to activate.
     public func register(entry: AgentDirectoryEntry) async throws {
-        guard let store else { throw AgentDirectoryError.unavailable }
-        try await store.register(entry: entry)
+        guard let activeAgentIndex else { throw AgentDirectoryError.unavailable }
+        try await activeAgentIndex.register(entry: entry)
     }
 
+    /// Removes an active-agent entry from the liveness index. Failure should be
+    /// treated as stale discovery data, not as a lifecycle veto.
     public func unregister(agentID: AgentID) async throws {
-        guard let store else { throw AgentDirectoryError.unavailable }
-        try await store.unregister(agentID: agentID)
+        guard let activeAgentIndex else { throw AgentDirectoryError.unavailable }
+        try await activeAgentIndex.unregister(agentID: agentID)
     }
 
+    /// Returns an active-agent entry, if the liveness index currently knows it.
+    /// A `nil` result is not an existence check for the durable agent.
     public func entry(forAgentID agentID: AgentID) async throws -> AgentDirectoryEntry? {
-        guard let store else { throw AgentDirectoryError.unavailable }
-        return try await store.entry(forAgentID: agentID)
+        guard let activeAgentIndex else { throw AgentDirectoryError.unavailable }
+        return try await activeAgentIndex.entry(forAgentID: agentID)
     }
 
     public func agents(ofType role: Role) async throws -> [AgentDirectoryEntry] {
-        guard let store else { throw AgentDirectoryError.unavailable }
-        return try await store.agents(ofType: role)
+        guard let activeAgentIndex else { throw AgentDirectoryError.unavailable }
+        return try await activeAgentIndex.agents(ofType: role)
     }
 
+    /// Lists currently active agents. Passivated or not-yet-reactivated agents
+    /// are intentionally absent.
     public func allAgents() async throws -> [AgentDirectoryEntry] {
-        guard let store else { throw AgentDirectoryError.unavailable }
-        return try await store.allAgents()
+        guard let activeAgentIndex else { throw AgentDirectoryError.unavailable }
+        return try await activeAgentIndex.allAgents()
+    }
+
+    // MARK: Agent delivery
+
+    /// Accepts a best-effort, process-local asynchronous delivery. The
+    /// operation is tracked until it completes or fails; it is not persisted
+    /// and may be lost if this process exits.
+    public func enqueueDelivery(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) async -> AgentDeliveryID {
+        await deliveryTracker.enqueue(operation)
+    }
+
+    public func deliveryStatus(for id: AgentDeliveryID) async -> AgentDeliveryStatus? {
+        await deliveryTracker.status(for: id)
+    }
+
+    public func activeDeliveryCount() async -> Int {
+        await deliveryTracker.activeDeliveryCount()
     }
 
     // MARK: Tool injection
 
-    /// Returns additional tools the runtime wants to make available to this agent.
-    /// Hail registers only its intrinsic clock and agent-messaging tools. The
-    /// host supplies environmental and product-specific tools here.
-    public func extraTools(
-        forAgentID agentID: AgentID,
-        sourceAgentID: AgentID,
+    /// Returns the host's tools for one turn.
+    /// Hail registers only its intrinsic tools; the host supplies environmental
+    /// and product-specific tools here.
+    public func turnTools(
+        for context: AgentTurnContext,
         actorSystem: ClusterSystem
     ) async throws -> [any Tool] {
-        try await extraToolsProvider?(agentID, sourceAgentID, actorSystem) ?? []
+        try await turnToolsProvider?(context, actorSystem) ?? []
     }
 
     // MARK: Lifecycle hooks
 
     public func start(_ system: ClusterSystem) async throws {
         self.actorSystem = system
-        self.store = try await system.singleton.host(name: "\(Self.pluginKey)_store") {
-            AgentDirectoryStore(actorSystem: $0)
+        self.activeAgentIndex = try await system.singleton.host(name: "\(Self.pluginKey)_active_index") {
+            ActiveAgentIndex(actorSystem: $0)
         }
     }
 
     public func stop(_ system: ClusterSystem) async {
-        self.store = nil
+        await deliveryTracker.cancelAll()
+        self.activeAgentIndex = nil
         self.actorSystem = nil
     }
 

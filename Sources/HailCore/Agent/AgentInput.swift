@@ -13,6 +13,11 @@ import AnyLanguageModel
 /// the model adapter. This keeps product-specific payloads out of
 /// ``Hail`` while still giving the agent a typed input surface.
 public protocol AgentInput: Codable & Sendable {
+    /// Optional stable identity supplied by the host for the input that
+    /// starts this turn. Hail carries it only through turn-tool resolution;
+    /// it does not interpret or persist the value.
+    var inputID: String? { get }
+
     /// Returns the chat message representation of this input.
     ///
     /// The message is stored in the agent's event journal and appended to the
@@ -28,6 +33,8 @@ public protocol AgentInput: Codable & Sendable {
 }
 
 extension AgentInput {
+    public var inputID: String? { nil }
+
     public func systemInstructions() -> [String] { [] }
 }
 

@@ -13,6 +13,8 @@ LLMs are tools, not the foundation of your product. Hail is built on open-source
 
 Hail uses the reactive model familiar from actors: an isolated agent owns its state, receives a message, reacts, emits durable events, and becomes idle. There is no outer `while true` loop for the host to keep alive. Whether the resulting product is fully automated or human-controlled is an application decision.
 
+The next reliability milestone is documented in the [Hail 0.2.0 plan](docs/0.2.0-plan.md): command identity, authority-safe recovery, durable execution steps, reliable agent messaging, and lifecycle-transparent discovery.
+
 ## A small example
 
 ### Spawn an agent
@@ -179,8 +181,8 @@ let runtime = try AgentRuntimePlugin(
     definitionProvider: { spawn in
         await definitions.lookup(spawn.agentID.role)
     },
-    extraToolsProvider: { agentID, sourceAgentID, system in
-        makeHostTools(for: agentID, calledBy: sourceAgentID, in: system)
+    turnToolsProvider: { context, system in
+        makeHostTools(for: context, in: system)
     },
     authorityProvider: { _, workspace in
         CompositeAuthority.workspaceDefault(
@@ -238,6 +240,10 @@ The built-in `ollama/...` route uses Ollama's native streaming API, preserving
 preflight counts, load `TokenCounter` from `HailCompaction` and pass
 its `count` closure to `OllamaEndpoint` (or `AnyLanguageModelEndpoint`); if a
 tokenizer is unavailable, Hail uses its conservative estimator.
+
+Ollama runner capabilities vary: typed outputs use the portable report-tool
+contract, and plain-text outputs do not send a native JSON-schema `format`, so
+callers do not need to know whether the selected Ollama model uses MLX or GGUF.
 
 Model requests also emit durable start/completion/failure records with a
 `TurnID`, `ModelRequestID`, duration, and reported usage. Read the live

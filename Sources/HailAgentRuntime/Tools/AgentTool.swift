@@ -38,8 +38,9 @@ public struct AgentTool: Tool {
 
     public let name = "agent"
     public let description =
-        "Discover and communicate with other agents. Use list_agents to find active agents, then send a message to one by its agent id. "
-        + "Messages are delivered asynchronously: the recipient processes them in its own time and responds with a message of its own — do not expect a synchronous reply."
+        "Discover and communicate with other agents. Use list_agents to find currently active agents, or send to a previously known agent id. "
+        + "Messages are queued asynchronously on a best-effort basis: the recipient processes them in its own time and responds with a message of its own — do not expect a synchronous reply or delivery across a process restart. "
+        + "The current agent is not a valid recipient; continue the task in this turn instead of sending a message to yourself."
 
     public var schema: LLMToolSchema {
         LLMToolSchema(
@@ -58,7 +59,7 @@ public struct AgentTool: Tool {
                         "target": LLMToolSchema.PropertySchema(
                             type: "string",
                             description:
-                                "For 'send': the recipient's full agent id (e.g. 'supervisor-main', 'coder-chat', 'coder-T-42'). Use list_agents to discover active agents and their ids.",
+                                "For 'send': the recipient's full agent id (e.g. 'supervisor-main', 'coder-chat', 'coder-T-42'). Use list_agents to discover currently active ids.",
                             enumValues: nil
                         ),
                         "message": LLMToolSchema.PropertySchema(
@@ -100,8 +101,9 @@ public struct AgentTool: Tool {
         switch input.action {
         case .listAgents:
             let agents = try await system.agentRuntime.allAgents()
+                .filter { $0.agentID != sourceAgentID }
             guard !agents.isEmpty else {
-                return "No active agents."
+                return "No other active agents."
             }
             var lines = ["Active agents:"]
             for entry in agents {
@@ -118,31 +120,19 @@ public struct AgentTool: Tool {
             }
 
             // Targets are concrete agent ids (e.g. `supervisor-main`,
-            // `coder-chat`, `coder-T-42`) — discoverable via `list_agents`.
-            // No bare-role resolution: an agent is addressed by the one id
-            // it was spawned with, and unknown ids fail loudly instead of
-            // spawning phantom agents.
+            // `coder-chat`, `coder-T-42`). No bare-role resolution: an agent
+            // is addressed by its stable virtual-actor id. The virtual-actor
+            // runtime may reactivate a passivated agent, just like Orleans or
+            // Akka Cluster Sharding; the active directory is only a discovery
+            // projection and is not consulted for correctness.
             guard let targetID = AgentID(rawValue: target.rawValue) else {
                 throw AgentRuntimeError.modelMisbehavior(
-                    "Unknown agent id '\(target.rawValue)'. Use list_agents to discover active agent ids."
+                    "Invalid agent id '\(target.rawValue)'. Use a full agent id such as 'coder-T-42'."
                 )
             }
-            // `AgentID(rawValue:)` accepts any hyphenated string, and
-            // `getActor` below CREATES the actor when absent — so parsing
-            // alone cannot reject a hallucinated or mistyped id (e.g.
-            // `coder-T-999`), which would silently activate a brand-new
-            // agent under this sender's root/scope. The directory is the
-            // existence check: agents register on activation and unregister
-            // on deactivation, so an unlisted id is unknown. Consequence:
-            // sending to a passivated agent now fails loudly instead of
-            // reactivating it — the tool's contract is `list_agents` first,
-            // and that only ever shows active agents. A small TOCTOU window
-            // remains: a target that deactivates between this check and
-            // `getActor` is re-spawned below, which is legitimate (the id
-            // was real moments ago).
-            guard try await system.agentRuntime.entry(forAgentID: targetID) != nil else {
+            guard targetID != sourceAgentID else {
                 throw AgentRuntimeError.modelMisbehavior(
-                    "Unknown agent id '\(target.rawValue)'. Use list_agents to discover active agent ids."
+                    "An agent cannot send a message to itself. Continue the task in this turn."
                 )
             }
             let other: Agent = try await system.virtualActors.getActor(
@@ -153,11 +143,12 @@ public struct AgentTool: Tool {
                     agentDirectoryID: agentDirectoryID
                 )
             )
-            // Tag the real sender and deliver asynchronously: the caller
-            // structures the concurrency (here: detached), so a slow turn
-            // can never lose the message and a timeout on our side can
-            // never lose the response. The reply arrives as a message.
-            Task {
+            // Tag the real sender and queue asynchronously. The runtime owns
+            // the task so it remains observable until completion, while the
+            // tool still returns without waiting for the recipient. This is
+            // intentionally best effort: a process restart can lose it.
+            let logger = system.log
+            let deliveryID = await system.agentRuntime.enqueueDelivery {
                 do {
                     let _: String? = try await other.respond(
                         ChatMessage.text(
@@ -167,7 +158,7 @@ public struct AgentTool: Tool {
                         )
                     )
                 } catch {
-                    system.log.error(
+                    logger.error(
                         "Asynchronous agent delivery failed",
                         metadata: [
                             "sourceAgentID": .string(sourceAgentID.rawValue),
@@ -175,9 +166,10 @@ public struct AgentTool: Tool {
                             "error": .string(String(describing: error)),
                         ]
                     )
+                    throw error
                 }
             }
-            return "Delivered to \(targetID.rawValue). They will respond when done."
+            return "Queued message to \(targetID.rawValue) (delivery \(deliveryID)); best effort, no response is expected in this turn."
         }
     }
 }

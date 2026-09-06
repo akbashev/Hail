@@ -53,12 +53,13 @@ struct ACPModelEndpoint: ModelEndpoint {
     }
 
     func stream(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?
     ) -> AsyncStream<ModelEvent<String>> {
         AsyncStream(ModelEvent<String>.self) { continuation in
             let task = Task {
                 do {
+                    let messages = try input.textMessages(for: model)
                     let parts = turnParts(messages: messages, turnDelta: nil, responseType: String.self)
                     let outcome = try await runPrompt(
                         bootstrap: parts.bootstrap,
@@ -83,11 +84,11 @@ struct ACPModelEndpoint: ModelEndpoint {
     }
 
     func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
-        stream(messages: messages, turnDelta: nil, tools: tools, responseType: responseType)
+        stream(input: input, turnDelta: nil, tools: tools, responseType: responseType)
     }
 
     /// The shared streaming body. With a precise ``TurnDelta`` from the
@@ -96,7 +97,7 @@ struct ACPModelEndpoint: ModelEndpoint {
     /// `authority` is the turn's effect lane; `nil` keeps the session's
     /// current authority.
     private func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         turnDelta: TurnDelta?,
         authority: (any Authority)? = nil,
         tools: [LLMToolSchema]?,
@@ -105,6 +106,7 @@ struct ACPModelEndpoint: ModelEndpoint {
         AsyncStream(ModelEvent<T>.self) { continuation in
             let task = Task {
                 do {
+                    let messages = try input.textMessages(for: model)
                     let parts = turnParts(messages: messages, turnDelta: turnDelta, responseType: T.self)
                     let outcome = try await runPrompt(
                         bootstrap: parts.bootstrap,
@@ -485,14 +487,14 @@ extension ACPModelEndpoint: SessionOwningEndpoint {
     }
 
     func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         delta turnDelta: TurnDelta,
         authority: any Authority,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         stream(
-            messages: messages, turnDelta: turnDelta, authority: authority, tools: tools,
+            input: input, turnDelta: turnDelta, authority: authority, tools: tools,
             responseType: responseType)
     }
 

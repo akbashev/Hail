@@ -178,10 +178,11 @@ struct ReasoningLoopCompactionTests {
     private struct FakeEndpoint: ModelEndpoint {
         let model = "fake"
         let contextOwnership: ModelContextOwnership = .runtime
+        let effectiveContextWindow: Int? = 4_096
         let response: String
 
         func stream(
-            messages: [LLMMessage],
+            input: ModelInput,
             tools: [LLMToolSchema]?
         ) -> AsyncStream<ModelEvent<String>> {
             let response = self.response
@@ -196,13 +197,30 @@ struct ReasoningLoopCompactionTests {
     private struct FailingTokenCountEndpoint: ModelEndpoint {
         let model = "counting-fails"
         let contextOwnership: ModelContextOwnership = .runtime
+        let effectiveContextWindow: Int? = 4_096
         let tokenCounting: TokenCounting = .available {
             (_: [LLMMessage], _: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int in
             throw AgentRuntimeError.infrastructureFailure("tokenizer unavailable")
         }
 
         func stream(
-            messages: [LLMMessage],
+            input: ModelInput,
+            tools: [LLMToolSchema]?
+        ) -> AsyncStream<ModelEvent<String>> {
+            AsyncStream { $0.finish() }
+        }
+    }
+
+    private struct RichCountingEndpoint: ModelEndpoint {
+        let model = "rich-counting"
+        let contextOwnership: ModelContextOwnership = .runtime
+        let effectiveContextWindow: Int? = 4_096
+        let tokenCounting: TokenCounting = .availableInput { input, _ in
+            input.containsUnsupportedData ? 512 : 0
+        }
+
+        func stream(
+            input: ModelInput,
             tools: [LLMToolSchema]?
         ) -> AsyncStream<ModelEvent<String>> {
             AsyncStream { $0.finish() }
@@ -216,14 +234,14 @@ struct ReasoningLoopCompactionTests {
         var currentSessionID: SessionID? { nil }
 
         func stream(
-            messages: [LLMMessage],
+            input: ModelInput,
             tools: [LLMToolSchema]?
         ) -> AsyncStream<ModelEvent<String>> {
             AsyncStream { $0.finish() }
         }
 
         func stream<T: AgentOutput>(
-            messages: [LLMMessage],
+            input: ModelInput,
             delta: TurnDelta,
             authority: any Authority,
             tools: [LLMToolSchema]?,
@@ -238,7 +256,7 @@ struct ReasoningLoopCompactionTests {
         let contextOwnership: ModelContextOwnership = .endpointSession
 
         func stream(
-            messages: [LLMMessage],
+            input: ModelInput,
             tools: [LLMToolSchema]?
         ) -> AsyncStream<ModelEvent<String>> {
             AsyncStream { $0.finish() }
@@ -250,6 +268,7 @@ struct ReasoningLoopCompactionTests {
             @Sendable (
                 PromptContext,
                 PreparedRequest,
+                CompactionBudget,
                 @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
             ) async throws(AgentRuntimeError) -> CompactionDecision
 
@@ -258,9 +277,10 @@ struct ReasoningLoopCompactionTests {
         func compact(
             context: PromptContext,
             request: PreparedRequest,
+            budget: CompactionBudget,
             summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
         ) async throws(AgentRuntimeError) -> CompactionDecision {
-            try await body(context, request, summarize)
+            try await body(context, request, budget, summarize)
         }
     }
 
@@ -335,7 +355,7 @@ struct ReasoningLoopCompactionTests {
                 return contexts[i]
             },
             endpoint: { FakeEndpoint(response: "rolled summary") },
-            tools: { ToolRegistry(authority: FullAuthority()) },
+            tools: { _ in ToolRegistry(authority: FullAuthority()) },
             emit: { await recorder.record($0) },
             recordActivity: { _ in },
             compactor: compactor,
@@ -354,7 +374,7 @@ struct ReasoningLoopCompactionTests {
             .text(sender: "user", content: "m2", timestamp: Date()),
         ])
         let rebuilt = try makeContext(thread: [])
-        let body: FakeCompactor.Body = { _, _, summarize in
+        let body: FakeCompactor.Body = { _, _, _, summarize in
             await recorder.compacted()
             // The runtime's summarize reduces the endpoint stream to text.
             let summary = try await summarize([LLMMessage(role: .user, content: "summarize me")])
@@ -401,7 +421,7 @@ struct ReasoningLoopCompactionTests {
     func sessionOwningEndpointExcluded() async throws {
         let recorder = Recorder()
         let context = try makeContext(thread: [])
-        let compactor = FakeCompactor(body: { _, _, _ in
+        let compactor = FakeCompactor(body: { _, _, _, _ in
             await recorder.compacted()
             return .compacted(
                 ConversationCompaction(summary: "x", archivedCount: 1)
@@ -436,7 +456,7 @@ struct ReasoningLoopCompactionTests {
     func noCompactionNoJournal() async throws {
         let recorder = Recorder()
         let context = try makeContext(thread: [])
-        let compactor = FakeCompactor(body: { _, _, _ in .unchanged })
+        let compactor = FakeCompactor(body: { _, _, _, _ in .unchanged })
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
         let result = try await loop.compactIfNeeded(turnContext: context, endpoint: FakeEndpoint(response: "unused"))
@@ -464,7 +484,7 @@ struct ReasoningLoopCompactionTests {
                 parameters: .init(type: "object", properties: nil, required: nil)
             )
         )
-        let compactor = FakeCompactor(body: { _, request, _ in
+        let compactor = FakeCompactor(body: { _, request, _, _ in
             await recorder.budgeted(messages: request.messages, tools: request.tools)
             return .unchanged
         })
@@ -481,6 +501,33 @@ struct ReasoningLoopCompactionTests {
         #expect(await recorder.budgetedToolCount == 1)
     }
 
+    @Test("provider-aware counting can inspect rich tool output")
+    func richToolOutputIsBudgeted() async throws {
+        let recorder = Recorder()
+        let context = try makeContext(thread: [])
+        let compactor = FakeCompactor(body: { _, _, _, _ in .unchanged })
+        let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
+        var input = ModelInput(messages: [])
+        input.appendToolOutput(
+            callID: "fetch-1",
+            name: "fetch",
+            output: .data(
+                ToolData(
+                    body: Data(repeating: 1, count: 2048),
+                    contentType: "application/octet-stream"
+                )
+            )
+        )
+
+        let result = try await loop.compactIfNeeded(
+            turnContext: context,
+            endpoint: RichCountingEndpoint(),
+            requestInput: input
+        )
+
+        #expect(result.promptContext.measurement.projectedTokenCount == 512)
+    }
+
     @Test("a compactor failure propagates instead of sending oversized context")
     func compactorFailurePropagates() async throws {
         let recorder = Recorder()
@@ -488,7 +535,7 @@ struct ReasoningLoopCompactionTests {
             .text(sender: "user", content: "m1", timestamp: Date())
         ])
         let body: FakeCompactor.Body = {
-            _, _, _ in throw AgentRuntimeError.infrastructureFailure("compactor unavailable")
+            _, _, _, _ in throw AgentRuntimeError.infrastructureFailure("compactor unavailable")
         }
         let compactor = FakeCompactor(body: body)
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
@@ -506,7 +553,7 @@ struct ReasoningLoopCompactionTests {
     func supportedTokenCounterFailurePropagates() async throws {
         let recorder = Recorder()
         let context = try makeContext(thread: [])
-        let compactor = FakeCompactor(body: { _, _, _ in .unchanged })
+        let compactor = FakeCompactor(body: { _, _, _, _ in .unchanged })
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 
         await #expect(throws: AgentRuntimeError.infrastructureFailure("tokenizer unavailable")) {
@@ -522,7 +569,7 @@ struct ReasoningLoopCompactionTests {
     func compactorCancellationPropagates() async throws {
         let recorder = Recorder()
         let context = try makeContext(thread: [])
-        let body: FakeCompactor.Body = { _, _, _ in throw AgentRuntimeError.cancelled }
+        let body: FakeCompactor.Body = { _, _, _, _ in throw AgentRuntimeError.cancelled }
         let compactor = FakeCompactor(body: body)
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
 

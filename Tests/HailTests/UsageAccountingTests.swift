@@ -1,6 +1,7 @@
 import Foundation
+import AnyLanguageModel
 import HailCore
-import HailModelRuntime
+@testable import HailModelRuntime
 import Testing
 
 @Suite("Usage accounting")
@@ -185,20 +186,18 @@ struct UsageAccountingTests {
 
     @Test("Ollama maps final-frame counts")
     func ollamaUsageStream() async throws {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [OllamaStubURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        let endpoint = OllamaEndpoint(
-            model: "qwen2.5",
-            baseURL: URL(string: "http://localhost:11434")!,
-            temperature: 0.7,
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://localhost:11434",
             numContext: 100,
-            session: session
+            lines: [
+                #"{"message":{"role":"assistant","content":"hello"},"done":false}"#,
+                #"{"message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":11,"eval_count":3}"#,
+            ]
         )
 
         var events: [ModelEvent<String>] = []
         for await event in endpoint.stream(
-            messages: [LLMMessage(role: .user, content: "hello")],
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "hello")]),
             tools: nil
         ) {
             events.append(event)
@@ -219,27 +218,286 @@ struct UsageAccountingTests {
             })
         #expect(events.contains { if case .generated("hello") = $0 { true } else { false } })
     }
-}
 
-private final class OllamaStubURLProtocol: URLProtocol, @unchecked Sendable {
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    @Test("Ollama maps fetched data at the provider boundary")
+    func ollamaMapsFetchedData() async throws {
+        var input = ModelInput(
+            messages: [
+                LLMMessage(role: .user, content: "What is shown?"),
+                LLMMessage(
+                    role: .assistant,
+                    content: "",
+                    toolCalls: [
+                        LLMToolCall(
+                            id: "fetch-1",
+                            type: "function",
+                            function: .init(name: "fetch_url", arguments: #"{"url":"https://example.test/a.jpg"}"#)
+                        )
+                    ]
+                ),
+            ]
+        )
+        input.appendToolOutput(
+            callID: "fetch-1",
+            name: "fetch_url",
+            output: .data(
+                ToolData(
+                    body: Data([0, 1, 2]),
+                    contentType: "image/jpeg",
+                    source: URL(string: "https://example.test/a.jpg")
+                )
+            )
+        )
 
-    override func startLoading() {
-        guard let client else { return }
-        let response = HTTPURLResponse(
-            url: request.url!, statusCode: 200, httpVersion: nil,
-            headerFields: ["Content-Type": "application/x-ndjson"]
-        )!
-        client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        let body =
-            [
-                #"{"message":{"role":"assistant","content":"hello"},"done":false}"#,
-                #"{"message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":11,"eval_count":3}"#,
-            ].joined(separator: "\n") + "\n"
-        client.urlProtocol(self, didLoad: Data(body.utf8))
-        client.urlProtocolDidFinishLoading(self)
+        let endpoint = OllamaEndpoint(
+            model: "qwen3.5:9b-mlx",
+            baseURL: URL(string: "http://ollama.test")!,
+            temperature: 0.7,
+            transport: { body in
+                let object = try #require(
+                    JSONSerialization.jsonObject(with: body) as? [String: Any]
+                )
+                let messages = try #require(object["messages"] as? [[String: Any]])
+                let toolOutput = try #require(messages.last)
+                #expect(toolOutput["role"] as? String == "tool")
+                #expect(toolOutput["tool_name"] as? String == "fetch_url")
+                #expect(toolOutput["tool_call_id"] as? String == "fetch-1")
+                #expect(toolOutput["images"] as? [String] == ["AAEC"])
+                return OllamaHTTPResponse(
+                    statusCode: 200,
+                    lines: Self.stubLines([
+                        #"{"message":{"role":"assistant","content":"A test image."},"done":true}"#
+                    ])
+                )
+            }
+        )
+
+        for await _ in endpoint.stream(input: input, tools: nil) {}
     }
 
-    override func stopLoading() {}
+    @Test("Ollama plain-text outputs do not require native structured output")
+    func ollamaPlainTextContract() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://plain.test",
+            rejectNativeStructuredOutput: true,
+            lines: [
+                #"{"message":{"role":"assistant","content":"hello"},"done":false}"#,
+                #"{"message":{"role":"assistant","content":""},"done":true}"#,
+            ]
+        )
+
+        var events: [ModelEvent<ChatResponse>] = []
+        for await event in endpoint.stream(
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "hello")]),
+            tools: nil,
+            responseType: ChatResponse.self
+        ) {
+            events.append(event)
+        }
+
+        #expect(
+            events.contains {
+                if case .generated(let response) = $0 { response.content == "hello" } else { false }
+            })
+        #expect(!events.contains { if case .failed = $0 { true } else { false } })
+    }
+
+    @Test("Ollama report-tool outputs work without native structured output")
+    func ollamaReportToolContract() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://report.test",
+            lines: [
+                #"{"message":{"role":"assistant","content":"","tool_calls":[{"id":"report-1","function":{"name":"report_test_output","arguments":{"value":"done"}}}]},"done":false}"#,
+                #"{"message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":11,"eval_count":3}"#,
+            ]
+        )
+
+        var events: [ModelEvent<TestReportOutput>] = []
+        for await event in endpoint.stream(
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "report")]),
+            tools: nil,
+            responseType: TestReportOutput.self
+        ) {
+            events.append(event)
+        }
+
+        #expect(
+            events.contains {
+                if case .generated(let output) = $0 { output.value == "done" } else { false }
+            })
+        #expect(
+            !events.contains {
+                if case .toolCall(let call) = $0 { call.name == TestReportOutput.reportToolName } else { false }
+            })
+    }
+
+    @Test("Ollama error frames become request failures")
+    func ollamaErrorFrame() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://error.test",
+            lines: [#"{"error":"structured output is unavailable"}"#]
+        )
+
+        var events: [ModelEvent<String>] = []
+        for await event in endpoint.stream(
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "hello")]),
+            tools: nil
+        ) {
+            events.append(event)
+        }
+
+        #expect(
+            events.contains {
+                if case .failed(.requestFailed(let message)) = $0 {
+                    message == "Ollama: structured output is unavailable"
+                } else {
+                    false
+                }
+            })
+    }
+
+    @Test("Ollama empty final responses are not successful chat turns")
+    func ollamaEmptyFinalResponse() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://empty.test",
+            lines: [#"{"message":{"role":"assistant","content":""},"done":true}"#]
+        )
+
+        var events: [ModelEvent<ChatResponse>] = []
+        for await event in endpoint.stream(
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "hello")]),
+            tools: nil,
+            responseType: ChatResponse.self
+        ) {
+            events.append(event)
+        }
+
+        #expect(
+            events.contains {
+                if case .failed(.invalidResponse(let message)) = $0 {
+                    message == "Ollama returned an empty response."
+                } else {
+                    false
+                }
+            })
+        #expect(!events.contains { if case .generated = $0 { true } else { false } })
+    }
+
+    @Test("Ollama does not expose a tool result as the final response")
+    func ollamaEmptyFinalResponseAfterToolRound() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://empty-after-tool.test",
+            lines: [#"{"message":{"role":"assistant","content":""},"done":true}"#]
+        )
+
+        var events: [ModelEvent<ChatResponse>] = []
+        for await event in endpoint.stream(
+            input: ModelInput(messages: [
+                LLMMessage(role: .assistant, content: "", toolCalls: []),
+                LLMMessage(
+                    role: .tool,
+                    content: "Created ticket T-1 assigned to @coder",
+                    toolCallID: "call-1"
+                ),
+            ]),
+            tools: nil,
+            responseType: ChatResponse.self
+        ) {
+            events.append(event)
+        }
+
+        #expect(
+            events.contains {
+                if case .failed(.invalidResponse(let message)) = $0 {
+                    message == "Ollama returned an empty response."
+                } else {
+                    false
+                }
+            })
+        #expect(!events.contains { if case .generated = $0 { true } else { false } })
+    }
+
+    private func ollamaEndpoint(
+        baseURL: String,
+        numContext: Int? = nil,
+        rejectNativeStructuredOutput: Bool = false,
+        lines: [String]
+    ) -> OllamaEndpoint {
+        OllamaEndpoint(
+            model: "qwen3.5:9b-mlx",
+            baseURL: URL(string: baseURL)!,
+            temperature: 0.7,
+            numContext: numContext,
+            transport: { body in
+                if rejectNativeStructuredOutput,
+                    let object = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                    object["format"] != nil
+                {
+                    return OllamaHTTPResponse(
+                        statusCode: 501,
+                        lines: Self.stubLines([#"{"error":"structured output is unavailable"}"#])
+                    )
+                }
+                return OllamaHTTPResponse(statusCode: 200, lines: Self.stubLines(lines))
+            }
+        )
+    }
+
+    private static func stubLines(_ lines: [String]) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            for line in lines {
+                continuation.yield(line)
+            }
+            continuation.finish()
+        }
+    }
+}
+
+private struct TestReportOutput: AgentOutput, Codable, Sendable, Equatable {
+    let value: String
+
+    static let reportToolName = "report_test_output"
+
+    init(_ content: GeneratedContent) throws {
+        value = try content.value(String.self, forProperty: "value")
+    }
+
+    var generatedContent: GeneratedContent {
+        GeneratedContent(properties: ["value": value])
+    }
+
+    static var generationSchema: GenerationSchema {
+        GenerationSchema(
+            type: TestReportOutput.self,
+            description: "Test report output",
+            properties: [
+                .init(name: "value", description: "The output value.", type: String.self)
+            ]
+        )
+    }
+
+    static var outputContract: AgentOutputContract {
+        .reportTool(name: reportToolName, schema: reportToolSchema)
+    }
+
+    static var reportToolSchema: LLMToolSchema {
+        LLMToolSchema(
+            type: "function",
+            function: LLMToolSchema.FunctionSchema(
+                name: reportToolName,
+                description: "Report the test output.",
+                parameters: LLMToolSchema.ParameterSchema(
+                    type: "object",
+                    properties: [
+                        "value": LLMToolSchema.PropertySchema(
+                            type: "string",
+                            description: "The output value.",
+                            enumValues: nil
+                        )
+                    ],
+                    required: ["value"]
+                )
+            )
+        )
+    }
 }

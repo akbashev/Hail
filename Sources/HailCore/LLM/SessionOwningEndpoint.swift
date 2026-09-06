@@ -94,11 +94,11 @@ public struct ModelSessionResume: Sendable, Equatable {
 /// session (the local `kimi`/`claude` CLIs or Codex App Server).
 ///
 /// On every turn the reasoning loop hands the endpoint both the full context
-/// (`messages`, for cold bootstraps) and the per-turn ``TurnDelta``. The
+/// (`input`, for cold bootstraps) and the per-turn ``TurnDelta``. The
 /// endpoint — which alone knows whether its session is alive — sends only the
 /// delta on a warm session and bootstraps with the full context on a cold one.
 /// Stateless endpoints (plain chat-model APIs) do not conform; the loop calls
-/// their plain `stream(messages:tools:)` instead.
+/// their plain `stream(input:tools:)` instead.
 public protocol SessionOwningEndpoint: ModelEndpoint {
     /// The harness session id currently in use, if any. The reasoning loop
     /// journals it after a turn so a restart can resume the session.
@@ -110,7 +110,7 @@ public protocol SessionOwningEndpoint: ModelEndpoint {
     /// endpoint applies it at prompt start and needs no restore — the next
     /// turn simply carries its own.
     func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         delta: TurnDelta,
         authority: any Authority,
         tools: [LLMToolSchema]?,

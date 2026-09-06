@@ -1,6 +1,15 @@
+import AsyncHTTPClient
 import AnyLanguageModel
 import Foundation
 import HailCore
+import NIOCore
+
+struct OllamaHTTPResponse: Sendable {
+    let statusCode: Int
+    let lines: AsyncThrowingStream<String, Error>
+}
+
+typealias OllamaTransport = @Sendable (Data) async throws -> OllamaHTTPResponse
 
 /// A small native Ollama `/api/chat` endpoint.
 ///
@@ -14,75 +23,191 @@ public struct OllamaEndpoint: ModelEndpoint {
     public let effectiveContextWindow: Int?
     public let tokenCounting: TokenCounting
 
-    private let baseURL: URL
     private let temperature: Double
     private let numContext: Int?
-    private let session: URLSession
+    private let compactionMaxOutputTokens: Int
+    private let transport: OllamaTransport
 
     public init(
         model: String,
         baseURL: URL,
         temperature: Double,
         numContext: Int? = nil,
+        requestTimeout: TimeInterval = 3_600,
+        compactionMaxOutputTokens: Int = 512,
         countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
-        session: URLSession = .shared
+        countInputTokens: (@Sendable (ModelInput, [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil
+    ) {
+        self.init(
+            model: model,
+            baseURL: baseURL,
+            temperature: temperature,
+            numContext: numContext,
+            compactionMaxOutputTokens: compactionMaxOutputTokens,
+            countTokens: countTokens,
+            countInputTokens: countInputTokens,
+            transport: Self.makeTransport(
+                baseURL: baseURL.appendingPathComponent("api/chat"),
+                requestTimeout: requestTimeout
+            )
+        )
+    }
+
+    init(
+        model: String,
+        baseURL: URL,
+        temperature: Double,
+        numContext: Int? = nil,
+        compactionMaxOutputTokens: Int = 512,
+        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
+        countInputTokens: (@Sendable (ModelInput, [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
+        transport: @escaping OllamaTransport
     ) {
         self.model = model
-        self.baseURL = baseURL.appendingPathComponent("api/chat")
         self.temperature = temperature
         self.numContext = numContext
-        self.session = session
+        self.compactionMaxOutputTokens = max(1, compactionMaxOutputTokens)
+        self.transport = transport
         self.effectiveContextWindow = numContext
-        self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
+        if let countInputTokens {
+            self.tokenCounting = .availableInput(countInputTokens)
+        } else {
+            self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
+        }
     }
 
     public func stream(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?
     ) -> AsyncStream<ModelEvent<String>> {
-        streamRaw(messages: messages, tools: tools, format: nil)
+        stream(input: input, tools: tools, purpose: .generation)
     }
 
-    /// Native structured-output support for plain-text contracts such as
-    /// `ChatResponse`. The generic fallback still decodes the final JSON, but
-    /// supplying Ollama's `format` schema makes that response deterministic.
+    public func stream(
+        input: ModelInput,
+        tools: [LLMToolSchema]?,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<String>> {
+        streamRaw(input: input, tools: tools, purpose: purpose)
+    }
+
+    /// Uses Ollama's portable text/report-tool contract rather than assuming
+    /// that the selected Ollama runner implements native JSON-schema constraints.
     public func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
+        streamContract(
+            input: input,
+            tools: tools,
+            responseType: T.self
+        )
+    }
+
+    private func streamContract<T: AgentOutput>(
+        input: ModelInput,
+        tools: [LLMToolSchema]?,
+        responseType: T.Type
+    ) -> AsyncStream<ModelEvent<T>> {
+        let reportTool: (name: String, schema: LLMToolSchema)?
+        switch T.outputContract {
+        case .plainText:
+            reportTool = nil
+        case .reportTool(let name, let schema):
+            reportTool = (name, schema)
+        }
+
+        let requestTools: [LLMToolSchema]?
+        if let reportTool {
+            var result = tools ?? []
+            if !result.contains(where: { $0.function.name == reportTool.name }) {
+                result.append(reportTool.schema)
+            }
+            requestTools = result
+        } else {
+            requestTools = tools
+        }
+
         return AsyncStream(ModelEvent<T>.self) { continuation in
             let task = Task {
-                let format: AnyCodableValue?
-                do {
-                    format = T.self == String.self ? nil : try Self.generationFormat(for: T.self)
-                } catch {
-                    continuation.yield(.failed(.decodingError("Unable to encode Ollama response schema: \(error)")))
-                    continuation.finish()
-                    return
-                }
-                for await event in self.streamRaw(messages: messages, tools: tools, format: format) {
+                var sawToolCall = false
+                var completed = false
+
+                for await event in self.streamRaw(
+                    input: input,
+                    tools: requestTools,
+                    purpose: .generation
+                ) {
                     switch event {
-                    case .text(let text): continuation.yield(.text(text))
-                    case .thinking(let text): continuation.yield(.thinking(text))
-                    case .status(let status): continuation.yield(.status(status))
-                    case .toolCall(let call): continuation.yield(.toolCall(call))
-                    case .usage(let usage): continuation.yield(.usage(usage))
-                    case .contextUsage(let usage): continuation.yield(.contextUsage(usage))
-                    case .failed(let error): continuation.yield(.failed(error))
-                    case .partialUpdated: break
+                    case .text(let text):
+                        continuation.yield(.text(text))
+                    case .thinking(let text):
+                        continuation.yield(.thinking(text))
+                    case .status(let status):
+                        continuation.yield(.status(status))
+                    case .toolCall(let call):
+                        sawToolCall = true
+                        guard !completed else { continue }
+                        if let reportTool, call.name == reportTool.name {
+                            do {
+                                let value = try T(GeneratedContent(json: call.arguments.json))
+                                continuation.yield(.status("Outcome received."))
+                                continuation.yield(.generated(value))
+                                completed = true
+                            } catch {
+                                continuation.yield(
+                                    .failed(
+                                        .decodingError(
+                                            "Ollama report tool \(reportTool.name) returned invalid output: \(error)"
+                                        )))
+                                completed = true
+                            }
+                        } else {
+                            continuation.yield(.toolCall(call))
+                        }
+                    case .usage(let usage):
+                        continuation.yield(.usage(usage))
+                    case .contextUsage(let usage):
+                        continuation.yield(.contextUsage(usage))
+                    case .failed(let error):
+                        guard !completed else { continue }
+                        continuation.yield(.failed(error))
+                        completed = true
+                    case .partialUpdated:
+                        break
                     case .generated(let text):
-                        if let value = text as? T {
-                            continuation.yield(.generated(value))
+                        guard !completed else { continue }
+                        if let reportTool {
+                            continuation.yield(
+                                .failed(
+                                    .invalidResponse(
+                                        "Ollama finished without calling \(reportTool.name)."
+                                    )))
+                        } else if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            // A tool result is model context, not an assistant
+                            // response. Never promote it to the final output:
+                            // doing so leaks structured provider data directly
+                            // to the user when a local model ends after a tool
+                            // round without producing a final message.
+                            continuation.yield(
+                                .failed(.invalidResponse("Ollama returned an empty response.")))
                         } else {
                             do {
-                                let value = try T(GeneratedContent(json: text))
+                                let value = try Self.decodePlainText(text, as: T.self)
                                 continuation.yield(.generated(value))
                             } catch {
                                 continuation.yield(.failed(.decodingError(String(describing: error))))
                             }
                         }
+                        completed = true
                     }
+                }
+
+                // A regular tool round intentionally has no terminal output;
+                // the reasoning loop executes the calls and asks the model again.
+                if !completed && !sawToolCall {
+                    continuation.yield(.failed(.invalidResponse("Ollama returned no output")))
                 }
                 continuation.finish()
             }
@@ -91,9 +216,9 @@ public struct OllamaEndpoint: ModelEndpoint {
     }
 
     private func streamRaw(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?,
-        format: AnyCodableValue?
+        purpose: ModelRequestPurpose
     ) -> AsyncStream<ModelEvent<String>> {
         AsyncStream(ModelEvent<String>.self) { continuation in
             let task = Task {
@@ -101,38 +226,41 @@ public struct OllamaEndpoint: ModelEndpoint {
                     continuation.yield(.status("Generating..."))
                     let body = try Self.requestBody(
                         model: model,
-                        messages: messages,
+                        input: input,
                         tools: tools ?? [],
                         temperature: temperature,
                         numContext: numContext,
-                        format: format
+                        numPredict: purpose == .compaction ? compactionMaxOutputTokens : nil
                     )
-                    var request = URLRequest(url: baseURL)
-                    request.httpMethod = "POST"
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    request.setValue("application/x-ndjson", forHTTPHeaderField: "Accept")
-                    request.httpBody = body
-
-                    let (bytes, response) = try await session.bytes(for: request)
-                    guard let httpResponse = response as? HTTPURLResponse else {
-                        throw ModelEndpointError.invalidResponse("Ollama returned no HTTP response")
-                    }
-                    guard (200..<300).contains(httpResponse.statusCode) else {
+                    let response = try await transport(body)
+                    guard (200..<300).contains(response.statusCode) else {
                         var errorBody = ""
-                        for try await line in bytes.lines {
+                        for try await line in response.lines {
                             errorBody += line
                         }
+                        if Self.isContextLengthError(errorBody) {
+                            throw ModelEndpointError.contextLengthExceeded
+                        }
                         throw ModelEndpointError.requestFailed(
-                            "Ollama HTTP \(httpResponse.statusCode): \(errorBody)"
+                            "Ollama HTTP \(response.statusCode): \(errorBody)"
                         )
                     }
 
                     var text = ""
                     var emittedToolCalls = Set<String>()
-                    for try await line in bytes.lines {
+                    var sawDone = false
+                    var doneReason: String?
+                    for try await line in response.lines {
                         try Task.checkCancellation()
                         guard !line.isEmpty, let data = line.data(using: .utf8) else { continue }
                         let chunk = try JSONDecoder().decode(ChatChunk.self, from: data)
+
+                        if let error = chunk.error {
+                            if Self.isContextLengthError(error) {
+                                throw ModelEndpointError.contextLengthExceeded
+                            }
+                            throw ModelEndpointError.requestFailed("Ollama: \(error)")
+                        }
 
                         if let thought = chunk.message?.thinking, !thought.isEmpty {
                             continuation.yield(.thinking(thought))
@@ -158,7 +286,7 @@ public struct OllamaEndpoint: ModelEndpoint {
                             }
                         }
 
-                        if chunk.done, let usage = chunk.usage {
+                        if chunk.done == true, let usage = chunk.usage {
                             continuation.yield(.usage(usage))
                             if let limit = effectiveContextWindow, let used = usage.inputTokens {
                                 continuation.yield(
@@ -171,7 +299,9 @@ public struct OllamaEndpoint: ModelEndpoint {
                             }
                         }
 
-                        if chunk.done {
+                        if chunk.done == true {
+                            sawDone = true
+                            doneReason = chunk.doneReason
                             break
                         }
                     }
@@ -179,11 +309,35 @@ public struct OllamaEndpoint: ModelEndpoint {
                     // A tool-call response is continued by Hail's tool loop;
                     // only plain responses terminate the turn with output.
                     if emittedToolCalls.isEmpty {
-                        continuation.yield(.generated(text))
+                        if !sawDone {
+                            // The HTTP body ended without Ollama's terminal
+                            // chunk: the connection died mid-generation and
+                            // the accumulated text is a partial response.
+                            continuation.yield(
+                                .failed(
+                                    .requestFailed(
+                                        "Ollama stream ended before reporting completion"
+                                    )))
+                        } else if let doneReason, doneReason != "stop" {
+                            // Ollama reports abnormal endings (for example
+                            // "length") with a clean done chunk; delivering
+                            // the partial text as a final answer would hide
+                            // the truncation.
+                            continuation.yield(
+                                .failed(
+                                    .requestFailed(
+                                        "Ollama stopped before finishing (done_reason: \(doneReason))"
+                                    )))
+                        } else {
+                            continuation.yield(.generated(text))
+                        }
                     }
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.yield(.failed(.cancelled))
+                    continuation.finish()
+                } catch let error as HTTPClientError where Self.isUnavailable(error) {
+                    continuation.yield(.failed(.unavailable))
                     continuation.finish()
                 } catch let error as ModelEndpointError {
                     continuation.yield(.failed(error))
@@ -197,28 +351,116 @@ public struct OllamaEndpoint: ModelEndpoint {
         }
     }
 
+    private static func isUnavailable(_ error: HTTPClientError) -> Bool {
+        [
+            .remoteConnectionClosed,
+            .connectTimeout,
+            .getConnectionFromPoolTimeout,
+            .deadlineExceeded,
+            .tlsHandshakeTimeout,
+        ].contains(error)
+    }
+
+    private static let httpClient: HTTPClient = {
+        var configuration = HTTPClient.Configuration()
+        // Ollama streams NDJSON while the model is thinking/generating. A
+        // read timeout would turn a slow local model into a false failure.
+        configuration.timeout = .init(connect: .seconds(10), read: nil)
+        configuration.httpVersion = .http1Only
+        return HTTPClient(eventLoopGroupProvider: .singleton, configuration: configuration)
+    }()
+
+    private static func makeTransport(
+        baseURL: URL,
+        requestTimeout: TimeInterval
+    ) -> OllamaTransport {
+        precondition(
+            requestTimeout.isFinite && requestTimeout > 0 && requestTimeout <= TimeInterval(Int64.max),
+            "Ollama request timeout must be positive and fit in seconds"
+        )
+        let timeout = TimeAmount.seconds(Int64(requestTimeout.rounded(.up)))
+
+        return { body in
+            var request = HTTPClientRequest(url: baseURL.absoluteString)
+            request.method = .POST
+            request.headers.add(name: "Content-Type", value: "application/json")
+            request.headers.add(name: "Accept", value: "application/x-ndjson")
+            request.body = .bytes(ByteBuffer(bytes: body))
+
+            let response = try await Self.httpClient.execute(request, timeout: timeout)
+            return OllamaHTTPResponse(
+                statusCode: Int(response.status.code),
+                lines: Self.lines(from: response.body)
+            )
+        }
+    }
+
+    private static func lines(
+        from body: HTTPClientResponse.Body
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var pending = Data()
+                    for try await buffer in body {
+                        pending.append(contentsOf: buffer.readableBytesView)
+                        while let newline = pending.firstIndex(of: 0x0A) {
+                            let line = Data(pending[..<newline])
+                            pending.removeSubrange(...newline)
+                            let string = String(decoding: line, as: UTF8.self)
+                            continuation.yield(
+                                string.hasSuffix("\r") ? String(string.dropLast()) : string
+                            )
+                        }
+                    }
+                    if !pending.isEmpty {
+                        continuation.yield(String(decoding: pending, as: UTF8.self))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     private static func requestBody(
         model: String,
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema],
         temperature: Double,
         numContext: Int?,
-        format: AnyCodableValue?
+        numPredict: Int?
     ) throws -> Data {
         let request = ChatRequest(
             model: model,
-            messages: try messages.map { try RequestMessage($0) },
+            messages: try input.entries.map(RequestMessage.init),
             tools: tools.isEmpty ? nil : tools.map(RequestTool.init),
-            options: RequestOptions(temperature: temperature, numContext: numContext),
-            format: format,
+            options: RequestOptions(
+                temperature: temperature,
+                numContext: numContext,
+                numPredict: numPredict
+            ),
             stream: true
         )
         return try JSONEncoder().encode(request)
     }
 
-    private static func generationFormat<T: AgentOutput>(for type: T.Type) throws -> AnyCodableValue {
-        let data = try JSONEncoder().encode(type.generationSchema)
-        return try JSONDecoder().decode(AnyCodableValue.self, from: data)
+    private static func decodePlainText<T: AgentOutput>(_ text: String, as type: T.Type) throws -> T {
+        if let value = text as? T {
+            return value
+        }
+        return try T(GeneratedContent(kind: .string(text)))
+    }
+
+    private static func isContextLengthError(_ message: String) -> Bool {
+        let normalized = message.lowercased()
+        return normalized.contains("context length")
+            || normalized.contains("context window")
+            || normalized.contains("prompt is too long")
+            || normalized.contains("input is too long")
+            || normalized.contains("maximum context")
     }
 
     private static func argumentsJSON(_ value: AnyCodableValue?) throws -> String {
@@ -238,7 +480,6 @@ private struct ChatRequest: Encodable, Sendable {
     let messages: [RequestMessage]
     let tools: [RequestTool]?
     let options: RequestOptions
-    let format: AnyCodableValue?
     let stream: Bool
 }
 
@@ -246,21 +487,55 @@ private struct RequestMessage: Encodable, Sendable {
     let role: String
     let content: String
     let name: String?
+    let toolName: String?
     let toolCalls: [RequestToolCall]?
     let toolCallID: String?
+    let images: [String]?
 
-    init(_ message: LLMMessage) throws {
-        self.role = message.role.rawValue
-        self.content = message.content
-        self.name = message.name
-        self.toolCalls = try message.toolCalls?.map { try RequestToolCall($0) }
-        self.toolCallID = message.toolCallID
+    init(_ entry: ModelInput.Entry) throws {
+        switch entry {
+        case .message(let message):
+            self.role = message.role.rawValue
+            self.content = message.content
+            self.name = message.name
+            self.toolName = nil
+            self.toolCalls = try message.toolCalls?.map { try RequestToolCall($0) }
+            self.toolCallID = message.toolCallID
+            self.images = nil
+
+        case .toolOutput(let callID, let name, let output):
+            self.role = LLMMessage.Role.tool.rawValue
+            self.name = nil
+            self.toolName = name
+            self.toolCalls = nil
+            self.toolCallID = callID
+            switch output {
+            case .text(let text):
+                self.content = text
+                self.images = nil
+            case .data(let data):
+                let contentType = data.normalizedContentType
+                if data.isTextLike {
+                    self.content = String(decoding: data.body, as: UTF8.self)
+                    self.images = nil
+                } else if contentType.hasPrefix("image/") {
+                    self.content = output.transcript
+                    self.images = [data.body.base64EncodedString()]
+                } else {
+                    throw ModelEndpointError.invalidRequest(
+                        "Ollama cannot map tool data with content type \(contentType); the provider adapter does not support this media type."
+                    )
+                }
+            }
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
         case role, content, name
+        case toolName = "tool_name"
         case toolCalls = "tool_calls"
         case toolCallID = "tool_call_id"
+        case images
     }
 }
 
@@ -308,27 +583,33 @@ private struct RequestTool: Encodable, Sendable {
 private struct RequestOptions: Encodable, Sendable {
     let temperature: Double
     let numContext: Int?
+    let numPredict: Int?
 
     private enum CodingKeys: String, CodingKey {
         case temperature
         case numContext = "num_ctx"
+        case numPredict = "num_predict"
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(temperature, forKey: .temperature)
         try container.encodeIfPresent(numContext, forKey: .numContext)
+        try container.encodeIfPresent(numPredict, forKey: .numPredict)
     }
 }
 
 private struct ChatChunk: Decodable, Sendable {
     let message: ChunkMessage?
-    let done: Bool
+    let done: Bool?
+    let doneReason: String?
+    let error: String?
     let promptEvalCount: Int?
     let evalCount: Int?
 
     private enum CodingKeys: String, CodingKey {
-        case message, done
+        case message, done, error
+        case doneReason = "done_reason"
         case promptEvalCount = "prompt_eval_count"
         case evalCount = "eval_count"
     }

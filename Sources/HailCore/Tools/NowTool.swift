@@ -41,11 +41,10 @@ public struct NowTool: Tool {
     }
 
     public func effect(for input: Input) throws -> ClockEffect {
-        ClockEffect()
+        ClockEffect(now: clock)
     }
 
     public func execute(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
-        _ = token
-        return clock().ISO8601Format()
+        token.now().ISO8601Format()
     }
 }

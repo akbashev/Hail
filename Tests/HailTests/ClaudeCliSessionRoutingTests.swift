@@ -43,7 +43,7 @@ struct ClaudeCliSessionRoutingTests {
     ) async -> String? {
         var generated: String?
         for await event in endpoint.stream(
-            messages: messages,
+            input: ModelInput(messages: messages),
             delta: TurnDelta(
                 messages: delta,
                 workingMemory: memory,
@@ -263,7 +263,7 @@ struct ClaudeCliSessionRoutingTests {
         let start = Date()
         var failure: ModelEndpointError?
         for await event in endpoint.stream(
-            messages: [LLMMessage(role: .user, content: "HELLO")],
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "HELLO")]),
             delta: TurnDelta(
                 messages: [LLMMessage(role: .user, content: "HELLO")],
                 workingMemory: [],

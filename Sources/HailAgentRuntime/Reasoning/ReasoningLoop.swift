@@ -16,7 +16,7 @@ import ScopedEffect
 /// stream of ``AgentUpdate`` values. It exists so the reasoning loop can stay
 /// declarative: one transition function decides what to emit, and the caller
 /// only handles side effects.
-private enum TurnState {
+enum TurnState {
     case idle
     case text(String)
     case thinking(String)
@@ -40,9 +40,9 @@ enum ReasoningLoopError: Error, Sendable, Equatable {
 
 /// Pure reducer that turns a stream of ``ModelEvent`` values into the typed
 /// run events of an ``AgentUpdate``. Narration (status/thinking/text/tool) is
-/// recorded on the activity stream by the loop; only control and the typed
-/// outcome are emitted here.
-private enum TurnReducer {
+/// recorded on the activity stream by the loop; control, typed partial
+/// snapshots, and the typed outcome are emitted here.
+enum TurnReducer {
     static func reduce<Output: Codable & Sendable>(
         state: TurnState,
         event: ModelEvent<Output>,
@@ -71,8 +71,20 @@ private enum TurnReducer {
             }
             return (.idle, [])
 
-        case (_, .partialUpdated):
-            return (.idle, [])
+        case (_, .partialUpdated(let partial)):
+            return (
+                state,
+                [
+                    .run(
+                        .event(
+                            .modelOutputPartialUpdated(
+                                content: partial,
+                                at: timestamp
+                            )
+                        )
+                    )
+                ]
+            )
 
         case (_, .usage), (_, .contextUsage):
             return (state, [])
@@ -141,7 +153,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     let compactor: (any ContextCompactor)?
 
     /// Resolves the tool registry available to this turn.
-    let tools: @Sendable () async throws(AgentRuntimeError) -> ToolRegistry
+    let tools: @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry
 
     /// Emits a persistent agent event.
     let emit: @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void
@@ -245,7 +257,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         authority: any Authority,
         context: @escaping @Sendable () async throws(AgentRuntimeError) -> TurnContext,
         endpoint: @escaping @Sendable () async throws(AgentRuntimeError) -> ModelEndpoint,
-        tools: @escaping @Sendable () async throws(AgentRuntimeError) -> ToolRegistry,
+        tools: @escaping @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry,
         emit: @escaping @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void,
         recordActivity: @escaping @Sendable (AgentActivity) async -> Void,
         compactor: (any ContextCompactor)? = nil,
@@ -347,7 +359,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         turnContext: TurnContext,
         endpoint: any ModelEndpoint,
         additionalMessages: [LLMMessage] = [],
-        tools: [LLMToolSchema] = []
+        tools: [LLMToolSchema] = [],
+        requestInput: ModelInput? = nil,
+        trigger: ContextCompactionTrigger = .threshold
     ) async throws(AgentRuntimeError) -> TurnContext {
         var turnContext = turnContext
         let implementsSessionContract = endpoint is SessionOwningEndpoint
@@ -363,22 +377,34 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             return turnContext
         }
 
-        // Let the endpoint provide the effective request window and a
-        // model-aware count when it owns a compatible tokenizer/template. A
-        // missing measurement falls back to the compactor's conservative
-        // estimator. A supported counter that fails is an operation failure,
-        // not absence of the capability, and therefore propagates.
+        // Resolve the model capability before entering the pure compaction
+        // policy. The estimator is only a counting fallback; it never chooses
+        // a context window. A supported counter that fails is an operation
+        // failure, not absence of the capability, and therefore propagates.
         let request = turnContext.preparedRequest.appending(
             suffix: additionalMessages,
             tools: tools
-        )
+        ).withInput(requestInput)
+        guard let contextWindow = endpoint.effectiveContextWindow else {
+            throw AgentRuntimeError.configurationError(
+                "No context window is configured for model \(endpoint.model); "
+                    + "context compaction requires an explicit model capability."
+            )
+        }
+        let budget = try CompactionBudget(contextWindow: contextWindow)
         let projectedTokenCount: Int?
         switch endpoint.tokenCounting {
         case .unavailable:
             projectedTokenCount = nil
         case .available(let count):
-            projectedTokenCount = try await count(
+            let textCount = try await count(
                 request.messages,
+                request.tools
+            )
+            projectedTokenCount = max(0, textCount)
+        case .availableInput(let count):
+            projectedTokenCount = try await count(
+                request.input(for: request.messages),
                 request.tools
             )
         }
@@ -395,7 +421,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let decision = try await compactor.compact(
             context: turnContext.promptContext,
             request: request,
-            summarize: summarize
+            budget: budget,
+            summarize: summarize,
+            trigger: trigger
         )
         guard case .compacted(let result) = decision else { return turnContext }
         await recordActivity(.turn(.progress(.status("Compacting conversation context.")), at: Date()))
@@ -433,7 +461,11 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         _ = try await runner.run(
             model: endpoint.model,
             kind: .compaction,
-            stream: endpoint.stream(messages: messages, tools: nil),
+            stream: endpoint.stream(
+                input: ModelInput(messages: messages),
+                tools: nil,
+                purpose: .compaction
+            ),
             handle: handle
         )
         guard !text.isEmpty else {
@@ -456,11 +488,11 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         await broadcast(.run(.event(.messageHandled(message: message, at: Date()))), to: connection)
         await broadcast(.run(.event(.runStarted(agentID: agentID, at: Date()))), to: connection)
 
-        // Capture this once and inject it into the model context. The model
-        // needs a stable reference for relative dates during a turn; the
-        // `now` tool is available when it needs a fresh value later.
+        // Use the input's timestamp as the stable reference for relative
+        // dates in the incoming message. The `now` tool remains available
+        // when the model needs a fresh value later in the turn.
         let turnStartedAt = clock.now
-        let turnStartedAtDate = Date()
+        let messageTimestamp = message.timestamp
 
         // Per-turn wall-clock timing, logged on every exit path (success,
         // failure, cancellation) so slow turns are visible in the logs.
@@ -474,7 +506,15 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
         }
 
-        let registry = try await tools()
+        let registry = try await tools(
+            AgentTurnContext(
+                agentID: agentID,
+                sourceAgentID: agentID,
+                turnID: turnID,
+                message: message,
+                inputID: input.inputID
+            )
+        )
         let endpoint = try await self.endpoint()
         var turnContext = try await context()
 
@@ -486,7 +526,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let turnClockInstruction = LLMMessage(
             role: .system,
             content:
-                "Turn started at \(turnStartedAtDate.ISO8601Format()). Use this timestamp as the current time at the beginning of the turn."
+                "Incoming message timestamp: \(messageTimestamp.ISO8601Format()). Use this timestamp as the reference for relative dates in the incoming message. Call the now tool when you need the current time after this message was received."
         )
         turnInstructions.append(turnClockInstruction)
 
@@ -503,9 +543,12 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         case .response(let sender, let payload, _):
             let content = modelResponseContent(payload)
             if !content.isEmpty {
+                let role: LLMMessage.Role = sender == agentID.rawValue ? .assistant : .user
+                let name = sender == agentID.rawValue ? nil : sender
                 let inputMessage = LLMMessage(
-                    role: sender == agentID.rawValue ? .assistant : .user,
-                    content: content
+                    role: role,
+                    content: content,
+                    name: name
                 )
                 deltaMessages.append(inputMessage)
             }
@@ -548,7 +591,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         )
 
         let outcome = try await runTurn(
-            messages: messages,
+            input: ModelInput(messages: messages),
             delta: delta,
             turnInstructions: turnInstructions,
             registry: registry,
@@ -593,22 +636,49 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// Messages are passed as values between rounds, so the control flow does
     /// not rely on a mutable `while true` loop or an optional success sentinel.
     private func runTurn<Output: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         delta: TurnDelta,
         turnInstructions: [LLMMessage],
         registry: ToolRegistry,
         endpoint: ModelEndpoint,
         completedToolRounds: Int = 0,
+        contextRecoveryAttempts: Int = 0,
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) -> Output {
         try Self.checkCancellation()
-        switch try await requestModelRound(
-            messages: messages,
-            delta: delta,
-            registry: registry,
-            endpoint: endpoint,
-            through: connection
-        ) {
+        let round: ModelRoundOutcome<Output>
+        do {
+            round = try await requestModelRound(
+                input: input,
+                delta: delta,
+                registry: registry,
+                endpoint: endpoint,
+                through: connection
+            )
+        } catch AgentRuntimeError.contextLengthExceeded {
+            guard contextRecoveryAttempts < 3 else {
+                throw AgentRuntimeError.contextLengthExceeded
+            }
+
+            let compactedInput = try await recoverFromContextOverflow(
+                input: input,
+                turnInstructions: turnInstructions,
+                registry: registry,
+                endpoint: endpoint
+            )
+            return try await runTurn(
+                input: compactedInput,
+                delta: delta,
+                turnInstructions: turnInstructions,
+                registry: registry,
+                endpoint: endpoint,
+                completedToolRounds: completedToolRounds,
+                contextRecoveryAttempts: contextRecoveryAttempts + 1,
+                through: connection
+            )
+        }
+
+        switch round {
         case .completed(let output):
             return output
 
@@ -619,33 +689,67 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                     "Model exceeded the maximum of \(maxToolRounds) tool rounds in a single turn."
                 )
             }
-            let nextMessages = try await executeToolRound(
+            let next = try await executeToolRound(
                 narration: narration,
                 calls: calls,
                 schemas: schemas,
-                messages: messages,
+                input: input,
                 turnInstructions: turnInstructions,
                 registry: registry,
                 endpoint: endpoint,
                 through: connection
             )
             return try await runTurn(
-                messages: nextMessages,
+                input: next,
                 delta: delta,
                 turnInstructions: turnInstructions,
                 registry: registry,
                 endpoint: endpoint,
                 completedToolRounds: completedToolRounds + 1,
+                contextRecoveryAttempts: contextRecoveryAttempts,
                 through: connection
             )
         }
+    }
+
+    /// A provider is the authority on whether a request actually fits. The
+    /// normal compaction pass is intentionally conservative and may not know
+    /// the cost of a binary artifact, so a provider-reported overflow gets a
+    /// bounded recovery pass with an explicit trigger.
+    private func recoverFromContextOverflow(
+        input: ModelInput,
+        turnInstructions: [LLMMessage],
+        registry: ToolRegistry,
+        endpoint: ModelEndpoint
+    ) async throws(AgentRuntimeError) -> ModelInput {
+        guard endpoint.contextOwnership == .runtime, compactor != nil else {
+            throw AgentRuntimeError.contextLengthExceeded
+        }
+
+        let rebuilt = try await context()
+        let prepared = try await compactIfNeeded(
+            turnContext: rebuilt,
+            endpoint: endpoint,
+            additionalMessages: turnInstructions,
+            tools: await registry.schemas(),
+            requestInput: input,
+            trigger: .contextLengthExceeded
+        )
+        let wasCompacted =
+            prepared.promptContext.contextSummary != rebuilt.promptContext.contextSummary
+            || prepared.promptContext.conversationThread.count
+                != rebuilt.promptContext.conversationThread.count
+        guard wasCompacted else {
+            throw AgentRuntimeError.contextLengthExceeded
+        }
+        return input.rebased(on: prepared.messages + turnInstructions)
     }
 
     /// Executes one provider request and closes its raw stream into a valid
     /// domain outcome. This is the imperative shell around the pure outcome
     /// distinction above.
     private func requestModelRound<Output: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         delta: TurnDelta,
         registry: ToolRegistry,
         endpoint: ModelEndpoint,
@@ -656,7 +760,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let stream: AsyncStream<ModelEvent<Output>>
         if let sessionEndpoint = endpoint as? SessionOwningEndpoint {
             stream = sessionEndpoint.stream(
-                messages: messages,
+                input: input,
                 delta: delta,
                 authority: authority,
                 tools: tools,
@@ -664,7 +768,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
         } else {
             stream = endpoint.stream(
-                messages: messages,
+                input: input,
                 tools: tools,
                 responseType: Output.self
             )
@@ -695,7 +799,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             switch event {
             case .text(let fragment):
                 text += fragment
-                await recordActivity(.turn(.progress(.text(text)), at: Date()))
+                // ModelEvent.text is already a delta. Keep the accumulated
+                // narration locally for tool rounds, but expose the same
+                // fragment to activity subscribers.
+                await recordActivity(.turn(.progress(.text(fragment)), at: Date()))
             case .thinking(let fragment):
                 thinking += fragment
                 await recordActivity(.turn(.progress(.reasoning(thinking)), at: Date()))
@@ -746,14 +853,14 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         narration: String,
         calls: [ToolCall],
         schemas: [LLMToolSchema],
-        messages: [LLMMessage],
+        input: ModelInput,
         turnInstructions: [LLMMessage],
         registry: ToolRegistry,
         endpoint: ModelEndpoint,
         through connection: AgentConnection<Output>
-    ) async throws(AgentRuntimeError) -> [LLMMessage] {
-        var nextMessages = messages
-        nextMessages.append(
+    ) async throws(AgentRuntimeError) -> ModelInput {
+        var nextInput = input
+        nextInput.append(
             LLMMessage(
                 role: .assistant,
                 content: narration,
@@ -769,7 +876,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         }
 
         let startedAt = clock.now
-        let results = try await registry.execute(calls)
+        let executions = try await registry.executeWithOutputs(calls)
         try Self.checkCancellation()
         logger.info(
             "Tool round finished",
@@ -779,13 +886,12 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 "durationMs": .string("\(Self.durationMilliseconds(since: startedAt, now: clock.now))"),
             ]
         )
-        for result in results {
-            nextMessages.append(
-                LLMMessage(
-                    role: .tool,
-                    content: result.output,
-                    toolCallID: result.toolCallID
-                )
+        for execution in executions {
+            let result = execution.result
+            nextInput.appendToolOutput(
+                callID: result.toolCallID,
+                name: result.name,
+                output: execution.output
             )
             try await emit(.toolResult(result, at: Date()))
             await broadcast(
@@ -795,21 +901,25 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         }
 
         guard endpoint.contextOwnership == .runtime, compactor != nil else {
-            return nextMessages
+            return nextInput
         }
+
         let rebuilt = try await context()
         let prepared = try await compactIfNeeded(
             turnContext: rebuilt,
             endpoint: endpoint,
             additionalMessages: turnInstructions,
-            tools: schemas
+            tools: schemas,
+            requestInput: nextInput
         )
         let wasCompacted =
             prepared.promptContext.contextSummary != rebuilt.promptContext.contextSummary
             || prepared.promptContext.conversationThread.count
                 != rebuilt.promptContext.conversationThread.count
-        guard wasCompacted else { return nextMessages }
-        return prepared.messages + turnInstructions
+        guard wasCompacted else {
+            return nextInput
+        }
+        return nextInput.rebased(on: prepared.messages + turnInstructions)
     }
 
     // MARK: - Updates
@@ -864,6 +974,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             return .configurationError(reason)
         case .authentication:
             return .configurationError("authentication failed")
+        case .unavailable:
+            return .modelUnavailable
         case .rateLimit:
             return .rateLimit
         case .contextLengthExceeded:

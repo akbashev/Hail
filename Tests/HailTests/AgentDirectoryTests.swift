@@ -23,6 +23,49 @@ struct AgentDirectoryTests {
         #expect(!json.contains("path"))
     }
 
+    @Test("snapshot policy is part of the spawn dependency")
+    func spawnConfigurationCarriesSnapshotPolicy() throws {
+        let policy = AgentSnapshotPolicy.periodic(
+            every: 123,
+            retention: .keepLast(4)
+        )
+        let config = AgentSpawnConfig(
+            agentID: agentID,
+            snapshotPolicy: policy
+        )
+
+        let roundTripped = try JSONDecoder().decode(
+            AgentSpawnConfig.self,
+            from: JSONEncoder().encode(config)
+        )
+
+        #expect(roundTripped.snapshotPolicy == policy)
+    }
+
+    @Test("default snapshot policy translates into executable snapshotting")
+    func defaultSnapshotPolicyIsTranslated() async throws {
+        let runtime = try AgentRuntimePlugin(
+            defaultModel: try AgentModelReference("test/model"),
+            maxToolRounds: 25,
+            routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
+            workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") }
+        )
+        let config = AgentSpawnConfig(agentID: agentID)
+
+        let snapshotting = await runtime.snapshotting(for: config)
+        guard case .every(let numberOfEvents, let retention, let orWhen) = snapshotting else {
+            Issue.record("Expected periodic snapshotting")
+            return
+        }
+        #expect(numberOfEvents == 250)
+        #expect(orWhen != nil)
+        if case .keepLast(let count) = retention {
+            #expect(count == 2)
+        } else {
+            Issue.record("Expected keep-last retention")
+        }
+    }
+
     @Test("an unavailable directory never looks empty or absent")
     func unavailableDirectoryThrows() async throws {
         let runtime = try AgentRuntimePlugin(

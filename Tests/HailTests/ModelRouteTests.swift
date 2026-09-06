@@ -150,6 +150,40 @@ struct ModelRouteTests {
         }
     }
 
+    @Test("model-specific context windows override provider defaults")
+    func modelContextWindowOverridesProviderWindow() async throws {
+        let model = try AgentModelReference("ollama/qwen3.5:9b-mlx")
+        let router = ModelRouter(
+            configuration: try ModelRouterConfiguration(
+                temperature: 0.7,
+                baseURLs: [.ollama: URL(string: "http://localhost:11434")!],
+                contextWindows: [.ollama: 4_096],
+                modelContextWindows: [model: 131_072]
+            )
+        )
+
+        let endpoint = try await router.endpoint(
+            for: model.rawValue,
+            agentID: "coder-main",
+            workspace: AgentWorkspace(rootPath: "/tmp")
+        )
+
+        #expect(endpoint.effectiveContextWindow == 131_072)
+    }
+
+    @Test("invalid model context windows are rejected at construction")
+    func invalidModelContextWindowThrows() throws {
+        let model = try AgentModelReference("ollama/qwen3.5:9b-mlx")
+        #expect(
+            throws: ModelRouterConfigurationError.invalidModelContextWindow(model, 0)
+        ) {
+            try ModelRouterConfiguration(
+                temperature: 0.7,
+                modelContextWindows: [model: 0]
+            )
+        }
+    }
+
     @Test("host-declared model capabilities reject unsupported effort levels")
     func rejectsEffortOutsideConfiguredCapabilities() async throws {
         let model = try AgentModelReference("gemini/gemini-2.5-pro")

@@ -1,4 +1,5 @@
 import HailCore
+import HailAgentRuntime
 import Testing
 
 @testable import HailCompaction
@@ -85,21 +86,13 @@ struct TokenEstimatorTests {
     }
 }
 
-@Suite("ContextWindowBudget")
-struct ContextWindowBudgetTests {
-    @Test("unknown models get the conservative default (Ollama num_ctx)")
-    func unknownModelDefaults() {
-        #expect(ContextWindowBudget().budget(for: "llama3.2") == 4096)
-    }
-
-    @Test("unknown models use the conservative default")
-    func unknownHostedModelDefaults() {
-        #expect(ContextWindowBudget().budget(for: "claude-sonnet-4") == 4096)
-    }
-
-    @Test("host overrides win over the default")
-    func overrideWins() {
-        let budget = ContextWindowBudget(overrides: [("llama3.2", 131_072)])
-        #expect(budget.budget(for: "llama3.2") == 131_072)
+@Suite("CompactionBudget")
+struct CompactionBudgetTests {
+    @Test("requires a positive context window")
+    func positiveWindow() throws {
+        #expect(try CompactionBudget(contextWindow: 131_072).contextWindow == 131_072)
+        #expect(throws: AgentRuntimeError.self) {
+            try CompactionBudget(contextWindow: 0)
+        }
     }
 }

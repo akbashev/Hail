@@ -111,7 +111,7 @@ struct CodexAppServerSessionRoutingTests {
             var output: String?
             var sawThinking = false
             for await event in endpoint.stream(
-                messages: messages,
+                input: ModelInput(messages: messages),
                 delta: TurnDelta(
                     messages: delta, workingMemory: [], sessionIdentity: SessionIdentity(identity)),
                 authority: FullAuthority(),
@@ -243,7 +243,7 @@ struct CodexAppServerSessionRoutingTests {
         func turn(authority: any Authority) async -> String? {
             var output: String?
             for await event in endpoint.stream(
-                messages: messages,
+                input: ModelInput(messages: messages),
                 delta: TurnDelta(
                     messages: messages,
                     workingMemory: [],

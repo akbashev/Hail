@@ -58,8 +58,8 @@ public actor ModelRouter {
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         reasoningEffort: ReasoningEffort? = nil
-    ) throws(ModelRouterError) -> any ModelEndpoint {
-        try cachedEndpoint(
+    ) async throws(ModelRouterError) -> any ModelEndpoint {
+        try await cachedEndpoint(
             for: model,
             agentID: agentID,
             contextID: contextID,
@@ -80,7 +80,7 @@ public actor ModelRouter {
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         reasoningEffort: ReasoningEffort? = nil
-    ) throws(ModelRouterError) -> any ModelEndpoint {
+    ) async throws(ModelRouterError) -> any ModelEndpoint {
         let key = CacheKey(
             model: model,
             reasoningEffort: reasoningEffort,
@@ -94,7 +94,7 @@ public actor ModelRouter {
             return cached
         }
 
-        let endpoint = try makeEndpoint(
+        let endpoint = try await makeEndpoint(
             for: model,
             agentID: agentID,
             contextID: contextID,
@@ -182,7 +182,7 @@ public actor ModelRouter {
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         reasoningEffort: ReasoningEffort? = nil
-    ) throws(ModelRouterError) -> any ModelEndpoint {
+    ) async throws(ModelRouterError) -> any ModelEndpoint {
         let effectiveModel = effectiveModelIdentifier(model)
         guard !effectiveModel.isEmpty else {
             throw ModelRouterError.invalidRoute(.missingModel(""))
@@ -280,6 +280,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
+                effectiveContextWindow: configuration.configuredContextWindow(for: route),
                 generationOptions: try Self.generationOptions(
                     provider: provider,
                     model: modelName,
@@ -297,6 +298,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
+                effectiveContextWindow: configuration.configuredContextWindow(for: route),
                 generationOptions: try Self.generationOptions(
                     provider: provider,
                     model: modelName,
@@ -314,6 +316,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
+                effectiveContextWindow: configuration.configuredContextWindow(for: route),
                 generationOptions: try Self.generationOptions(
                     provider: provider,
                     model: modelName,
@@ -331,6 +334,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
+                effectiveContextWindow: configuration.configuredContextWindow(for: route),
                 generationOptions: try Self.geminiGenerationOptions(
                     model: modelName,
                     temperature: configuration.temperature,
@@ -340,7 +344,19 @@ public actor ModelRouter {
 
         case .ollama:
             let baseURL = try configuration.baseURL(for: .ollama)
-            let numContext = configuration.contextWindow(for: .ollama)
+            let numContext: Int?
+            do {
+                numContext = try await configuration.contextWindowResolver.resolve(
+                    for: route,
+                    baseURL: baseURL
+                )
+            } catch {
+                throw .contextWindowUnavailable(
+                    route.provider,
+                    modelName,
+                    String(describing: error)
+                )
+            }
             try Self.rejectReasoningEffort(
                 reasoning,
                 provider: provider,
@@ -363,7 +379,8 @@ public actor ModelRouter {
                 return AnyLanguageModelEndpoint(
                     languageModel: SystemLanguageModel.default,
                     modelIdentifier: modelName,
-                    temperature: configuration.temperature
+                    temperature: configuration.temperature,
+                    effectiveContextWindow: configuration.configuredContextWindow(for: route)
                 )
             #else
                 throw ModelRouterError.unsupportedProvider(provider.rawValue)

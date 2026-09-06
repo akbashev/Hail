@@ -13,7 +13,11 @@ public struct LLMMessage: Codable, Sendable {
     }
 
     public init(
-        role: Role, content: String, name: String? = nil, toolCalls: [LLMToolCall]? = nil, toolCallID: String? = nil
+        role: Role,
+        content: String,
+        name: String? = nil,
+        toolCalls: [LLMToolCall]? = nil,
+        toolCallID: String? = nil
     ) {
         self.role = role
         self.content = content
@@ -21,6 +25,7 @@ public struct LLMMessage: Codable, Sendable {
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
     }
+
 }
 
 public struct LLMToolCall: Codable, Sendable {

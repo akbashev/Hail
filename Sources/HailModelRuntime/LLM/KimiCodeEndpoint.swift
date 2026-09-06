@@ -66,18 +66,18 @@ public struct KimiCodeEndpoint: ModelEndpoint {
     }
 
     public func stream(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?
     ) -> AsyncStream<ModelEvent<String>> {
-        core.stream(messages: messages, tools: tools)
+        core.stream(input: input, tools: tools)
     }
 
     public func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
-        core.stream(messages: messages, tools: tools, responseType: T.self)
+        core.stream(input: input, tools: tools, responseType: T.self)
     }
 }
 
@@ -89,14 +89,14 @@ extension KimiCodeEndpoint: SessionOwningEndpoint {
     }
 
     public func stream<T: AgentOutput>(
-        messages: [LLMMessage],
+        input: ModelInput,
         delta turnDelta: TurnDelta,
         authority: any Authority,
         tools: [LLMToolSchema]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         core.stream(
-            messages: messages, delta: turnDelta, authority: authority, tools: tools, responseType: T.self)
+            input: input, delta: turnDelta, authority: authority, tools: tools, responseType: T.self)
     }
 
     public func terminateSession() async {

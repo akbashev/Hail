@@ -356,7 +356,7 @@ struct UsageAccountingTests {
             })
     }
 
-    @Test("Ollama empty final responses are not successful chat turns")
+    @Test("Ollama empty final responses are completed as empty text")
     func ollamaEmptyFinalResponse() async throws {
         let endpoint = ollamaEndpoint(
             baseURL: "http://empty.test",
@@ -374,13 +374,13 @@ struct UsageAccountingTests {
 
         #expect(
             events.contains {
-                if case .failed(.invalidResponse(let message)) = $0 {
-                    message == "Ollama returned an empty response."
+                if case .generated(let response) = $0 {
+                    response.content.isEmpty
                 } else {
                     false
                 }
             })
-        #expect(!events.contains { if case .generated = $0 { true } else { false } })
+        #expect(!events.contains { if case .failed = $0 { true } else { false } })
     }
 
     @Test("Ollama does not expose a tool result as the final response")
@@ -408,13 +408,13 @@ struct UsageAccountingTests {
 
         #expect(
             events.contains {
-                if case .failed(.invalidResponse(let message)) = $0 {
-                    message == "Ollama returned an empty response."
+                if case .generated(let response) = $0 {
+                    response.content.isEmpty
                 } else {
                     false
                 }
             })
-        #expect(!events.contains { if case .generated = $0 { true } else { false } })
+        #expect(!events.contains { if case .failed = $0 { true } else { false } })
     }
 
     private func ollamaEndpoint(

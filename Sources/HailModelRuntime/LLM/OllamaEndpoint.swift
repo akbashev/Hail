@@ -184,14 +184,6 @@ public struct OllamaEndpoint: ModelEndpoint {
                                     .invalidResponse(
                                         "Ollama finished without calling \(reportTool.name)."
                                     )))
-                        } else if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            // A tool result is model context, not an assistant
-                            // response. Never promote it to the final output:
-                            // doing so leaks structured provider data directly
-                            // to the user when a local model ends after a tool
-                            // round without producing a final message.
-                            continuation.yield(
-                                .failed(.invalidResponse("Ollama returned an empty response.")))
                         } else {
                             do {
                                 let value = try Self.decodePlainText(text, as: T.self)

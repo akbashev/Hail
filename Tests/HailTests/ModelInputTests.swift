@@ -33,7 +33,10 @@ struct ModelInputTests {
         )
 
         #expect(input.containsUnsupportedData)
-        #expect(throws: ModelEndpointError.invalidRequest("Model endpoint text-only cannot consume the data returned by this tool.")) {
+        #expect(
+            throws: ModelEndpointError.invalidRequest(
+                "Model endpoint text-only cannot consume the data returned by this tool.")
+        ) {
             try input.textMessages(for: "text-only")
         }
     }

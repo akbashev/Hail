@@ -1,5 +1,5 @@
-import HailCore
 import HailAgentRuntime
+import HailCore
 import Testing
 
 @testable import HailCompaction

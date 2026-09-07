@@ -192,7 +192,7 @@ struct SlidingWindowCompactorTests {
                 context: ctx,
                 request: preparedRequest(for: ctx),
                 budget: try budget()
-        ) { _ in "rolled" }
+            ) { _ in "rolled" }
         )
 
         // The cut backs off before the trailing toolCall, so its result stays

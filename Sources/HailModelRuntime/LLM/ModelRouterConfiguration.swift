@@ -108,12 +108,14 @@ public struct ModelRouterConfiguration: Sendable {
         self.temperature = temperature
         self.apiKeys = normalizedAPIKeys
         self.baseURLs = baseURLs
-        self.contextWindowResolver = contextWindowResolver ?? ModelContextWindowResolver(
-            configured: { route in
-                modelContextWindows[AgentModelReference(route: route)]
-                    ?? contextWindows[route.provider]
-            }
-        )
+        self.contextWindowResolver =
+            contextWindowResolver
+            ?? ModelContextWindowResolver(
+                configured: { route in
+                    modelContextWindows[AgentModelReference(route: route)]
+                        ?? contextWindows[route.provider]
+                }
+            )
         self.reasoningCapabilities = reasoningCapabilities
     }
 

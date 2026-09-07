@@ -59,9 +59,10 @@ public struct AgentSpawnConfig: Codable, Sendable {
             Bool.self,
             forKey: .resumesInterruptedTurns
         )
-        self.snapshotPolicy = try container.decodeIfPresent(
-            AgentSnapshotPolicy.self,
-            forKey: .snapshotPolicy
-        ) ?? .default
+        self.snapshotPolicy =
+            try container.decodeIfPresent(
+                AgentSnapshotPolicy.self,
+                forKey: .snapshotPolicy
+            ) ?? .default
     }
 }

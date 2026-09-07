@@ -20,12 +20,13 @@ struct AnyLanguageModelEndpointTests {
             events.append(event)
         }
 
-        #expect(events == [
-            .status("Generating..."),
-            .text("hel"),
-            .text("lo"),
-            .generated("hello")
-        ])
+        #expect(
+            events == [
+                .status("Generating..."),
+                .text("hel"),
+                .text("lo"),
+                .generated("hello"),
+            ])
     }
 
     @Test("plain text contracts stream through typed chat responses")
@@ -45,14 +46,15 @@ struct AnyLanguageModelEndpointTests {
             events.append(event)
         }
 
-        #expect(events == [
-            .status("Generating..."),
-            .text("hel"),
-            .partialUpdated(ChatResponse(content: "hel")),
-            .text("lo"),
-            .partialUpdated(ChatResponse(content: "hello")),
-            .generated(ChatResponse(content: "hello"))
-        ])
+        #expect(
+            events == [
+                .status("Generating..."),
+                .text("hel"),
+                .partialUpdated(ChatResponse(content: "hel")),
+                .text("lo"),
+                .partialUpdated(ChatResponse(content: "hello")),
+                .generated(ChatResponse(content: "hello")),
+            ])
     }
 }
 

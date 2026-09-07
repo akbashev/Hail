@@ -239,8 +239,8 @@ public struct ModelInput: Sendable {
         return ModelInput(
             entries: messages.map { message in
                 guard message.role == .tool,
-                      let callID = message.toolCallID,
-                      let matchingOutputs = outputs[callID]
+                    let callID = message.toolCallID,
+                    let matchingOutputs = outputs[callID]
                 else {
                     return .message(message)
                 }

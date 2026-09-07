@@ -239,11 +239,10 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         }
     }
 
-    private static let snapshotOnCompaction:
-        @Sendable (AgentEvent, AgentState, Int64) -> Bool = { event, _, _ in
-            if case .conversationCompacted = event { return true }
-            return false
-        }
+    private static let snapshotOnCompaction: @Sendable (AgentEvent, AgentState, Int64) -> Bool = { event, _, _ in
+        if case .conversationCompacted = event { return true }
+        return false
+    }
 
     private static func retentionCriteria(
         for retention: AgentSnapshotRetention

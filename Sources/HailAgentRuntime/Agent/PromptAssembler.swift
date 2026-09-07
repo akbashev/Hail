@@ -260,7 +260,7 @@ func modelResponseContent(_ payload: Data) -> String {
 
 private func unwrappedLegacyChatResponse(_ text: String) -> String {
     guard let nestedPayload = text.data(using: .utf8),
-          let content = exactLegacyChatResponseContent(in: nestedPayload)
+        let content = exactLegacyChatResponseContent(in: nestedPayload)
     else {
         return text
     }

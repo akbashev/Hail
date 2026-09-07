@@ -36,51 +36,51 @@ enum TranscriptMapping {
 
             case .message(let message):
                 switch message.role {
-            case .system:
-                systemSegments.append(.text(.init(content: message.content)))
+                case .system:
+                    systemSegments.append(.text(.init(content: message.content)))
 
-            case .user:
-                flushSystemSegments(into: &entries, segments: &systemSegments, toolNames: toolCallNames)
-                entries.append(
-                    .prompt(
-                        Transcript.Prompt(
-                            segments: segments(for: message)
-                        )))
+                case .user:
+                    flushSystemSegments(into: &entries, segments: &systemSegments, toolNames: toolCallNames)
+                    entries.append(
+                        .prompt(
+                            Transcript.Prompt(
+                                segments: segments(for: message)
+                            )))
 
-            case .assistant:
-                flushSystemSegments(into: &entries, segments: &systemSegments, toolNames: toolCallNames)
-                if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
-                    let calls = try toolCalls.map { call in
-                        Transcript.ToolCall(
-                            id: call.id,
-                            toolName: call.function.name,
-                            arguments: try GeneratedContent(json: call.function.arguments)
+                case .assistant:
+                    flushSystemSegments(into: &entries, segments: &systemSegments, toolNames: toolCallNames)
+                    if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
+                        let calls = try toolCalls.map { call in
+                            Transcript.ToolCall(
+                                id: call.id,
+                                toolName: call.function.name,
+                                arguments: try GeneratedContent(json: call.function.arguments)
+                            )
+                        }
+                        for call in toolCalls {
+                            toolCallNames[call.id] = call.function.name
+                        }
+                        entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                    } else {
+                        entries.append(
+                            .response(
+                                Transcript.Response(
+                                    assetIDs: [],
+                                    segments: segments(for: message)
+                                ))
                         )
                     }
-                    for call in toolCalls {
-                        toolCallNames[call.id] = call.function.name
-                    }
-                    entries.append(.toolCalls(Transcript.ToolCalls(calls)))
-                } else {
-                    entries.append(
-                        .response(
-                            Transcript.Response(
-                                assetIDs: [],
-                                segments: segments(for: message)
-                            ))
-                    )
-                }
 
-            case .tool:
-                flushSystemSegments(into: &entries, segments: &systemSegments, toolNames: toolCallNames)
-                let toolName = message.toolCallID.flatMap { toolCallNames[$0] } ?? "unknown"
-                entries.append(
-                    .toolOutput(
-                        Transcript.ToolOutput(
-                            id: message.toolCallID ?? UUID().uuidString,
-                            toolName: toolName,
-                            segments: segments(for: message)
-                        )))
+                case .tool:
+                    flushSystemSegments(into: &entries, segments: &systemSegments, toolNames: toolCallNames)
+                    let toolName = message.toolCallID.flatMap { toolCallNames[$0] } ?? "unknown"
+                    entries.append(
+                        .toolOutput(
+                            Transcript.ToolOutput(
+                                id: message.toolCallID ?? UUID().uuidString,
+                                toolName: toolName,
+                                segments: segments(for: message)
+                            )))
                 }
             }
         }

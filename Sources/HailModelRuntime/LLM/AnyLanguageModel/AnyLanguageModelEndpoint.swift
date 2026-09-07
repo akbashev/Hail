@@ -142,7 +142,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                     }
                     for try await snapshot in stream {
                         if isPlainText,
-                           case .string(let snapshotText) = snapshot.rawContent.kind {
+                            case .string(let snapshotText) = snapshot.rawContent.kind
+                        {
                             let delta = Self.textDelta(
                                 from: snapshotText,
                                 after: &accumulatedText

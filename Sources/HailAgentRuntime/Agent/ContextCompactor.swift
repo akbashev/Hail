@@ -139,7 +139,8 @@ public struct PreparedRequest: Sendable {
                 message.role == .tool ? message.toolCallID : nil
             }
         )
-        for message in input.richOutputMessages where
+        for message in input.richOutputMessages
+        where
             !existingToolCallIDs.contains(message.toolCallID ?? "")
         {
             candidateMessages.append(message)
@@ -191,8 +192,8 @@ public protocol ContextCompactor: Sendable {
     ) async throws(AgentRuntimeError) -> CompactionDecision
 }
 
-public extension ContextCompactor {
-    func compact(
+extension ContextCompactor {
+    public func compact(
         context: PromptContext,
         request: PreparedRequest,
         budget: CompactionBudget,

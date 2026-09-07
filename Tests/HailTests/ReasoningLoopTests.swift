@@ -1,8 +1,13 @@
-import Foundation
 import HailCore
 import Testing
 
 @testable import HailAgentRuntime
+
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 @Suite("Reasoning loop")
 struct ReasoningLoopTests {
@@ -22,7 +27,7 @@ struct ReasoningLoopTests {
             return
         }
         guard updates.count == 1,
-              case .run(.event(.modelOutputPartialUpdated(let value, let at))) = updates[0]
+            case .run(.event(.modelOutputPartialUpdated(let value, let at))) = updates[0]
         else {
             Issue.record("Expected one typed partial-output update")
             return

@@ -13,15 +13,57 @@ import Testing
 private struct DecisionGreeterEffect: ScopedEffect {
     let name = "greeter"
     let greeting: String
+
+    static func run(
+        in token: borrowing EffectToken<DecisionGreeterEffect>
+    ) async throws {
+        _ = token.withConfiguration { $0.greeting }
+    }
 }
 
 /// A second domain, to prove per-domain decisions stay separate.
 private struct FarewellEffect: ScopedEffect {
     let name = "farewell"
+
+    static func run(
+        in token: borrowing EffectToken<FarewellEffect>
+    ) async throws {
+        _ = token.withConfiguration { $0.name }
+    }
 }
 
 private struct SchedulingEffect: ScopedEffect {
     let name = "scheduler"
+
+    static func run(
+        in token: borrowing EffectToken<SchedulingEffect>
+    ) async throws {
+        _ = token.withConfiguration { $0.name }
+    }
+}
+
+private struct ChildRunnableEffect: ScopedEffect {
+    typealias Output = String
+
+    let name = "child-runnable"
+    let value: String
+
+    static func run(
+        in token: borrowing EffectToken<ChildRunnableEffect>
+    ) async throws -> String {
+        token.withConfiguration { $0.value }
+    }
+}
+
+private struct ParentEffect: ScopedEffect {
+    let name = "parent"
+    let child: ChildRunnableEffect
+
+    static func run(
+        in token: borrowing EffectToken<ParentEffect>
+    ) async throws {
+        _ = token.withConfiguration { $0.child }
+    }
 }
 
 extension EffectToken where Effect == DecisionGreeterEffect {
@@ -120,9 +162,9 @@ struct EffectAuthorityTests {
             .grantingAll(for: SchedulingEffect.self)
 
         let names = try await withEffect(requirements, authority: authority) { token in
-            await token.withLeft { leftToken in
+            try await token.withLeft { leftToken in
                 let leftName = leftToken.withConfiguration { $0.name }
-                return await token.withRight { rightToken in
+                return try await token.withRight { rightToken in
                     let rightName = rightToken.withConfiguration { $0.name }
                     return "\(leftName),\(rightName)"
                 }
@@ -177,6 +219,36 @@ struct EffectAuthorityTests {
         }
     }
 
+    @Test("A parent token cannot bypass a denied child effect")
+    func childAuthorityIsChecked() async {
+        let child = ChildRunnableEffect(value: "secret")
+        let parent = ParentEffect(child: child)
+        let authority = CompositeAuthority()
+            .grantingAll(for: ParentEffect.self)
+            .granting(for: ChildRunnableEffect.self) { _ in
+                .denied("child is disabled")
+            }
+
+        await #expect(throws: EffectDenied.self) {
+            try await withEffect(parent, authority: authority) { token in
+                try await token.run(child)
+            }
+        }
+    }
+
+    @Test("An executable effect runs from its exact authorized token")
+    func executableEffectRuns() async throws {
+        let effect = ChildRunnableEffect(value: "ok")
+        let authority = CompositeAuthority()
+            .grantingAll(for: ChildRunnableEffect.self)
+
+        let value = try await withEffect(effect, authority: authority) { token in
+            try await ChildRunnableEffect.run(in: token)
+        }
+
+        #expect(value == "ok")
+    }
+
     // The observer is process-global and EffectAuditStressTests swaps it too;
     // exclusivity comes from the turnstile (see EffectAuditStressTests.swift),
     // not from .serialized, which cannot order tests across suites.
@@ -217,6 +289,12 @@ struct EffectAuthorityTests {
 /// The audit test's own effect, so parallel suites don't pollute its entries.
 private struct AuditProbeEffect: ScopedEffect {
     let name = "audit-probe"
+
+    static func run(
+        in token: borrowing EffectToken<AuditProbeEffect>
+    ) async throws {
+        _ = token.withConfiguration { $0.name }
+    }
 }
 
 extension EffectToken where Effect == AuditProbeEffect {

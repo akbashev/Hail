@@ -1,4 +1,8 @@
-import Foundation
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 /// Errors raised while reading Ollama's model metadata.
 public enum OllamaContextWindowError: Error, Sendable, Equatable {

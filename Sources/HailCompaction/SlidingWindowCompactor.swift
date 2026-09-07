@@ -1,6 +1,11 @@
-import Foundation
 import HailAgentRuntime
 import HailCore
+
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 /// The reference ``ContextCompactor``: triggers at a fraction of the model's
 /// context window, folds the oldest messages into the rolling summary, and

@@ -82,6 +82,12 @@ struct EffectAuditStressTests {
 
 private struct StressProbeEffect: ScopedEffect {
     let name = "stress-probe"
+
+    static func run(
+        in token: borrowing EffectToken<StressProbeEffect>
+    ) async throws {
+        _ = token.withConfiguration { $0.name }
+    }
 }
 
 extension EffectToken where Effect == StressProbeEffect {

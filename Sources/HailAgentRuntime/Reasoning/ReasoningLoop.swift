@@ -27,7 +27,7 @@ enum TurnState {
 /// An empty stream and undecodable text are errors, not extra enum cases.
 private enum ModelRoundOutcome<Output> {
     case completed(Output)
-    case requiresTools(narration: String, calls: [ToolCall], schemas: [LLMToolSchema])
+    case requiresTools(thinking: String, narration: String, calls: [ToolCall], schemas: [LLMToolSchema])
 }
 
 /// The only failures a reasoning loop can return to its host. Keeping the
@@ -682,7 +682,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         case .completed(let output):
             return output
 
-        case .requiresTools(let narration, let calls, let schemas):
+        case .requiresTools(let thinking, let narration, let calls, let schemas):
             // Reject excess work before journaling or executing its effects.
             guard completedToolRounds < maxToolRounds else {
                 throw AgentRuntimeError.modelMisbehavior(
@@ -690,6 +690,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 )
             }
             let next = try await executeToolRound(
+                thinking: thinking,
                 narration: narration,
                 calls: calls,
                 schemas: schemas,
@@ -827,7 +828,12 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         )
 
         if !calls.isEmpty {
-            return .requiresTools(narration: text, calls: calls, schemas: schemas)
+            return .requiresTools(
+                thinking: thinking,
+                narration: text,
+                calls: calls,
+                schemas: schemas
+            )
         }
         if let generated {
             return .completed(generated)
@@ -850,6 +856,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// model round. Journaling precedes execution so replay observes the same
     /// semantic interaction.
     private func executeToolRound<Output: AgentOutput>(
+        thinking: String,
         narration: String,
         calls: [ToolCall],
         schemas: [LLMToolSchema],
@@ -864,6 +871,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             LLMMessage(
                 role: .assistant,
                 content: narration,
+                thinking: thinking.isEmpty ? nil : thinking,
                 toolCalls: calls.map { LLMToolCall($0) }
             )
         )

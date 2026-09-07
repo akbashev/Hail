@@ -1,8 +1,13 @@
-import AsyncHTTPClient
 import AnyLanguageModel
-import Foundation
+import AsyncHTTPClient
 import HailCore
 import NIOCore
+
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 struct OllamaHTTPResponse: Sendable {
     let statusCode: Int
@@ -478,6 +483,7 @@ private struct ChatRequest: Encodable, Sendable {
 private struct RequestMessage: Encodable, Sendable {
     let role: String
     let content: String
+    let thinking: String?
     let name: String?
     let toolName: String?
     let toolCalls: [RequestToolCall]?
@@ -489,6 +495,7 @@ private struct RequestMessage: Encodable, Sendable {
         case .message(let message):
             self.role = message.role.rawValue
             self.content = message.content
+            self.thinking = message.thinking
             self.name = message.name
             self.toolName = nil
             self.toolCalls = try message.toolCalls?.map { try RequestToolCall($0) }
@@ -497,6 +504,7 @@ private struct RequestMessage: Encodable, Sendable {
 
         case .toolOutput(let callID, let name, let output):
             self.role = LLMMessage.Role.tool.rawValue
+            self.thinking = nil
             self.name = nil
             self.toolName = name
             self.toolCalls = nil
@@ -523,7 +531,7 @@ private struct RequestMessage: Encodable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case role, content, name
+        case role, content, thinking, name
         case toolName = "tool_name"
         case toolCalls = "tool_calls"
         case toolCallID = "tool_call_id"

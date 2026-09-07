@@ -1,6 +1,12 @@
 public struct LLMMessage: Codable, Sendable {
     public let role: Role
     public let content: String
+    /// Provider reasoning that belongs to this assistant message.
+    ///
+    /// Some providers require the reasoning to be sent back together with
+    /// assistant tool calls on the next request. It is deliberately separate
+    /// from `content`: reasoning is protocol state, not user-facing text.
+    public let thinking: String?
     public let name: String?
     public let toolCalls: [LLMToolCall]?
     public let toolCallID: String?
@@ -15,12 +21,14 @@ public struct LLMMessage: Codable, Sendable {
     public init(
         role: Role,
         content: String,
+        thinking: String? = nil,
         name: String? = nil,
         toolCalls: [LLMToolCall]? = nil,
         toolCallID: String? = nil
     ) {
         self.role = role
         self.content = content
+        self.thinking = thinking
         self.name = name
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID

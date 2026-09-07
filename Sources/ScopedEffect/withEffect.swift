@@ -13,8 +13,9 @@
 /// the authority-gated `withEffect(_:authority:)` entry point.
 func _withEffectUnchecked<Effect: ScopedEffect, Result>(
     _ effect: Effect,
+    authority: any Authority = FullAuthority(),
     isolation: isolated (any Actor)? = #isolation,
     operation: (borrowing EffectToken<Effect>) async throws -> Result
 ) async rethrows -> Result {
-    try await operation(EffectToken(effect))
+    try await operation(EffectToken(effect, authority: authority))
 }

@@ -1,17 +1,18 @@
-/// A scoped effect: an effect *configuration* whose live capability may only
-/// be used inside a lexical scope opened by
-/// ``withEffect(_:authority:isolation:operation:)``.
-///
-/// The effect value holds the configuration and dependencies as plain values
-/// — it is data, not authority. Authority is the ``EffectToken`` vended
-/// inside the scope: every operation on the effect requires one.
-///
-/// What the scope cannot decide statically it funnels: every activation
-/// passes through one function — the single place a consumer's authority
-/// layer can gate before a token exists.
+/// A scoped effect is inert configuration. Its operation is available only
+/// after an authority has opened a matching ``EffectToken``.
 public protocol ScopedEffect: Sendable {
+    associatedtype Output: Sendable = Void
+
     /// A stable name for diagnostics and authority decisions.
     var name: String { get }
+
+    /// Runs an already-authorized effect token.
+    ///
+    /// The configuration comes from the exact token, rather than from an
+    /// unrelated effect value paired with a token for another value.
+    static func run(
+        in token: borrowing EffectToken<Self>
+    ) async throws -> Output
 }
 
 /// An effect whose authority is determined by its component effects.
@@ -22,6 +23,17 @@ public protocol ScopedEffect: Sendable {
 /// effect does not introduce a new authority domain of its own.
 public protocol CompositeScopedEffect: ScopedEffect {
     func decision(using authority: any Authority) -> EffectDecision
+}
+
+/// The result of running a binary effect composition in sequence.
+public struct CombinedEffectResult<Left: Sendable, Right: Sendable>: Sendable {
+    public let left: Left
+    public let right: Right
+
+    public init(left: Left, right: Right) {
+        self.left = left
+        self.right = right
+    }
 }
 
 /// The product of two effect requirements.
@@ -40,6 +52,8 @@ public struct CombinedEffect<Left: ScopedEffect, Right: ScopedEffect>:
     CompositeScopedEffect,
     Sendable
 {
+    public typealias Output = CombinedEffectResult<Left.Output, Right.Output>
+
     public let left: Left
     public let right: Right
 
@@ -67,14 +81,37 @@ public struct CombinedEffect<Left: ScopedEffect, Right: ScopedEffect>:
             ? .granted
             : .denied(denials.joined(separator: "; "))
     }
+
+    public static func run(
+        in token: borrowing EffectToken<CombinedEffect<Left, Right>>
+    ) async throws -> Output {
+        let left = try await token.withLeft { leftToken in
+            try await Left.run(in: leftToken)
+        }
+        let right = try await token.withRight { rightToken in
+            try await Right.run(in: rightToken)
+        }
+        return Output(left: left, right: right)
+    }
+
 }
 
 extension ScopedEffect {
-    /// Combines this effect requirement with another one.
+    /// Composes this effect inside an already-open parent token. The parent
+    /// authority is checked against this concrete effect before its exact
+    /// child token is created.
     public func combined<Other: ScopedEffect>(
         with other: Other
     ) -> CombinedEffect<Self, Other> {
         CombinedEffect(left: self, right: other)
+    }
+}
+
+extension ScopedEffect {
+    public func run<Parent: ScopedEffect>(
+        in token: borrowing EffectToken<Parent>
+    ) async throws -> Output {
+        try await token.run(self)
     }
 }
 
@@ -99,19 +136,56 @@ extension ScopedEffect {
 /// ```
 public struct EffectToken<Effect: ScopedEffect>: ~Escapable, ~Sendable {
     private let effect: Effect
+    private let authority: any Authority
 
     @_lifetime(borrow effect)
-    init(_ effect: borrowing Effect) {
+    init(
+        _ effect: borrowing Effect,
+        authority: any Authority
+    ) {
         self.effect = copy effect
+        self.authority = authority
     }
 
-    /// Accesses the effect's configuration from inside the scope. The
-    /// configuration is `borrowing`: it can be read but cannot be extracted,
-    /// so the token stays the only handle on the capability.
+    /// Accesses inert effect configuration from inside the token.
+    ///
+    /// Effect configuration may be copied. It must therefore contain data
+    /// only, never a live client or an authority-bearing closure. Execution
+    /// remains available through `run`.
     public func withConfiguration<Result>(
         _ body: (borrowing Effect) throws -> Result
     ) rethrows -> Result {
         try body(effect)
+    }
+
+    /// Opens and runs a child effect after checking the same authority against
+    /// that concrete child value.
+    public func run<Child: ScopedEffect>(
+        _ child: Child
+    ) async throws -> Child.Output {
+        try await withChild(child) { childToken in
+            try await Child.run(in: childToken)
+        }
+    }
+
+    /// Opens a child token for composed operations that need more than the
+    /// child's output.
+    public func withChild<Child: ScopedEffect, Result>(
+        _ child: Child,
+        operation: (borrowing EffectToken<Child>) async throws -> Result
+    ) async throws -> Result {
+        let decision = authority.decision(on: child)
+        EffectAudit.record(child, decision)
+        switch decision {
+        case .granted:
+            return try await _withEffectUnchecked(
+                child,
+                authority: authority,
+                operation: operation
+            )
+        case .denied(let reason):
+            throw EffectDenied(effect: child.name, reason: reason)
+        }
     }
 }
 
@@ -122,16 +196,16 @@ extension EffectToken {
     /// it cannot outlive this operation or cross an isolation boundary.
     public func withLeft<Left: ScopedEffect, Right: ScopedEffect, Result>(
         _ operation: (borrowing EffectToken<Left>) async throws -> Result
-    ) async rethrows -> Result where Effect == CombinedEffect<Left, Right> {
+    ) async throws -> Result where Effect == CombinedEffect<Left, Right> {
         let left = withConfiguration { $0.left }
-        return try await _withEffectUnchecked(left, operation: operation)
+        return try await withChild(left, operation: operation)
     }
 
     /// Re-enters the right capability contained by a combined effect.
     public func withRight<Left: ScopedEffect, Right: ScopedEffect, Result>(
         _ operation: (borrowing EffectToken<Right>) async throws -> Result
-    ) async rethrows -> Result where Effect == CombinedEffect<Left, Right> {
+    ) async throws -> Result where Effect == CombinedEffect<Left, Right> {
         let right = withConfiguration { $0.right }
-        return try await _withEffectUnchecked(right, operation: operation)
+        return try await withChild(right, operation: operation)
     }
 }

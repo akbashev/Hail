@@ -224,7 +224,7 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func execute(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
+        func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
             throw CancellationError()
         }
     }
@@ -254,7 +254,7 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func execute(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
+        func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
             throw ToolError.notConfigured("test")
         }
     }

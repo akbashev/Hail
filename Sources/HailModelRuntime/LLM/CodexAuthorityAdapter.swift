@@ -45,7 +45,11 @@ struct CodexAuthorityAdapter {
             let granted: Bool
             if let network = request?.networkApprovalContext {
                 granted = await isGranted(
-                    NetworkEffect(host: network.host, operation: network.protocol ?? "connect")
+                    NetworkEffect(
+                        host: network.host,
+                        operation: network.protocol ?? "connect",
+                        request: NetworkRequest(url: "https://\(network.host)/")
+                    )
                 )
             } else if let command = request?.command, !command.isEmpty {
                 granted = await isGranted(

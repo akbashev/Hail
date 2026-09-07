@@ -164,7 +164,11 @@ public func withEffect<Effect: ScopedEffect, Result>(
     EffectAudit.record(effect, decision)
     switch decision {
     case .granted:
-        return try await _withEffectUnchecked(effect, operation: operation)
+        return try await _withEffectUnchecked(
+            effect,
+            authority: authority,
+            operation: operation
+        )
     case .denied(let reason):
         throw EffectDenied(effect: effect.name, reason: reason)
     }

@@ -97,7 +97,7 @@ public struct FileTool: Tool {
         return FileEffect(path: resolved, action: input.action.effectAction)
     }
 
-    public func execute(input: Input, token: borrowing EffectToken<FileEffect>) async throws -> String {
+    public func run(input: Input, token: borrowing EffectToken<FileEffect>) async throws -> String {
         let path = input.path
         let fullPath = token.withConfiguration { URL(fileURLWithPath: $0.path) }
         let fileManager = FileManager.default

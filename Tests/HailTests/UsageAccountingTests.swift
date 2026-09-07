@@ -1,8 +1,14 @@
-import Foundation
 import AnyLanguageModel
 import HailCore
-@testable import HailModelRuntime
 import Testing
+
+@testable import HailModelRuntime
+
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 @Suite("Usage accounting")
 struct UsageAccountingTests {
@@ -227,6 +233,7 @@ struct UsageAccountingTests {
                 LLMMessage(
                     role: .assistant,
                     content: "",
+                    thinking: "I should inspect the image before answering.",
                     toolCalls: [
                         LLMToolCall(
                             id: "fetch-1",
@@ -258,6 +265,10 @@ struct UsageAccountingTests {
                     JSONSerialization.jsonObject(with: body) as? [String: Any]
                 )
                 let messages = try #require(object["messages"] as? [[String: Any]])
+                let assistant = try #require(
+                    messages.first { $0["role"] as? String == "assistant" }
+                )
+                #expect(assistant["thinking"] as? String == "I should inspect the image before answering.")
                 let toolOutput = try #require(messages.last)
                 #expect(toolOutput["role"] as? String == "tool")
                 #expect(toolOutput["tool_name"] as? String == "fetch_url")

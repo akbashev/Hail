@@ -88,37 +88,37 @@ public protocol Tool<Input>: Sendable {
     /// Pure: decoded model input to the concrete effect being requested.
     func effect(for input: Input) throws -> Effect
 
-    /// Executes only after the registry has authorized the effect and vended
-    /// its non-escapable token.
-    func execute(input: Input, token: borrowing EffectToken<Effect>) async throws -> String
+    /// Runs only after the registry has authorized the effect and vended its
+    /// non-escapable token.
+    func run(input: Input, token: borrowing EffectToken<Effect>) async throws -> String
 
-    func executeOutput(input: Input, token: borrowing EffectToken<Effect>) async throws -> ToolOutput
+    func runOutput(input: Input, token: borrowing EffectToken<Effect>) async throws -> ToolOutput
 }
 
 extension Tool {
-    public func executeOutput(
+    public func runOutput(
         input: Input,
         token: borrowing EffectToken<Effect>
     ) async throws -> ToolOutput {
-        .text(try await execute(input: input, token: token))
+        .text(try await run(input: input, token: token))
     }
 
-    /// The only direct execution entry point: derive the concrete effect,
-    /// authorize it, and invoke the token-requiring implementation.
-    public func execute(input: Input, authority: any Authority) async throws -> String {
+    /// The only direct tool entry point: derive the concrete effect, authorize
+    /// it, and invoke the token-requiring implementation.
+    public func run(input: Input, authority: any Authority) async throws -> String {
         let effect = try effect(for: input)
         return try await withEffect(effect, authority: authority) { token in
-            try await execute(input: input, token: token)
+            try await run(input: input, token: token)
         }
     }
 
-    public func executeOutput(
+    public func runOutput(
         input: Input,
         authority: any Authority
     ) async throws -> ToolOutput {
         let effect = try effect(for: input)
         return try await withEffect(effect, authority: authority) { token in
-            try await executeOutput(input: input, token: token)
+            try await runOutput(input: input, token: token)
         }
     }
 
@@ -132,25 +132,26 @@ public struct AnyTool: Sendable {
     public let schema: LLMToolSchema
     /// Type erasure closes over the concrete effect type, so only this path
     /// can manufacture the matching token and invoke the tool.
-    private let _executeWithAuthority: @Sendable (ToolArguments, any Authority) async throws -> ToolOutput
+    private let _runWithAuthority: @Sendable (ToolArguments, any Authority) async throws -> ToolOutput
 
     public init<T: Tool>(_ tool: T) {
         self.name = tool.name
         self.description = tool.description
         self.schema = tool.schema
-        self._executeWithAuthority = { input, authority in
+        self._runWithAuthority = { input, authority in
             let decoded = try JSONDecoder().decode(T.Input.self, from: input.data)
-            return try await tool.executeOutput(input: decoded, authority: authority)
+            return try await tool.runOutput(input: decoded, authority: authority)
         }
     }
 
-    public func execute(input: ToolArguments, authority: any Authority) async throws -> String {
-        try await _executeWithAuthority(input, authority).transcript
+    public func run(input: ToolArguments, authority: any Authority) async throws -> String {
+        try await _runWithAuthority(input, authority).transcript
     }
 
-    public func executeOutput(input: ToolArguments, authority: any Authority) async throws -> ToolOutput {
-        try await _executeWithAuthority(input, authority)
+    public func runOutput(input: ToolArguments, authority: any Authority) async throws -> ToolOutput {
+        try await _runWithAuthority(input, authority)
     }
+
 }
 
 public enum ToolError: Error, Equatable, Sendable {

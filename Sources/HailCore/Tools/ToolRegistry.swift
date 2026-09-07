@@ -84,7 +84,7 @@ public actor ToolRegistry: Sendable {
             }
 
             do {
-                let output = try await tool.executeOutput(input: call.arguments, authority: authority)
+                let output = try await tool.runOutput(input: call.arguments, authority: authority)
                 let result = ToolResult(
                     toolCallID: call.id,
                     name: call.name,

@@ -13,6 +13,12 @@ import Testing
 struct GreeterEffect: ScopedEffect {
     let name = "greeter"
     let greeting: String
+
+    static func run(
+        in token: borrowing EffectToken<GreeterEffect>
+    ) async throws {
+        _ = token.withConfiguration { $0.greeting }
+    }
 }
 
 extension EffectToken where Effect == GreeterEffect {

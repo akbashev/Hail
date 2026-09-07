@@ -96,7 +96,7 @@ public struct AgentTool: Tool {
         CoordinationEffect(subsystem: "agent", action: input.action.rawValue)
     }
 
-    public func execute(input: Input, token: borrowing EffectToken<CoordinationEffect>) async throws -> String {
+    public func run(input: Input, token: borrowing EffectToken<CoordinationEffect>) async throws -> String {
         _ = token
         switch input.action {
         case .listAgents:
@@ -169,7 +169,8 @@ public struct AgentTool: Tool {
                     throw error
                 }
             }
-            return "Queued message to \(targetID.rawValue) (delivery \(deliveryID)); best effort, no response is expected in this turn."
+            return
+                "Queued message to \(targetID.rawValue) (delivery \(deliveryID)); best effort, no response is expected in this turn."
         }
     }
 }

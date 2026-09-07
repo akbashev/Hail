@@ -10,14 +10,72 @@ import Testing
 
 @Suite("Now tool")
 struct NowToolTests {
-    @Test("returns the injected clock as an ISO 8601 timestamp")
+    @Test("returns the injected time in the requested timezone and in UTC")
     func returnsInjectedTime() async throws {
         let expected = Date(timeIntervalSince1970: 1_704_167_045)
-        let tool = NowTool(clock: { expected })
+        let result = try await withDependencies {
+            $0.date = .fixed(expected)
+        } operation: {
+            try await NowTool().run(
+                input: .init(timeZone: TimeZone(identifier: "Europe/Berlin")!),
+                authority: FullAuthority()
+            )
+        }
 
-        let result = try await tool.execute(input: .init(), authority: FullAuthority())
+        #expect(result.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(result.contains("Local (Europe/Berlin):"))
+    }
 
-        #expect(result == expected.ISO8601Format())
-        #expect(tool.schema.function.name == "now")
+    @Test("renders the wall clock in the explicitly requested timezone")
+    func allowsTimezoneOverride() async throws {
+        let expected = Date(timeIntervalSince1970: 1_704_167_045)
+        let result = try await withDependencies {
+            $0.date = .fixed(expected)
+        } operation: {
+            try await NowTool().run(
+                input: .init(timeZone: TimeZone(identifier: "America/New_York")!),
+                authority: FullAuthority()
+            )
+        }
+
+        #expect(result.contains("Local (America/New_York):"))
+        #expect(result.contains("UTC instant: \(expected.ISO8601Format())"))
+    }
+
+    @Test("withDependencies changes the clock seen by tools")
+    func withDependenciesChangesDate() async throws {
+        let expected = Date(timeIntervalSince1970: 1_704_167_045)
+        let utc = TimeZone(identifier: "UTC")!
+
+        let overridden = try await withDependencies {
+            $0.date = .fixed(expected)
+        } operation: {
+            try await NowTool().run(
+                input: .init(timeZone: utc),
+                authority: FullAuthority()
+            )
+        }
+        let live = try await NowTool().run(
+            input: .init(timeZone: utc),
+            authority: FullAuthority()
+        )
+
+        #expect(overridden.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(!live.contains("UTC instant: \(expected.ISO8601Format())"))
+    }
+
+    @Test("requires an explicit timezone")
+    func requiresExplicitTimezone() {
+        let schema = NowTool().schema
+
+        #expect(schema.function.parameters.required == ["time_zone"])
+    }
+
+    @Test("encodes the timezone across the model boundary")
+    func encodesTimezoneForModelBoundary() throws {
+        let input = NowTool.Input(timeZone: TimeZone(identifier: "Europe/Berlin")!)
+        let data = try JSONEncoder().encode(input)
+
+        #expect(String(data: data, encoding: .utf8) == "{\"time_zone\":\"Europe\\/Berlin\"}")
     }
 }

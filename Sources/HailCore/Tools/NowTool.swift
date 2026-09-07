@@ -79,7 +79,7 @@ public struct NowTool: Tool {
     }
 
     public func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
-        let instant = token.now()
+        let instant = try await ClockEffect.run(in: token)
         let utc = instant.ISO8601Format()
         let timeZone = input.timeZone
 

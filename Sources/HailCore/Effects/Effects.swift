@@ -367,18 +367,12 @@ public struct ClockEffect: ScopedEffect, Sendable {
     public init() {}
 }
 
-extension EffectToken where Effect == ClockEffect {
-    /// Reads the clock only while the clock capability is in scope.
-    public func now() -> Date {
-        HailDependencyScope.values.date.now()
-    }
-}
-
 extension ClockEffect {
+    /// Reads the clock only while the clock capability is in scope.
     public static func run(
         in token: borrowing EffectToken<ClockEffect>
     ) async throws -> Date {
-        token.now()
+        HailDependencyScope.values.date.now()
     }
 }
 

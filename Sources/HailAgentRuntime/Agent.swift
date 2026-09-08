@@ -56,10 +56,7 @@ public distributed actor Agent: AsyncSequence {
 
     /// The journaled harness session to resume, if one was recorded.
     private var modelSessionResume: ModelSessionResume? {
-        guard let id = state.modelSessionID, let identity = state.modelSessionIdentity else {
-            return nil
-        }
-        return ModelSessionResume(id: id, identity: identity)
+        state.modelSession
     }
 
     // Durable definition plus activation-resolved host capabilities.
@@ -668,8 +665,7 @@ public distributed actor Agent: AsyncSequence {
         let contextManifest: ContextManifest
         let instructions: PromptAssemblyInstructions
         let sessionIdentity: SessionIdentity
-        let modelSessionID: SessionID?
-        let modelSessionIdentity: SessionIdentity?
+        let modelSession: ModelSessionResume?
 
         if let snapshot {
             // A turn owns these inputs for its entire lifetime. Only the
@@ -680,8 +676,7 @@ public distributed actor Agent: AsyncSequence {
             contextManifest = snapshot.promptContext.contextManifest
             instructions = snapshot.promptContext.instructions
             sessionIdentity = snapshot.sessionIdentity
-            modelSessionID = snapshot.modelSessionID
-            modelSessionIdentity = snapshot.modelSessionIdentity
+            modelSession = snapshot.modelSession
         } else {
             do {
                 contextManifest =
@@ -701,8 +696,7 @@ public distributed actor Agent: AsyncSequence {
                 model: definition.behavior.model.rawValue,
                 systemPrompt: definition.behavior.systemPrompt
             )
-            modelSessionID = state.modelSessionID
-            modelSessionIdentity = state.modelSessionIdentity
+            modelSession = self.modelSessionResume
         }
 
         let promptContext = PromptContext(
@@ -717,10 +711,8 @@ public distributed actor Agent: AsyncSequence {
         return TurnContext(
             preparedRequest: assemblePrompt(promptContext),
             promptContext: promptContext,
-            workingMemory: workingMemory,
             sessionIdentity: sessionIdentity,
-            modelSessionID: modelSessionID,
-            modelSessionIdentity: modelSessionIdentity
+            modelSession: modelSession
         )
     }
 

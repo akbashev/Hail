@@ -56,21 +56,34 @@ public struct SessionIdentity: RawRepresentable, Codable, Sendable, Hashable,
 /// serialized processing task — if turns are ever parallelized, warm deltas
 /// would corrupt session context and this design must be revisited.
 public struct TurnDelta: Sendable {
-    /// New content for this turn only: request-local reference data followed
-    /// by the current input message. Never contains thread history.
-    public var messages: [LLMMessage]
+    /// The messages that are new to this turn. The transcript history is
+    /// supplied separately as ``ModelEndpoint/stream(input:delta:authority:tools:responseType:)``'s
+    /// `input` and can never be stored in this value by accident.
+    public struct Current: Sendable {
+        public let messages: [LLMMessage]
+
+        public init(messages: [LLMMessage]) {
+            self.messages = messages
+        }
+    }
+
+    public let current: Current
 
     /// The agent's current working memory. The session re-sends it only when
     /// it changed since the last send, framed as superseding earlier memory.
-    public var workingMemory: [String]
+    public let workingMemory: [String]
 
     /// Fingerprint of the agent's stable identity (role prompt + model). A
     /// mismatch against the live session's fingerprint invalidates the session
     /// and forces a full bootstrap.
-    public var sessionIdentity: SessionIdentity
+    public let sessionIdentity: SessionIdentity
 
-    public init(messages: [LLMMessage], workingMemory: [String], sessionIdentity: SessionIdentity) {
-        self.messages = messages
+    public init(
+        currentMessages: [LLMMessage],
+        workingMemory: [String],
+        sessionIdentity: SessionIdentity
+    ) {
+        self.current = Current(messages: currentMessages)
         self.workingMemory = workingMemory
         self.sessionIdentity = sessionIdentity
     }
@@ -80,7 +93,7 @@ public struct TurnDelta: Sendable {
 /// plus the identity fingerprint it was created with. The identity lets the
 /// endpoint refuse a stale resume (config changed since) and bootstrap
 /// instead.
-public struct ModelSessionResume: Sendable, Equatable {
+public struct ModelSessionResume: Codable, Sendable, Equatable {
     public let id: SessionID
     public let identity: SessionIdentity
 

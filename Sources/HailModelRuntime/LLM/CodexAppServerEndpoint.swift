@@ -204,7 +204,7 @@ extension CodexAppServerEndpoint: SessionOwningEndpoint {
         _ = tools
         return makeStream(
             input: input,
-            delta: turnDelta.messages,
+            delta: turnDelta.current.messages,
             sessionIdentity: turnDelta.sessionIdentity,
             workingMemory: turnDelta.workingMemory,
             authority: authority,

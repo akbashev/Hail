@@ -661,7 +661,7 @@ struct CorruptedJournalTests {
             let event = try JSONDecoder().decode(AgentEvent.self, from: Data(line.utf8))
             state.apply(event, maxMemoryFragments: 10)
         }
-        #expect(state.modelSessionID == SessionID("session-1"))
+        #expect(state.modelSession?.id == SessionID("session-1"))
 
         // A torn `modelSessionIdentified` line fails loudly instead of
         // folding a partial session id into the resume path.
@@ -675,7 +675,7 @@ struct CorruptedJournalTests {
         }
 
         // The journaled session identity the resume path reads is intact.
-        #expect(state.modelSessionID == SessionID("session-1"))
-        #expect(state.modelSessionIdentity == SessionIdentity("fp-A"))
+        #expect(state.modelSession?.id == SessionID("session-1"))
+        #expect(state.modelSession?.identity == SessionIdentity("fp-A"))
     }
 }

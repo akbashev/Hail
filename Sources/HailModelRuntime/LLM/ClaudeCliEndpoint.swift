@@ -674,7 +674,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
                             sessionState.setMemorySnapshot(memorySnapshot)
                         }
                         parts.append(
-                            Self.formatPrompt(messages: turnDelta.messages, reportToolName: reportToolName)
+                            Self.formatPrompt(messages: turnDelta.current.messages, reportToolName: reportToolName)
                         )
                         prompt = parts.joined(separator: "\n\n")
                         resumeID = sessionID

@@ -58,21 +58,21 @@ struct AgentStateTurnTimingTests {
     @Test("model session events fold id and identity for later resume")
     func modelSessionFolds() throws {
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
-        #expect(state.modelSessionID == nil)
+        #expect(state.modelSession == nil)
 
         state.apply(
             .modelSessionIdentified(id: SessionID("session-1"), identity: SessionIdentity("fp-A")),
             maxMemoryFragments: 10
         )
-        #expect(state.modelSessionID == SessionID("session-1"))
-        #expect(state.modelSessionIdentity == SessionIdentity("fp-A"))
+        #expect(state.modelSession?.id == SessionID("session-1"))
+        #expect(state.modelSession?.identity == SessionIdentity("fp-A"))
 
         state.apply(
             .modelSessionIdentified(id: SessionID("session-2"), identity: SessionIdentity("fp-B")),
             maxMemoryFragments: 10
         )
-        #expect(state.modelSessionID == SessionID("session-2"))
-        #expect(state.modelSessionIdentity == SessionIdentity("fp-B"))
+        #expect(state.modelSession?.id == SessionID("session-2"))
+        #expect(state.modelSession?.identity == SessionIdentity("fp-B"))
     }
 
     /// Regression: when the crash happened after tool events, the thread tail

@@ -108,13 +108,12 @@ struct TurnContext: Sendable {
     var messages: [LLMMessage] { preparedRequest.messages }
     /// The derived turn context from which the request was assembled; handed
     /// to the compactor independently from request accounting.
-    var promptContext: PromptContext
-    var workingMemory: [String]
-    var sessionIdentity: SessionIdentity
+    let promptContext: PromptContext
+    var workingMemory: [String] { promptContext.workingMemory }
+    let sessionIdentity: SessionIdentity
     /// The journaled harness session (id + identity) from previous runs, used
     /// to resume after a restart and to detect when the id changes.
-    var modelSessionID: SessionID?
-    var modelSessionIdentity: SessionIdentity?
+    let modelSession: ModelSessionResume?
 }
 
 /// The prompt for one live reasoning turn.
@@ -123,63 +122,87 @@ struct TurnContext: Sendable {
 /// input, and outputs produced while this turn is running are the current
 /// prompt. Keeping those parts separate prevents request-local data from
 /// being inserted into the durable history by array surgery.
-struct TurnPrompt: Sendable {
-    let history: [LLMMessage]
-    let current: ModelInput
+struct TurnHistory: Sendable {
+    let messages: [LLMMessage]
+}
+
+struct TurnInput: Sendable {
+    let modelInput: ModelInput
     let currentMessage: LLMMessage?
 
     var messages: [LLMMessage] {
-        history + current.messages
+        modelInput.messages
+    }
+}
+
+struct TurnPrompt: Sendable {
+    let history: TurnHistory
+    let current: TurnInput
+    private let currentSourceIndex: Int?
+
+    var messages: [LLMMessage] {
+        history.messages + current.messages
     }
 
     var modelInput: ModelInput {
         ModelInput(
-            entries: history.map(ModelInput.Entry.message) + current.entries
+            entries: history.messages.map(ModelInput.Entry.message) + current.modelInput.entries
         )
     }
 
     init(
         reference: [LLMMessage],
         currentMessage: LLMMessage?,
+        currentSourceIndex: Int? = nil,
+        currentIndex: Int? = nil,
         in messages: [LLMMessage]
     ) {
-        self.currentMessage = currentMessage
+        self.currentSourceIndex = currentSourceIndex
 
         guard let currentMessage,
-            let currentIndex = messages.lastIndex(of: currentMessage)
+            let currentIndex = currentIndex ?? messages.lastIndex(of: currentMessage)
         else {
-            self.history = messages
-            self.current = ModelInput(
-                messages: reference + [currentMessage].compactMap { $0 }
+            self.history = TurnHistory(messages: messages)
+            self.current = TurnInput(
+                modelInput: ModelInput(
+                    messages: reference + [currentMessage].compactMap { $0 }
+                ),
+                currentMessage: currentMessage
             )
             return
         }
 
-        self.history = Array(messages[..<currentIndex])
-        self.current = ModelInput(
-            messages: reference
-                + [currentMessage]
-                + Array(messages[(currentIndex + 1)...])
+        self.history = TurnHistory(messages: Array(messages[..<currentIndex]))
+        self.current = TurnInput(
+            modelInput: ModelInput(
+                messages: reference
+                    + [currentMessage]
+                    + Array(messages[(currentIndex + 1)...])
+            ),
+            currentMessage: currentMessage
         )
     }
 
     private init(
-        history: [LLMMessage],
-        current: ModelInput,
-        currentMessage: LLMMessage?
+        history: TurnHistory,
+        current: TurnInput,
+        currentSourceIndex: Int?
     ) {
         self.history = history
         self.current = current
-        self.currentMessage = currentMessage
+        self.currentSourceIndex = currentSourceIndex
     }
 
     func appending(_ message: LLMMessage) -> Self {
-        var current = current
-        current.append(message)
+        var modelInput = current.modelInput
+        modelInput.append(message)
         return Self(
             history: history,
-            current: current,
-            currentMessage: currentMessage
+            current: TurnInput(
+                modelInput: modelInput,
+                currentMessage: current.currentMessage
+            ),
+            currentSourceIndex: currentSourceIndex
         )
     }
 
@@ -188,31 +211,47 @@ struct TurnPrompt: Sendable {
         name: String,
         output: ToolOutput
     ) -> Self {
-        var current = current
-        current.appendToolOutput(callID: callID, name: name, output: output)
+        var modelInput = current.modelInput
+        modelInput.appendToolOutput(callID: callID, name: name, output: output)
         return Self(
             history: history,
-            current: current,
-            currentMessage: currentMessage
+            current: TurnInput(
+                modelInput: modelInput,
+                currentMessage: current.currentMessage
+            ),
+            currentSourceIndex: currentSourceIndex
         )
     }
 
     /// Keeps the live prompt intact while replacing only its durable history
     /// after context compaction or provider-overflow recovery.
     func rebased(on messages: [LLMMessage]) -> Self {
-        guard let currentMessage,
+        guard let currentMessage = current.currentMessage,
             let currentIndex = messages.lastIndex(of: currentMessage)
         else {
             return Self(
-                history: messages,
+                history: TurnHistory(messages: messages),
                 current: current,
-                currentMessage: currentMessage
+                currentSourceIndex: currentSourceIndex
             )
         }
         return Self(
-            history: Array(messages[..<currentIndex]),
+            history: TurnHistory(messages: Array(messages[..<currentIndex])),
             current: current,
-            currentMessage: currentMessage
+            currentSourceIndex: currentSourceIndex
+        )
+    }
+
+    func rebased(on request: PreparedRequest) -> Self {
+        guard let currentSourceIndex,
+            let currentIndex = request.messageIndex(forSourceIndex: currentSourceIndex)
+        else {
+            return rebased(on: request.messages)
+        }
+        return Self(
+            history: TurnHistory(messages: Array(request.messages[..<currentIndex])),
+            current: current,
+            currentSourceIndex: currentSourceIndex
         )
     }
 }
@@ -734,14 +773,22 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             additionalMessages: turnContextMessages,
             tools: schemas
         )
+        let currentSourceIndex = turnContext.promptContext.conversationThread.indices.last
+        let currentIndex = inputMessage == nil
+            ? nil
+            : currentSourceIndex.flatMap {
+                turnContext.preparedRequest.messageIndex(forSourceIndex: $0)
+            }
         let prompt = TurnPrompt(
             reference: turnContextMessages,
             currentMessage: inputMessage,
+            currentSourceIndex: currentSourceIndex,
+            currentIndex: currentIndex,
             in: turnContext.messages
         )
 
         let delta = TurnDelta(
-            messages: prompt.current.messages,
+            currentMessages: prompt.current.messages,
             workingMemory: turnContext.workingMemory,
             sessionIdentity: turnContext.sessionIdentity
         )
@@ -762,7 +809,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         // the journal.
         if let sessionEndpoint = endpoint as? SessionOwningEndpoint,
             let sessionID = await sessionEndpoint.currentSessionID,
-            sessionID != turnContext.modelSessionID
+            sessionID != turnContext.modelSession?.id
         {
             try await emit(
                 .modelSessionIdentified(id: sessionID, identity: turnContext.sessionIdentity)
@@ -910,7 +957,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         guard wasCompacted else {
             throw AgentRuntimeError.contextLengthExceeded
         }
-        return input.rebased(on: prepared.messages)
+        return input.rebased(on: prepared.preparedRequest)
     }
 
     /// Executes one provider request and closes its raw stream into a valid
@@ -1095,7 +1142,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         guard wasCompacted else {
             return nextInput
         }
-        return nextInput.rebased(on: prepared.messages)
+        return nextInput.rebased(on: prepared.preparedRequest)
     }
 
     // MARK: - Updates

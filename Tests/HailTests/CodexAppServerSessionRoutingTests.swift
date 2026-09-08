@@ -113,7 +113,7 @@ struct CodexAppServerSessionRoutingTests {
             for await event in endpoint.stream(
                 input: ModelInput(messages: messages),
                 delta: TurnDelta(
-                    messages: delta, workingMemory: [], sessionIdentity: SessionIdentity(identity)),
+                    currentMessages: delta, workingMemory: [], sessionIdentity: SessionIdentity(identity)),
                 authority: FullAuthority(),
                 tools: nil,
                 responseType: String.self
@@ -245,7 +245,7 @@ struct CodexAppServerSessionRoutingTests {
             for await event in endpoint.stream(
                 input: ModelInput(messages: messages),
                 delta: TurnDelta(
-                    messages: messages,
+                    currentMessages: messages,
                     workingMemory: [],
                     sessionIdentity: SessionIdentity("authority-test")
                 ),

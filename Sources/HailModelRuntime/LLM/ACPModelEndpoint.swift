@@ -161,7 +161,7 @@ struct ACPModelEndpoint: ModelEndpoint {
         )
         if let turnDelta {
             let delta = Self.appendOutcomeInstruction(
-                prompt: Self.formatCompactMessages(turnDelta.messages),
+                prompt: Self.formatCompactMessages(turnDelta.current.messages),
                 responseType: responseType
             )
             let memorySnapshot =

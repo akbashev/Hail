@@ -45,7 +45,7 @@ struct ClaudeCliSessionRoutingTests {
         for await event in endpoint.stream(
             input: ModelInput(messages: messages),
             delta: TurnDelta(
-                messages: delta,
+                currentMessages: delta,
                 workingMemory: memory,
                 sessionIdentity: SessionIdentity(identity)
             ),
@@ -265,7 +265,7 @@ struct ClaudeCliSessionRoutingTests {
         for await event in endpoint.stream(
             input: ModelInput(messages: [LLMMessage(role: .user, content: "HELLO")]),
             delta: TurnDelta(
-                messages: [LLMMessage(role: .user, content: "HELLO")],
+                currentMessages: [LLMMessage(role: .user, content: "HELLO")],
                 workingMemory: [],
                 sessionIdentity: SessionIdentity("stall-ceiling")
             ),

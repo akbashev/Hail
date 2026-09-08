@@ -44,11 +44,9 @@ public struct AgentState: Codable, Sendable {
     public private(set) var pendingTurnRerun: ChatMessage?
 
     /// The harness session this agent's turns run in (kimi/claude CLI), if
-    /// journaled. Used to resume the session after a restart.
-    public private(set) var modelSessionID: SessionID?
-
-    /// The identity fingerprint the harness session was created with.
-    public private(set) var modelSessionIdentity: SessionIdentity?
+    /// journaled. The id and identity are one invariant-bearing value so a
+    /// state snapshot cannot contain only half of a resumable session.
+    public private(set) var modelSession: ModelSessionResume?
 
     /// Durable token totals projected from ``AgentEvent/modelUsage``. Kept
     /// outside the conversation so prompt assembly and compaction never see
@@ -113,7 +111,7 @@ public struct AgentState: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case agentID, conversationThread, workingMemory, contextSummary, activeTurn,
-            pendingTurnRerun, modelSessionID, modelSessionIdentity, usageSummary,
+            pendingTurnRerun, modelSession, usageSummary,
             latestContextUsage, modelRequests, phase, currentToolName
     }
 
@@ -125,8 +123,7 @@ public struct AgentState: Codable, Sendable {
         contextSummary = try container.decodeIfPresent(String.self, forKey: .contextSummary)
         activeTurn = try container.decodeIfPresent(ActiveTurn.self, forKey: .activeTurn)
         pendingTurnRerun = try container.decodeIfPresent(ChatMessage.self, forKey: .pendingTurnRerun)
-        modelSessionID = try container.decodeIfPresent(SessionID.self, forKey: .modelSessionID)
-        modelSessionIdentity = try container.decodeIfPresent(SessionIdentity.self, forKey: .modelSessionIdentity)
+        modelSession = try container.decodeIfPresent(ModelSessionResume.self, forKey: .modelSession)
         usageSummary = try container.decodeIfPresent(AgentUsageSummary.self, forKey: .usageSummary) ?? .init()
         latestContextUsage = try container.decodeIfPresent(ContextUsage.self, forKey: .latestContextUsage)
         modelRequests = try container.decodeIfPresent([ModelRequestRecord].self, forKey: .modelRequests) ?? []
@@ -145,8 +142,7 @@ public struct AgentState: Codable, Sendable {
         try container.encodeIfPresent(contextSummary, forKey: .contextSummary)
         try container.encodeIfPresent(activeTurn, forKey: .activeTurn)
         try container.encodeIfPresent(pendingTurnRerun, forKey: .pendingTurnRerun)
-        try container.encodeIfPresent(modelSessionID, forKey: .modelSessionID)
-        try container.encodeIfPresent(modelSessionIdentity, forKey: .modelSessionIdentity)
+        try container.encodeIfPresent(modelSession, forKey: .modelSession)
         try container.encode(usageSummary, forKey: .usageSummary)
         try container.encodeIfPresent(latestContextUsage, forKey: .latestContextUsage)
         try container.encode(modelRequests, forKey: .modelRequests)
@@ -297,8 +293,7 @@ public struct AgentState: Codable, Sendable {
                 }
             }
         case .modelSessionIdentified(let id, let identity):
-            modelSessionID = id
-            modelSessionIdentity = identity
+            modelSession = ModelSessionResume(id: id, identity: identity)
         case .deactivated:
             break
         }

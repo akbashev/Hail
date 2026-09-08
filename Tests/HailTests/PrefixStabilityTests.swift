@@ -230,7 +230,7 @@ struct PrefixStabilityTests {
             on: [LLMMessage(role: .system, content: "summary"), current]
         )
 
-        #expect(rebased.history == [LLMMessage(role: .system, content: "summary")])
+        #expect(rebased.history.messages == [LLMMessage(role: .system, content: "summary")])
         #expect(rebased.current.messages == live.current.messages)
         #expect(
             rebased.messages == [

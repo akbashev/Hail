@@ -405,10 +405,8 @@ struct ReasoningLoopCompactionTests {
                 }
             ),
             promptContext: promptContext,
-            workingMemory: [],
             sessionIdentity: SessionIdentity(rawValue: "identity"),
-            modelSessionID: nil,
-            modelSessionIdentity: nil
+            modelSession: nil
         )
     }
 

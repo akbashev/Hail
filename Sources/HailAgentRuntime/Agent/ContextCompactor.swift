@@ -136,6 +136,18 @@ public struct PreparedRequest: Sendable {
         prefix + conversation.map(\.message) + suffix
     }
 
+    /// Finds the provider-message position corresponding to one durable
+    /// conversation source entry. The source index is stable across prompt
+    /// rebuilds even when compaction changes the number of retained messages.
+    func messageIndex(forSourceIndex sourceIndex: Int) -> Int? {
+        guard let conversationIndex = conversation.lastIndex(where: {
+            $0.sourceIndex == sourceIndex
+        }) else {
+            return nil
+        }
+        return prefix.count + conversationIndex
+    }
+
     /// Adds request-local messages and tool schemas without changing the
     /// policy-owned prefix or conversation mapping.
     public func appending(
@@ -172,13 +184,17 @@ public struct PreparedRequest: Sendable {
         // has reached the durable conversation thread. Keep those entries in
         // the request, but do not resurrect an output whose tool-result
         // message was deliberately archived from this request.
-        let representedToolResultIDs = Set(
-            self.messages.compactMap { message in
-                message.role == .tool ? message.toolCallID : nil
-            }
-        )
+        let representedToolResultCounts = self.messages.reduce(into: [String: Int]()) {
+            counts, message in
+            guard message.role == .tool, let callID = message.toolCallID else { return }
+            counts[callID, default: 0] += 1
+        }
+        var consumedToolResultCounts: [String: Int] = [:]
         let liveOutputs = input.richOutputMessages.filter { message in
-            !representedToolResultIDs.contains(message.toolCallID ?? "")
+            guard let callID = message.toolCallID else { return true }
+            let consumed = consumedToolResultCounts[callID, default: 0]
+            consumedToolResultCounts[callID] = consumed + 1
+            return consumed >= representedToolResultCounts[callID, default: 0]
         }
         return input.rebased(on: messages + liveOutputs)
     }

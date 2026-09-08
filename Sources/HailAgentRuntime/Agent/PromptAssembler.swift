@@ -18,22 +18,9 @@ public struct PromptAssemblyInstructions: Sendable, Hashable {
     }
 }
 
-public struct PromptMeasurement: Sendable {
-    public let effectiveContextWindow: Int?
-    public let projectedTokenCount: Int?
-    public let tokenCounting: TokenCounting
-
-    public init(
-        effectiveContextWindow: Int? = nil,
-        projectedTokenCount: Int? = nil,
-        tokenCounting: TokenCounting = .unavailable
-    ) {
-        self.effectiveContextWindow = effectiveContextWindow
-        self.projectedTokenCount = projectedTokenCount
-        self.tokenCounting = tokenCounting
-    }
-}
-
+/// A derived view of the event-sourced agent state used by prompt assembly
+/// and compaction. It is rebuilt from the actor's state for each turn and is
+/// never persisted or used as a second state owner.
 public struct PromptContext: Sendable {
     public let agentID: AgentID
     public let definition: AgentDefinition
@@ -46,10 +33,6 @@ public struct PromptContext: Sendable {
     /// Host-supplied product instructions. Hail renders them but does not
     /// invent task rules for its callers.
     public let instructions: PromptAssemblyInstructions
-    /// Runtime-supplied effective window and count for the exact request being
-    /// considered. They are optional because the prompt policy can be used
-    /// independently of a concrete endpoint.
-    public let measurement: PromptMeasurement
 
     public init(
         agentID: AgentID,
@@ -58,10 +41,7 @@ public struct PromptContext: Sendable {
         contextSummary: String? = nil,
         conversationThread: [ChatMessage],
         contextManifest: ContextManifest,
-        instructions: PromptAssemblyInstructions = PromptAssemblyInstructions(),
-        effectiveContextWindow: Int? = nil,
-        projectedTokenCount: Int? = nil,
-        tokenCounting: TokenCounting = .unavailable
+        instructions: PromptAssemblyInstructions = PromptAssemblyInstructions()
     ) {
         self.agentID = agentID
         self.definition = definition
@@ -70,26 +50,6 @@ public struct PromptContext: Sendable {
         self.conversationThread = conversationThread
         self.contextManifest = contextManifest
         self.instructions = instructions
-        self.measurement = PromptMeasurement(
-            effectiveContextWindow: effectiveContextWindow,
-            projectedTokenCount: projectedTokenCount,
-            tokenCounting: tokenCounting
-        )
-    }
-
-    public func withMeasurement(_ measurement: PromptMeasurement) -> PromptContext {
-        PromptContext(
-            agentID: agentID,
-            definition: definition,
-            workingMemory: workingMemory,
-            contextSummary: contextSummary,
-            conversationThread: conversationThread,
-            contextManifest: contextManifest,
-            instructions: instructions,
-            effectiveContextWindow: measurement.effectiveContextWindow,
-            projectedTokenCount: measurement.projectedTokenCount,
-            tokenCounting: measurement.tokenCounting
-        )
     }
 }
 
@@ -120,11 +80,15 @@ public let assembleStandardPrompt: PromptAssembler = { context in
 
 // MARK: - Chat context
 
-private func buildChatPrefix(context: PromptContext) -> [LLMMessage] {
+private func buildChatPrefix(
+    context: PromptContext
+) -> [LLMMessage] {
     var messages: [LLMMessage] = []
 
-    messages.append(LLMMessage(role: .system, content: context.definition.behavior.systemPrompt))
-    appendPersona(from: context.definition, to: &messages)
+    messages.append(
+        LLMMessage(role: .system, content: context.definition.behavior.systemPrompt)
+    )
+    appendPersona(context.definition.persona, to: &messages)
     appendContextSummary(from: context, to: &messages)
     appendInstructions(context.instructions.interactive, to: &messages)
 
@@ -137,11 +101,15 @@ private func buildChatPrefix(context: PromptContext) -> [LLMMessage] {
 
 // MARK: - Task context (context-manifest based)
 
-private func buildContextPrefix(context: PromptContext) -> [LLMMessage] {
+private func buildContextPrefix(
+    context: PromptContext
+) -> [LLMMessage] {
     var messages: [LLMMessage] = []
 
-    messages.append(LLMMessage(role: .system, content: context.definition.behavior.systemPrompt))
-    appendPersona(from: context.definition, to: &messages)
+    messages.append(
+        LLMMessage(role: .system, content: context.definition.behavior.systemPrompt)
+    )
+    appendPersona(context.definition.persona, to: &messages)
     appendContextSummary(from: context, to: &messages)
 
     // The runtime renders the context manifest generically. Product-specific
@@ -174,10 +142,10 @@ private func appendInstructions(_ instructions: String?, to messages: inout [LLM
 }
 
 private func appendPersona(
-    from definition: AgentDefinition,
+    _ persona: AgentPersona?,
     to messages: inout [LLMMessage]
 ) {
-    guard let persona = definition.persona else { return }
+    guard let persona else { return }
 
     var identity: [String] = ["Private identity:"]
     if let displayName = persona.displayName, !displayName.isEmpty {
@@ -225,6 +193,13 @@ private func modelMessage(from msg: ChatMessage, context: PromptContext) -> LLMM
         return LLMMessage(
             role: .assistant,
             content: "",
+            toolCalls: calls.map { LLMToolCall($0) }
+        )
+    case .assistantToolCall(let content, let thinking, let calls, _):
+        return LLMMessage(
+            role: .assistant,
+            content: content,
+            thinking: thinking,
             toolCalls: calls.map { LLMToolCall($0) }
         )
     case .toolResult(let id, let content, _):

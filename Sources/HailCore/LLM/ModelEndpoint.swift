@@ -104,7 +104,7 @@ public enum ModelContextOwnership: Sendable, Equatable {
 /// concern in the reasoning loop.
 public enum ModelRequestPurpose: Sendable, Equatable {
     case generation
-    case compaction
+    case compaction(maxOutputTokens: Int)
 }
 
 /// Exact-token-counting capability of a model endpoint. Unsupported counting

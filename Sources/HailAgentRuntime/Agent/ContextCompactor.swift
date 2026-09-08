@@ -40,12 +40,58 @@ public struct CompactionBudget: Sendable, Equatable {
     public init(contextWindow: Int) throws(AgentRuntimeError) {
         guard contextWindow > 0 else {
             throw .configurationError(
-                "Context compaction requires a positive context window, got (contextWindow)."
+                "Context compaction requires a positive context window, got \(contextWindow)."
             )
         }
         self.contextWindow = contextWindow
     }
+
+    /// Resolves the maximum summary size from context capacity. The policy
+    /// grows in steps so larger contexts get more room without turning the
+    /// summary into another full conversation.
+    public func outputReserve(maximum: Int) -> Int {
+        let target: Int
+        switch contextWindow {
+        case ..<8_192:
+            target = 2_048
+        case ..<65_536:
+            target = 4_096
+        default:
+            target = 8_192
+        }
+        return min(maximum, target, max(1, contextWindow - 1))
+    }
 }
+
+/// The exact input and output allowance for one summarization request.
+public struct CompactionSummaryRequest: Sendable {
+    public let messages: [LLMMessage]
+    public let maxOutputTokens: Int
+
+    public init(messages: [LLMMessage], maxOutputTokens: Int) {
+        self.messages = messages
+        self.maxOutputTokens = maxOutputTokens
+    }
+}
+
+/// The size of one assembled request as observed by the runtime or estimated
+/// by a compactor. This is request data, not agent context.
+public struct RequestMeasurement: Sendable, Equatable {
+    public let tokenCount: Int
+    public let source: ModelMeasurementSource
+
+    public init(tokenCount: Int, source: ModelMeasurementSource) {
+        self.tokenCount = max(0, tokenCount)
+        self.source = source
+    }
+}
+
+/// Measures a candidate request. Compaction uses this for candidate cuts and
+/// summary chunks; the initial request measurement is passed separately so it
+/// is not recomputed or hidden inside the agent context.
+public typealias RequestMeasurer = @Sendable (
+    PreparedRequest
+) async throws(AgentRuntimeError) -> RequestMeasurement
 
 /// The exact sections of one stateless model request. Keeping these sections
 /// explicit lets a compactor replace only the conversation suffix without
@@ -90,18 +136,6 @@ public struct PreparedRequest: Sendable {
         prefix + conversation.map(\.message) + suffix
     }
 
-    /// Returns a request with all rendered conversation entries whose source
-    /// messages occur after the archived semantic prefix.
-    public func retainingConversation(after sourceIndex: Int) -> PreparedRequest {
-        PreparedRequest(
-            prefix: prefix,
-            conversation: conversation.filter { $0.sourceIndex >= sourceIndex },
-            suffix: suffix,
-            tools: tools,
-            input: input
-        )
-    }
-
     /// Adds request-local messages and tool schemas without changing the
     /// policy-owned prefix or conversation mapping.
     public func appending(
@@ -128,24 +162,25 @@ public struct PreparedRequest: Sendable {
     }
 
     /// Rebuilds rich input for a candidate whose semantic conversation has
-    /// been trimmed by a compactor. Live artifact outputs are retained only
-    /// when their corresponding tool messages remain in the candidate.
+    /// been trimmed by a compactor. This method is called on the source
+    /// request, so it can distinguish archived tool results from live outputs
+    /// that have not entered the durable conversation yet.
     public func input(for messages: [LLMMessage]) -> ModelInput {
         guard let input else { return ModelInput(messages: messages) }
 
-        var candidateMessages = messages
-        let existingToolCallIDs = Set(
-            candidateMessages.compactMap { message in
+        // A live tool output can exist in `input` before its semantic result
+        // has reached the durable conversation thread. Keep those entries in
+        // the request, but do not resurrect an output whose tool-result
+        // message was deliberately archived from this request.
+        let representedToolResultIDs = Set(
+            self.messages.compactMap { message in
                 message.role == .tool ? message.toolCallID : nil
             }
         )
-        for message in input.richOutputMessages
-        where
-            !existingToolCallIDs.contains(message.toolCallID ?? "")
-        {
-            candidateMessages.append(message)
+        let liveOutputs = input.richOutputMessages.filter { message in
+            !representedToolResultIDs.contains(message.toolCallID ?? "")
         }
-        return input.rebased(on: candidateMessages)
+        return input.rebased(on: messages + liveOutputs)
     }
 }
 
@@ -167,44 +202,43 @@ public struct PreparedRequest: Sendable {
 /// endpoint; hosts wanting a different (cheaper) summarizer model implement
 /// this protocol themselves or wrap the injected closure.
 public protocol ContextCompactor: Sendable {
-    /// Return `.unchanged` when the context fits the budget and no compaction is due.
-    /// `request` is the exact request shape that would be sent, with the
-    /// conversation section carrying source indices back to
+    /// Gives the compactor an opportunity to recover from a provider-reported
+    /// overflow. `request` is the exact request shape that would be sent, with
+    /// the conversation section carrying source indices back to
     /// `PromptContext.conversationThread`. A compactor must preserve the
     /// prefix and suffix while replacing only that conversation section.
     func compact(
         context: PromptContext,
         request: PreparedRequest,
         budget: CompactionBudget,
-        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
-    ) async throws(AgentRuntimeError) -> CompactionDecision
-
-    /// Gives the compactor an opportunity to recover from a provider-reported
-    /// overflow. Existing compactors get the ordinary threshold behavior by
-    /// default; compactors that can make progress after an actual overflow can
-    /// implement the trigger-aware overload.
-    func compact(
-        context: PromptContext,
-        request: PreparedRequest,
-        budget: CompactionBudget,
-        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String,
+        measurement: RequestMeasurement?,
+        measure: RequestMeasurer?,
+        assemble: PromptAssembler,
+        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String,
         trigger: ContextCompactionTrigger
     ) async throws(AgentRuntimeError) -> CompactionDecision
 }
 
 extension ContextCompactor {
+    /// The ordinary call site does not need to know about endpoint-specific
+    /// token counters or an overflow trigger. The runtime uses the full
+    /// request-aware operation above; this helper keeps direct policy tests and
+    /// simple hosts small.
     public func compact(
         context: PromptContext,
         request: PreparedRequest,
         budget: CompactionBudget,
-        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String,
-        trigger: ContextCompactionTrigger
+        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String
     ) async throws(AgentRuntimeError) -> CompactionDecision {
         try await compact(
             context: context,
             request: request,
             budget: budget,
-            summarize: summarize
+            measurement: nil,
+            measure: nil,
+            assemble: assembleStandardPrompt,
+            summarize: summarize,
+            trigger: .threshold
         )
     }
 }

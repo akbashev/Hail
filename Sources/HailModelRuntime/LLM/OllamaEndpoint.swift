@@ -30,7 +30,9 @@ public struct OllamaEndpoint: ModelEndpoint {
 
     private let temperature: Double
     private let numContext: Int?
-    private let compactionMaxOutputTokens: Int
+    /// Ollama's `think` switch for reasoning-capable models. `nil` leaves the
+    /// model's default untouched; `false` requests non-thinking generation.
+    private let think: Bool?
     private let transport: OllamaTransport
 
     public init(
@@ -38,8 +40,8 @@ public struct OllamaEndpoint: ModelEndpoint {
         baseURL: URL,
         temperature: Double,
         numContext: Int? = nil,
+        think: Bool? = nil,
         requestTimeout: TimeInterval = 3_600,
-        compactionMaxOutputTokens: Int = 512,
         countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
         countInputTokens: (@Sendable (ModelInput, [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil
     ) {
@@ -48,7 +50,7 @@ public struct OllamaEndpoint: ModelEndpoint {
             baseURL: baseURL,
             temperature: temperature,
             numContext: numContext,
-            compactionMaxOutputTokens: compactionMaxOutputTokens,
+            think: think,
             countTokens: countTokens,
             countInputTokens: countInputTokens,
             transport: Self.makeTransport(
@@ -63,7 +65,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         baseURL: URL,
         temperature: Double,
         numContext: Int? = nil,
-        compactionMaxOutputTokens: Int = 512,
+        think: Bool? = nil,
         countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
         countInputTokens: (@Sendable (ModelInput, [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
         transport: @escaping OllamaTransport
@@ -71,7 +73,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         self.model = model
         self.temperature = temperature
         self.numContext = numContext
-        self.compactionMaxOutputTokens = max(1, compactionMaxOutputTokens)
+        self.think = think
         self.transport = transport
         self.effectiveContextWindow = numContext
         if let countInputTokens {
@@ -227,7 +229,8 @@ public struct OllamaEndpoint: ModelEndpoint {
                         tools: tools ?? [],
                         temperature: temperature,
                         numContext: numContext,
-                        numPredict: purpose == .compaction ? compactionMaxOutputTokens : nil
+                        numPredict: Self.compactionOutputLimit(for: purpose),
+                        think: think
                     )
                     let response = try await transport(body)
                     guard (200..<300).contains(response.statusCode) else {
@@ -422,13 +425,21 @@ public struct OllamaEndpoint: ModelEndpoint {
         }
     }
 
+    private static func compactionOutputLimit(
+        for purpose: ModelRequestPurpose
+    ) -> Int? {
+        guard case .compaction(let maxOutputTokens) = purpose else { return nil }
+        return max(1, maxOutputTokens)
+    }
+
     private static func requestBody(
         model: String,
         input: ModelInput,
         tools: [LLMToolSchema],
         temperature: Double,
         numContext: Int?,
-        numPredict: Int?
+        numPredict: Int?,
+        think: Bool?
     ) throws -> Data {
         let request = ChatRequest(
             model: model,
@@ -439,9 +450,16 @@ public struct OllamaEndpoint: ModelEndpoint {
                 numContext: numContext,
                 numPredict: numPredict
             ),
-            stream: true
+            stream: true,
+            think: think
         )
-        return try JSONEncoder().encode(request)
+        let encoder = JSONEncoder()
+        // Tool schemas contain dictionaries for object properties. Stable
+        // JSON is part of the provider request here: Ollama's prompt cache
+        // sees the rendered tool definition, so dictionary iteration order
+        // must not invalidate an otherwise identical prefix.
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(request)
     }
 
     private static func decodePlainText<T: AgentOutput>(_ text: String, as type: T.Type) throws -> T {
@@ -478,6 +496,7 @@ private struct ChatRequest: Encodable, Sendable {
     let tools: [RequestTool]?
     let options: RequestOptions
     let stream: Bool
+    let think: Bool?
 }
 
 private struct RequestMessage: Encodable, Sendable {

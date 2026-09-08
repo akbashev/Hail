@@ -258,6 +258,56 @@ struct ModelRouteTests {
         }
     }
 
+    @Test("Ollama maps the declared no-reasoning level to its think switch")
+    func ollamaAcceptsDeclaredNoReasoningLevel() async throws {
+        let model = try AgentModelReference("ollama/qwen3:8b")
+        let router = ModelRouter(
+            configuration: try ModelRouterConfiguration(
+                temperature: 0.7,
+                baseURLs: [.ollama: URL(string: "http://localhost:11434")!],
+                reasoningCapabilities: [
+                    model: ModelReasoningCapabilities(levels: [
+                        ModelReasoningLevel(effort: .none, encoding: .disabled)
+                    ])
+                ]
+            )
+        )
+
+        let endpoint = try await router.endpoint(
+            for: model.rawValue,
+            agentID: "memory-extractor",
+            workspace: AgentWorkspace(rootPath: "/tmp"),
+            reasoningEffort: ReasoningEffort.none
+        )
+        #expect(endpoint is OllamaEndpoint)
+    }
+
+    @Test("Ollama rejects graded effort instead of approximating it")
+    func ollamaRejectsGradedEffort() async throws {
+        let model = try AgentModelReference("ollama/qwen3:8b")
+        let router = ModelRouter(
+            configuration: try ModelRouterConfiguration(
+                temperature: 0.7,
+                baseURLs: [.ollama: URL(string: "http://localhost:11434")!]
+            )
+        )
+
+        await #expect(
+            throws: ModelRouterError.unsupportedReasoningEffort(
+                provider: .ollama,
+                model: "qwen3:8b",
+                effort: .high
+            )
+        ) {
+            try await router.endpoint(
+                for: model.rawValue,
+                agentID: "coder-main",
+                workspace: AgentWorkspace(rootPath: "/tmp"),
+                reasoningEffort: .high
+            )
+        }
+    }
+
     @Test("reasoning capabilities reject duplicate effort levels")
     func duplicateReasoningEffortThrows() throws {
         let model = try AgentModelReference("gemini/gemini-2.5-pro")

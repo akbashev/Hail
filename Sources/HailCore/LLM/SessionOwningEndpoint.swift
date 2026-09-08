@@ -56,8 +56,8 @@ public struct SessionIdentity: RawRepresentable, Codable, Sendable, Hashable,
 /// serialized processing task — if turns are ever parallelized, warm deltas
 /// would corrupt session context and this design must be revisited.
 public struct TurnDelta: Sendable {
-    /// New content for this turn only: per-turn instructions followed by the
-    /// new input message. Never contains thread history.
+    /// New content for this turn only: request-local reference data followed
+    /// by the current input message. Never contains thread history.
     public var messages: [LLMMessage]
 
     /// The agent's current working memory. The session re-sends it only when

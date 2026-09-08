@@ -117,9 +117,10 @@ struct SlidingWindowCompactorTests {
         )
 
         #expect(result.summary == "rolled")
-        // The preferred tail is kept when it fits; the exact cut follows the
-        // serialized request estimate, including prompt framing.
-        #expect(result.archivedCount == 2)
+        // The preferred tail is kept when it fits. Compaction archives the
+        // complete older prefix, rather than stopping after an arbitrary
+        // minimum amount of progress.
+        #expect(result.archivedCount == 3)
     }
 
     @Test("an oversized archived message is chunked for summarization")
@@ -153,22 +154,27 @@ struct SlidingWindowCompactorTests {
     func priorSummaryFoldedIn() async throws {
         let compactor = makeCompactor(keepRecent: 1)
         let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let box = Box<[LLMMessage]>()
+        let calls = Box<[[LLMMessage]]>()
 
         let ctx = try context(thread: thread, summary: "v1")
         _ = try await compactor.compact(
             context: ctx,
             request: preparedRequest(for: ctx),
             budget: try budget()
-        ) { messages in
-            box.value = messages
+        ) { request in
+            calls.value = (calls.value ?? []) + [request.messages]
             return "v2"
         }
 
-        let prompt = try #require(box.value)
-        #expect(prompt.count == 2)
-        #expect(prompt[0].role == .system)
-        #expect(prompt[1].content.contains("Summary so far: v1"))
+        let prompts = try #require(calls.value)
+        #expect(!prompts.isEmpty)
+        #expect(
+            prompts.contains {
+                $0.contains { message in
+                    message.content.contains("Summary so far: v1")
+                }
+            }
+        )
     }
 
     @Test("the cut never splits a tool call from its result")
@@ -195,9 +201,11 @@ struct SlidingWindowCompactorTests {
             ) { _ in "rolled" }
         )
 
-        // The cut backs off before the trailing toolCall, so its result stays
-        // together with the call in the retained suffix.
-        #expect(result.archivedCount == 3)
+        // The preferred suffix contains the complete tool interaction, but it
+        // is still too large for the retained request budget. The fallback
+        // therefore archives that complete interaction as one unit and keeps
+        // only the final semantic message.
+        #expect(result.archivedCount == 5)
     }
 
     @Test("the cut keeps every result of a parallel tool call with its call")
@@ -223,9 +231,10 @@ struct SlidingWindowCompactorTests {
             ) { _ in "rolled" }
         )
 
-        // The naive cut is after the first result. Both results must remain
-        // with the shared tool-call message, so the cut moves before it.
-        #expect(result.archivedCount == 2)
+        // The preferred suffix contains the complete parallel interaction,
+        // but the rebuilt request does not fit. The fallback archives the
+        // whole call/results group; it never leaves either result orphaned.
+        #expect(result.archivedCount == 5)
     }
 
     @Test("the message opening the in-flight turn is never archived")
@@ -241,9 +250,9 @@ struct SlidingWindowCompactorTests {
                 budget: try budget()
             ) { _ in "rolled" }
         )
-        // The newest message is protected, while the budget determines how
-        // much additional recent history can remain.
-        #expect(result.archivedCount == 3)
+        // The newest message is protected. The rebuilt request fits only
+        // after the older five-message prefix has been summarized.
+        #expect(result.archivedCount == 5)
     }
 
     @Test("nothing to archive when the whole thread fits the kept tail")
@@ -268,29 +277,42 @@ struct SlidingWindowCompactorTests {
     func endpointCounterFitsCandidates() async throws {
         let compactor = makeCompactor(keepRecent: 1, outputReserve: 800)
         let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        var ctx = try context(thread: thread)
-        ctx = ctx.withMeasurement(
-            PromptMeasurement(
-                projectedTokenCount: 500,
-                tokenCounting: .available { messages, _ in
-                    // Deliberately disagree with the character estimator: the exact
-                    // tokenizer says each rendered message costs 40 tokens.
-                    messages.count * 40
-                }))
+        let ctx = try context(thread: thread)
+        let measuredCandidates = Box<[[LLMMessage]]>()
 
         let request = assembleStandardPrompt(ctx)
         let result = try requireCompaction(
             await compactor.compact(
                 context: ctx,
                 request: request,
-                budget: try budget()
-            ) { _ in "rolled" }
+                budget: try budget(),
+                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
+                measure: { candidate in
+                    measuredCandidates.value =
+                        (measuredCandidates.value ?? []) + [candidate.messages]
+                    // Deliberately disagree with the character estimator: the exact
+                    // tokenizer says each rendered message costs 40 tokens.
+                    return RequestMeasurement(
+                        tokenCount: candidate.messages.count * 40,
+                        source: .reported
+                    )
+                },
+                summarize: { _ in "rolled" },
+                trigger: .threshold
+            )
         )
 
         // The task prompt has two stable system messages. With a 200-token
-        // retained target, the exact counter archives the first two thread
-        // messages; the fallback estimator would choose a different cut.
-        #expect(result.archivedCount == 2)
+        // retained target, the exact counter includes the newly inserted
+        // summary and allows only the final thread message to remain.
+        #expect(result.archivedCount == 4)
+        #expect(
+            measuredCandidates.value?.contains { messages in
+                messages.contains {
+                    $0.content.contains("Earlier conversation, summarized: rolled")
+                }
+            } == true
+        )
     }
 
     @Test("assistant narration stays attached to the following tool group")
@@ -305,24 +327,29 @@ struct SlidingWindowCompactorTests {
             text(String(repeating: "b", count: 40), 4),
             text(String(repeating: "c", count: 40), 5),
         ]
-        var ctx = try context(thread: thread)
-        ctx = ctx.withMeasurement(
-            PromptMeasurement(
-                projectedTokenCount: 500,
-                tokenCounting: .available { messages, _ in messages.count * 40 }
-            ))
+        let ctx = try context(thread: thread)
 
         let request = assembleStandardPrompt(ctx)
         let result = try requireCompaction(
             await compactor.compact(
                 context: ctx,
                 request: request,
-                budget: try budget()
-            ) { _ in "rolled" }
+                budget: try budget(),
+                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
+                measure: { candidate in
+                    RequestMeasurement(
+                        tokenCount: candidate.messages.count * 40,
+                        source: .reported
+                    )
+                },
+                summarize: { _ in "rolled" },
+                trigger: .threshold
+            )
         )
 
-        // A cut after the narration would orphan the tool call. The next
-        // valid boundary is after the complete narration/call/result group.
+        // A cut after the narration would orphan the tool call. The preferred
+        // suffix is semantically valid, but the rebuilt request is too large,
+        // so the next valid boundary archives the complete group.
         #expect(result.archivedCount == 4)
     }
 
@@ -340,26 +367,61 @@ struct SlidingWindowCompactorTests {
             .toolResult(id: "repeat", content: "second", timestamp: Date(timeIntervalSince1970: 5)),
             text("tail", 6),
         ]
-        var ctx = try context(thread: thread)
-        ctx = ctx.withMeasurement(
-            PromptMeasurement(
-                projectedTokenCount: 900,
-                tokenCounting: .available { messages, _ in messages.count * 100 }
-            ))
+        let ctx = try context(thread: thread)
         let request = assembleStandardPrompt(ctx)
 
         let result = try requireCompaction(
             await compactor.compact(
                 context: ctx,
                 request: request,
-                budget: try budget()
-            ) { _ in "rolled" }
+                budget: try budget(),
+                measurement: RequestMeasurement(tokenCount: 900, source: .reported),
+                measure: { candidate in
+                    RequestMeasurement(
+                        tokenCount: candidate.messages.count * 100,
+                        source: .reported
+                    )
+                },
+                summarize: { _ in "rolled" },
+                trigger: .threshold
+            )
         )
 
         // The first call/result pair is archivable independently. A global
-        // ID-based range would incorrectly merge both rounds and force the
-        // cut all the way past the second result.
-        #expect(result.archivedCount == 3)
+        // ID-based range would incorrectly merge both rounds. The final
+        // request budget nevertheless requires archiving both complete
+        // interactions while retaining the final text message.
+        #expect(result.archivedCount == 6)
+    }
+
+    @Test("a latest message that cannot fit produces no false compaction")
+    func oversizedLatestMessageFailsForcedRecovery() async throws {
+        let compactor = makeCompactor(keepRecent: 1, outputReserve: 850)
+        let thread = [
+            text("old", 0),
+            text(String(repeating: "x", count: 12_000), 1),
+        ]
+        let ctx = try context(thread: thread)
+
+        await #expect(throws: AgentRuntimeError.contextLengthExceeded) {
+            try await compactor.compact(
+                context: ctx,
+                request: preparedRequest(for: ctx),
+                budget: try budget(),
+                measurement: RequestMeasurement(tokenCount: 1_000, source: .reported),
+                measure: { candidate in
+                    let hasOversizedTail = candidate.messages.contains {
+                        $0.content.count > 10_000
+                    }
+                    return RequestMeasurement(
+                        tokenCount: hasOversizedTail ? 1_000 : 1,
+                        source: .reported
+                    )
+                },
+                summarize: { _ in "rolled" },
+                trigger: .contextLengthExceeded
+            )
+        }
     }
 }
 

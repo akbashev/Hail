@@ -317,6 +317,33 @@ public distributed actor Agent: AsyncSequence {
         )
     }
 
+    /// A consistent, read-only diagnostics projection for context commands and
+    /// operator dashboards. It is assembled inside the event-sourced actor so
+    /// all values describe the same state revision.
+    public distributed var contextSnapshot: AgentContextSnapshot {
+        let activeTurnID = state.activeTurn?.id
+        let activeRequest = activeTurnID.flatMap { turnID in
+            state.modelRequests.last { record in
+                guard record.turnID == turnID else { return false }
+                if case .running = record.outcome { return true }
+                return false
+            }
+        }
+        return AgentContextSnapshot(
+            agentID: state.agentID,
+            phase: state.phase,
+            turnID: activeTurnID,
+            activeModelRequestID: activeRequest?.id,
+            currentToolName: state.currentToolName,
+            turnStartedAt: state.activeTurn?.startedAt,
+            contextUsage: state.latestContextUsage,
+            usageSummary: state.usageSummary,
+            recentModelRequestCount: state.modelRequests.count,
+            conversationMessageCount: state.conversationThread.count,
+            hasContextSummary: state.contextSummary != nil
+        )
+    }
+
     // MARK: - Distributed API
 
     /// Runs one streaming turn for a typed input. Live updates and the final
@@ -592,6 +619,9 @@ public distributed actor Agent: AsyncSequence {
             context: { () async throws(AgentRuntimeError) -> TurnContext in
                 try await self.buildTurnContext()
             },
+            rebuildContext: { (snapshot: TurnContext) async throws(AgentRuntimeError) -> TurnContext in
+                try await self.buildTurnContext(reusing: snapshot)
+            },
             endpoint: { () async throws(AgentRuntimeError) -> any ModelEndpoint in
                 let resumeSession = await self.modelSessionResume
                 // Creation authority is the agent's default on purpose — it
@@ -621,41 +651,76 @@ public distributed actor Agent: AsyncSequence {
             },
             recordActivity: { await self.recordActivity($0) },
             compactor: actorSystem.agentRuntime.contextCompactor,
+            assemblePrompt: actorSystem.agentRuntime.assemblePrompt,
             clock: ContinuousClock(),
             maxToolRounds: actorSystem.agentRuntime.maxToolRounds
         )
     }
 
-    private func buildTurnContext() async throws(AgentRuntimeError) -> TurnContext {
+    private func buildTurnContext(
+        reusing snapshot: TurnContext? = nil
+    ) async throws(AgentRuntimeError) -> TurnContext {
         let runtime = actorSystem.agentRuntime
         let assemblePrompt = runtime.assemblePrompt
-        let manifest: ContextManifest
-        do {
-            manifest =
-                try await runtime.contextProvider?.manifest(state.agentID, actorSystem)
-                ?? ContextManifest(items: [])
-        } catch {
-            throw mapInfrastructureDependencyError(error, operation: "Could not build model context")
+        let agentID: AgentID
+        let definition: AgentDefinition
+        let workingMemory: [String]
+        let contextManifest: ContextManifest
+        let instructions: PromptAssemblyInstructions
+        let sessionIdentity: SessionIdentity
+        let modelSessionID: SessionID?
+        let modelSessionIdentity: SessionIdentity?
+
+        if let snapshot {
+            // A turn owns these inputs for its entire lifetime. Only the
+            // journal-derived conversation and summary below are refreshed.
+            agentID = snapshot.promptContext.agentID
+            definition = snapshot.promptContext.definition
+            workingMemory = snapshot.workingMemory
+            contextManifest = snapshot.promptContext.contextManifest
+            instructions = snapshot.promptContext.instructions
+            sessionIdentity = snapshot.sessionIdentity
+            modelSessionID = snapshot.modelSessionID
+            modelSessionIdentity = snapshot.modelSessionIdentity
+        } else {
+            do {
+                contextManifest =
+                    try await runtime.contextProvider?.manifest(state.agentID, actorSystem)
+                    ?? ContextManifest(items: [])
+            } catch {
+                throw mapInfrastructureDependencyError(
+                    error,
+                    operation: "Could not build model context"
+                )
+            }
+            agentID = state.agentID
+            definition = self.definition
+            workingMemory = self.workingMemory
+            instructions = runtime.promptInstructions
+            sessionIdentity = AgentSessionIdentity.fingerprint(
+                model: definition.behavior.model.rawValue,
+                systemPrompt: definition.behavior.systemPrompt
+            )
+            modelSessionID = state.modelSessionID
+            modelSessionIdentity = state.modelSessionIdentity
         }
+
         let promptContext = PromptContext(
-            agentID: state.agentID,
+            agentID: agentID,
             definition: definition,
             workingMemory: workingMemory,
             contextSummary: state.contextSummary,
             conversationThread: conversationThread,
-            contextManifest: manifest,
-            instructions: runtime.promptInstructions
+            contextManifest: contextManifest,
+            instructions: instructions
         )
         return TurnContext(
             preparedRequest: assemblePrompt(promptContext),
             promptContext: promptContext,
             workingMemory: workingMemory,
-            sessionIdentity: AgentSessionIdentity.fingerprint(
-                model: definition.behavior.model.rawValue,
-                systemPrompt: definition.behavior.systemPrompt
-            ),
-            modelSessionID: state.modelSessionID,
-            modelSessionIdentity: state.modelSessionIdentity
+            sessionIdentity: sessionIdentity,
+            modelSessionID: modelSessionID,
+            modelSessionIdentity: modelSessionIdentity
         )
     }
 

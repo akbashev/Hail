@@ -17,6 +17,15 @@ public enum AgentEvent: Codable, Sendable {
     /// this is a single semantic message that must survive context rebuilds
     /// after tool execution and compaction.
     case assistantText(content: String, at: Date)
+    /// The exact assistant message sent before executing a tool round. Keeping
+    /// narration, provider reasoning, and calls together matters for model
+    /// protocols that require reasoning to accompany tool calls.
+    case assistantToolRound(
+        content: String,
+        thinking: String?,
+        calls: [ToolCall],
+        at: Date
+    )
     case contextSet(contextID: AgentContextID)
     case toolInvoked(ToolCall, at: Date?)
     case toolResult(ToolResult, at: Date?)
@@ -70,6 +79,12 @@ public enum ChatMessage: Codable, Sendable, Equatable {
     case text(sender: String, content: String, timestamp: Date)
     case response(sender: String, payload: Data, timestamp: Date)
     case toolCall(calls: [ToolCall], timestamp: Date)
+    case assistantToolCall(
+        content: String,
+        thinking: String?,
+        calls: [ToolCall],
+        timestamp: Date
+    )
     case toolResult(id: String, content: String, timestamp: Date)
     /// A turn that failed (model error, rate limit, ...). Journaled so the
     /// failure stays visible in the transcript after a reload; prompt
@@ -89,6 +104,7 @@ public enum ChatMessage: Codable, Sendable, Equatable {
     public var timestamp: Date {
         switch self {
         case .text(_, _, let timestamp), .response(_, _, let timestamp), .toolCall(_, let timestamp),
+            .assistantToolCall(_, _, _, let timestamp),
             .toolResult(_, _, let timestamp), .failure(_, let timestamp),
             .decisionRequest(_, _, _, let timestamp), .decisionResolved(_, _, _, _, let timestamp):
             return timestamp

@@ -110,6 +110,10 @@ public struct TokenEstimator: Sendable {
             return payload.count
         case .toolCall(let calls, _):
             return calls.reduce(0) { $0 + $1.name.count + $1.arguments.json.count }
+        case .assistantToolCall(let content, let thinking, let calls, _):
+            return content.count
+                + (thinking?.count ?? 0)
+                + calls.reduce(0) { $0 + $1.name.count + $1.arguments.json.count }
         case .toolResult(_, let content, _):
             return content.count
         case .failure(let error, _):

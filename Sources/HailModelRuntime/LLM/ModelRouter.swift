@@ -357,16 +357,28 @@ public actor ModelRouter {
                     String(describing: error)
                 )
             }
-            try Self.rejectReasoningEffort(
-                reasoning,
-                provider: provider,
-                model: modelName
-            )
+            // Ollama's control surface is the boolean `think` switch. Only an
+            // explicit "no reasoning" selection maps onto it; graded effort
+            // levels stay unsupported rather than being silently approximated.
+            let think: Bool?
+            switch reasoning?.encoding {
+            case .none:
+                think = nil
+            case .disabled:
+                think = false
+            case .raw, .dynamic, .tokenBudget:
+                throw ModelRouterError.unsupportedReasoningEffort(
+                    provider: provider,
+                    model: modelName,
+                    effort: reasoning?.effort ?? .none
+                )
+            }
             return OllamaEndpoint(
                 model: modelName,
                 baseURL: baseURL,
                 temperature: configuration.temperature,
-                numContext: numContext
+                numContext: numContext,
+                think: think
             )
 
         case .system:

@@ -34,6 +34,12 @@ struct CompactionFoldTests {
         state.apply(.conversationCompacted(archivedCount: 3, summary: "first three messages"), maxMemoryFragments: 10)
         #expect(state.contextSummary == "first three messages")
         #expect(state.conversationThread.count == 2)
+        #expect(
+            state.conversationThread.compactMap { message in
+                guard case .text(_, let content, _) = message else { return nil }
+                return content
+            } == ["m3", "m4"]
+        )
     }
 
     @Test("assistant narration accompanying a tool call survives replay")
@@ -58,6 +64,12 @@ struct CompactionFoldTests {
         state.apply(.conversationCompacted(archivedCount: 1, summary: "v2 folds v1"), maxMemoryFragments: 10)
         #expect(state.contextSummary == "v2 folds v1")
         #expect(state.conversationThread.count == 1)
+        #expect(
+            state.conversationThread.compactMap { message in
+                guard case .text(_, let content, _) = message else { return nil }
+                return content
+            } == ["m4"]
+        )
     }
 
     @Test("archivedCount beyond the thread length is ignored")
@@ -119,6 +131,39 @@ struct PromptAssemblySummaryTests {
             messages.contains {
                 $0.role == .system && $0.content.contains("user hates prod on Fridays")
             })
+    }
+
+    @Test("assistant tool rounds replay as one provider message")
+    func assistantToolRoundIsReplayedAsOneMessage() throws {
+        let call = ToolCall(
+            id: "call-now",
+            name: "now",
+            arguments: .empty
+        )
+        let thread: [ChatMessage] = [
+            .assistantToolCall(
+                content: "I’ll check the time.",
+                thinking: "The user asked for the current time.",
+                calls: [call],
+                timestamp: Date(timeIntervalSince1970: 1)
+            )
+        ]
+
+        let messages = assembleStandardPrompt(
+            try context(summary: nil, thread: thread)
+        ).messages
+
+        guard let replay = messages.last else {
+            Issue.record("Expected the assistant tool round in the prompt")
+            return
+        }
+        #expect(replay.role == .assistant)
+        #expect(replay.content == "I’ll check the time.")
+        #expect(replay.thinking == "The user asked for the current time.")
+        #expect(replay.toolCalls?.count == 1)
+        #expect(replay.toolCalls?.first?.id == "call-now")
+        #expect(replay.toolCalls?.first?.function.name == "now")
+        #expect(replay.toolCalls?.first?.function.arguments == "{}")
     }
 
     @Test("no summary, no summary line")
@@ -269,18 +314,32 @@ struct ReasoningLoopCompactionTests {
                 PromptContext,
                 PreparedRequest,
                 CompactionBudget,
-                @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
+                @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String
             ) async throws(AgentRuntimeError) -> CompactionDecision
 
         let body: Body
+        let recordMeasurement: (@Sendable (RequestMeasurement?) async -> Void)?
+
+        init(
+            body: @escaping Body,
+            recordMeasurement: (@Sendable (RequestMeasurement?) async -> Void)? = nil
+        ) {
+            self.body = body
+            self.recordMeasurement = recordMeasurement
+        }
 
         func compact(
             context: PromptContext,
             request: PreparedRequest,
             budget: CompactionBudget,
-            summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
+            measurement: RequestMeasurement?,
+            measure: RequestMeasurer?,
+            assemble: PromptAssembler,
+            summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String,
+            trigger: ContextCompactionTrigger
         ) async throws(AgentRuntimeError) -> CompactionDecision {
-            try await body(context, request, budget, summarize)
+            await recordMeasurement?(measurement)
+            return try await body(context, request, budget, summarize)
         }
     }
 
@@ -290,6 +349,9 @@ struct ReasoningLoopCompactionTests {
         var compactorCalls = 0
         var budgetedMessageCount = 0
         var budgetedToolCount = 0
+        var measuredTokenCount: Int?
+        var rebuiltManifestItems: [ContextItem]?
+        var rebuiltInstructions: PromptAssemblyInstructions?
 
         func record(_ event: AgentEvent) { events.append(event) }
         func nextContext() -> Int {
@@ -301,11 +363,22 @@ struct ReasoningLoopCompactionTests {
             budgetedMessageCount = messages.count
             budgetedToolCount = tools.count
         }
+        func measured(_ measurement: RequestMeasurement?) {
+            measuredTokenCount = measurement?.tokenCount
+        }
+        func recordRebuildSnapshot(_ context: TurnContext) {
+            rebuiltManifestItems = context.promptContext.contextManifest.items
+            rebuiltInstructions = context.promptContext.instructions
+        }
     }
 
     // MARK: Helpers
 
-    private func makeContext(thread: [ChatMessage]) throws -> TurnContext {
+    private func makeContext(
+        thread: [ChatMessage],
+        manifest: ContextManifest = ContextManifest(items: []),
+        instructions: PromptAssemblyInstructions = PromptAssemblyInstructions()
+    ) throws -> TurnContext {
         let promptContext = PromptContext(
             agentID: agentID,
             definition: AgentDefinition(
@@ -318,7 +391,8 @@ struct ReasoningLoopCompactionTests {
             ),
             workingMemory: [],
             conversationThread: thread,
-            contextManifest: ContextManifest(items: [])
+            contextManifest: manifest,
+            instructions: instructions
         )
         return TurnContext(
             preparedRequest: PreparedRequest(
@@ -341,10 +415,17 @@ struct ReasoningLoopCompactionTests {
     private func makeLoop(
         recorder: Recorder,
         contexts: [TurnContext],
-        compactor: (any ContextCompactor)?
+        compactor: (any ContextCompactor)?,
+        rebuildContext: (@Sendable (TurnContext) async throws(AgentRuntimeError) -> TurnContext)? = nil
     ) -> ReasoningLoop<ContinuousClock> {
         final class Index: @unchecked Sendable { var value = 0 }
         let index = Index()
+        let rebuild = rebuildContext ?? { (_: TurnContext) async throws(AgentRuntimeError) -> TurnContext in
+            let i = min(index.value, contexts.count - 1)
+            index.value += 1
+            _ = await recorder.nextContext()
+            return contexts[i]
+        }
         return ReasoningLoop<ContinuousClock>(
             agentID: agentID,
             authority: FullAuthority(),
@@ -354,6 +435,7 @@ struct ReasoningLoopCompactionTests {
                 _ = await recorder.nextContext()
                 return contexts[i]
             },
+            rebuildContext: rebuild,
             endpoint: { FakeEndpoint(response: "rolled summary") },
             tools: { _ in ToolRegistry(authority: FullAuthority()) },
             emit: { await recorder.record($0) },
@@ -372,18 +454,36 @@ struct ReasoningLoopCompactionTests {
         let original = try makeContext(thread: [
             .text(sender: "user", content: "m1", timestamp: Date()),
             .text(sender: "user", content: "m2", timestamp: Date()),
-        ])
-        let rebuilt = try makeContext(thread: [])
+        ], manifest: ContextManifest(items: [.inline(text: "stable context")]), instructions: PromptAssemblyInstructions(interactive: "stable instruction"))
+        let rebuilt = try makeContext(
+            thread: [],
+            manifest: original.promptContext.contextManifest,
+            instructions: original.promptContext.instructions
+        )
         let body: FakeCompactor.Body = { _, _, _, summarize in
             await recorder.compacted()
             // The runtime's summarize reduces the endpoint stream to text.
-            let summary = try await summarize([LLMMessage(role: .user, content: "summarize me")])
+            let summary = try await summarize(
+                CompactionSummaryRequest(
+                    messages: [LLMMessage(role: .user, content: "summarize me")],
+                    maxOutputTokens: 4_096
+                )
+            )
             return .compacted(
                 ConversationCompaction(summary: summary, archivedCount: 2)
             )
         }
         let compactor = FakeCompactor(body: body)
-        let loop = makeLoop(recorder: recorder, contexts: [rebuilt], compactor: compactor)
+        let loop = makeLoop(
+            recorder: recorder,
+            contexts: [rebuilt],
+            compactor: compactor,
+            rebuildContext: { snapshot in
+                await recorder.recordRebuildSnapshot(snapshot)
+                _ = await recorder.nextContext()
+                return rebuilt
+            }
+        )
 
         let result = try await loop.compactIfNeeded(
             turnContext: original, endpoint: FakeEndpoint(response: "rolled summary"))
@@ -414,6 +514,8 @@ struct ReasoningLoopCompactionTests {
         // The loop re-built the context after journaling: context() was
         // called exactly once (the rebuild), serving the trimmed context.
         #expect(await recorder.contextCalls == 1)
+        #expect(await recorder.rebuiltManifestItems == original.promptContext.contextManifest.items)
+        #expect(await recorder.rebuiltInstructions == original.promptContext.instructions)
         #expect(result.promptContext.conversationThread.isEmpty)
     }
 
@@ -505,7 +607,12 @@ struct ReasoningLoopCompactionTests {
     func richToolOutputIsBudgeted() async throws {
         let recorder = Recorder()
         let context = try makeContext(thread: [])
-        let compactor = FakeCompactor(body: { _, _, _, _ in .unchanged })
+        let compactor = FakeCompactor(
+            body: { _, _, _, _ in .unchanged },
+            recordMeasurement: { measurement in
+                await recorder.measured(measurement)
+            }
+        )
         let loop = makeLoop(recorder: recorder, contexts: [context], compactor: compactor)
         var input = ModelInput(messages: [])
         input.appendToolOutput(
@@ -519,13 +626,45 @@ struct ReasoningLoopCompactionTests {
             )
         )
 
-        let result = try await loop.compactIfNeeded(
+        _ = try await loop.compactIfNeeded(
             turnContext: context,
             endpoint: RichCountingEndpoint(),
             requestInput: input
         )
 
-        #expect(result.promptContext.measurement.projectedTokenCount == 512)
+        #expect(await recorder.measuredTokenCount == 512)
+    }
+
+    @Test("compaction does not reintroduce archived rich tool output")
+    func archivedRichToolOutputIsDroppedFromCandidateInput() {
+        let toolMessage = LLMMessage(
+            role: .tool,
+            content: "image metadata",
+            toolCallID: "fetch-1"
+        )
+        var input = ModelInput(messages: [])
+        input.appendToolOutput(
+            callID: "fetch-1",
+            name: "fetch",
+            output: .data(
+                ToolData(
+                    body: Data(repeating: 1, count: 2_048),
+                    contentType: "image/jpeg"
+                )
+            )
+        )
+
+        let source = PreparedRequest(
+            prefix: [],
+            conversation: [
+                PreparedRequest.ConversationEntry(sourceIndex: 0, message: toolMessage)
+            ],
+            input: input
+        )
+        let live = PreparedRequest(prefix: [], conversation: [], input: input)
+
+        #expect(source.input(for: []).entries.isEmpty)
+        #expect(live.input(for: []).entries.count == 1)
     }
 
     @Test("a compactor failure propagates instead of sending oversized context")

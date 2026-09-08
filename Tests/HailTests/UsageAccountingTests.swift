@@ -428,6 +428,48 @@ struct UsageAccountingTests {
         #expect(!events.contains { if case .failed = $0 { true } else { false } })
     }
 
+    @Test("Ollama sends the think switch only when configured")
+    func ollamaThinkSwitchReachesRequestBody() async throws {
+        func makeEndpoint(
+            think: Bool?,
+            check: @escaping @Sendable ([String: Any]) -> Void
+        ) -> OllamaEndpoint {
+            OllamaEndpoint(
+                model: "qwen3:8b",
+                baseURL: URL(string: "http://localhost:11434")!,
+                temperature: 0.7,
+                think: think,
+                transport: { body in
+                    let object =
+                        try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+                    check(object)
+                    return OllamaHTTPResponse(
+                        statusCode: 200,
+                        lines: Self.stubLines([
+                            #"{"message":{"role":"assistant","content":"ok"},"done":true}"#
+                        ])
+                    )
+                }
+            )
+        }
+
+        let disabled = makeEndpoint(think: false) { object in
+            #expect(object["think"] as? Bool == false)
+        }
+        for await _ in disabled.stream(
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "hi")]),
+            tools: nil
+        ) {}
+
+        let standard = makeEndpoint(think: nil) { object in
+            #expect(object["think"] == nil)
+        }
+        for await _ in standard.stream(
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "hi")]),
+            tools: nil
+        ) {}
+    }
+
     private func ollamaEndpoint(
         baseURL: String,
         numContext: Int? = nil,

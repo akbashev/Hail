@@ -211,6 +211,17 @@ public struct AgentState: Codable, Sendable {
             conversationThread.append(
                 .text(sender: agentID.rawValue, content: content, timestamp: at)
             )
+        case .assistantToolRound(let content, let thinking, let calls, let at):
+            conversationThread.append(
+                .assistantToolCall(
+                    content: content,
+                    thinking: thinking,
+                    calls: calls,
+                    timestamp: at
+                )
+            )
+            phase = .executingTool
+            currentToolName = calls.first?.name
         case .contextSet:
             // Context is part of the immutable agent identity; no state change.
             break

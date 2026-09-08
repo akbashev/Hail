@@ -1,4 +1,4 @@
-public struct LLMMessage: Codable, Sendable {
+public struct LLMMessage: Codable, Sendable, Equatable {
     public let role: Role
     public let content: String
     /// Provider reasoning that belongs to this assistant message.
@@ -36,7 +36,7 @@ public struct LLMMessage: Codable, Sendable {
 
 }
 
-public struct LLMToolCall: Codable, Sendable {
+public struct LLMToolCall: Codable, Sendable, Equatable {
     public let id: String
     public let type: String
     public let function: FunctionCall
@@ -47,7 +47,7 @@ public struct LLMToolCall: Codable, Sendable {
         self.function = function
     }
 
-    public struct FunctionCall: Codable, Sendable {
+    public struct FunctionCall: Codable, Sendable, Equatable {
         public let name: String
         public let arguments: String
 

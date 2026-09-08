@@ -32,7 +32,7 @@ public actor ToolRegistry: Sendable {
     }
 
     public func allTools() -> [AnyTool] {
-        Array(tools.values)
+        tools.values.sorted { $0.name < $1.name }
     }
 
     public func schemas(forTools toolNames: [String]? = nil) -> [LLMToolSchema] {
@@ -41,8 +41,11 @@ public actor ToolRegistry: Sendable {
             return tools.values
                 .filter { allowed.contains($0.name) }
                 .map { $0.schema }
+                .sorted { $0.function.name < $1.function.name }
         }
-        return tools.values.map { $0.schema }
+        return tools.values
+            .map { $0.schema }
+            .sorted { $0.function.name < $1.function.name }
     }
 
     public func execute(_ toolCalls: [LLMToolCall]) async throws(AgentRuntimeError) -> [ToolResult] {

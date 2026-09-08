@@ -49,33 +49,28 @@ public struct SlidingWindowCompactor: ContextCompactor {
         context: PromptContext,
         request: PreparedRequest,
         budget: CompactionBudget,
-        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
-    ) async throws(AgentRuntimeError) -> CompactionDecision {
-        try await compact(
-            context: context,
-            request: request,
-            budget: budget,
-            summarize: summarize,
-            trigger: .threshold
-        )
-    }
-
-    public func compact(
-        context: PromptContext,
-        request: PreparedRequest,
-        budget: CompactionBudget,
-        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String,
+        measurement: RequestMeasurement? = nil,
+        measure: RequestMeasurer? = nil,
+        assemble: PromptAssembler = assembleStandardPrompt,
+        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String,
         trigger: ContextCompactionTrigger
     ) async throws(AgentRuntimeError) -> CompactionDecision {
         let window = budget.contextWindow
         let thresholdTrigger = Int(Double(window) * threshold)
 
-        let used: Int
-        if let projected = context.measurement.projectedTokenCount {
-            used = projected
+        let requestMeasurement: RequestMeasurement
+        if let measurement {
+            requestMeasurement = measurement
         } else {
-            used = try await measure(context: context, request: request)
+            requestMeasurement = RequestMeasurement(
+                tokenCount: try await estimator.estimate(
+                    messages: request.messages,
+                    tools: request.tools
+                ),
+                source: .estimated
+            )
         }
+        let used = requestMeasurement.tokenCount
         guard trigger == .contextLengthExceeded || used >= thresholdTrigger else { return .unchanged }
 
         let preferredTail = max(keepRecent, 1)
@@ -87,99 +82,66 @@ public struct SlidingWindowCompactor: ContextCompactor {
         }
 
         let hardLimit = max(window, 1)
-        let retainedTarget = max(0, hardLimit - outputReserve - toolResultReserve)
+        let effectiveOutputReserve = budget.outputReserve(maximum: outputReserve)
+        let retainedTarget = max(
+            0,
+            hardLimit - effectiveOutputReserve - toolResultReserve
+        )
         let preferredCuts = Self.validCuts(
             in: context.conversationThread,
             maximum: context.conversationThread.count - preferredTail,
             assistantSender: context.agentID.rawValue
         )
-        let forced = trigger == .contextLengthExceeded
-        var selectedCut = try await selectCut(
-            from: preferredCuts,
-            context: context,
-            request: request,
-            retainedTarget: retainedTarget,
-            requireProgress: forced
+        let fallbackCuts = Self.validCuts(
+            in: context.conversationThread,
+            maximum: context.conversationThread.count - 1,
+            assistantSender: context.agentID.rawValue
+        )
+        let cuts = Self.compactionCuts(
+            preferred: preferredCuts,
+            fallback: fallbackCuts
         )
 
-        // `keepRecent` is a preference, not a hard safety gate. If the
-        // preferred suffix cannot fit, retain the smallest complete suffix
-        // that can, down to one semantic message. This also gives a forced
-        // recovery request a way to make progress when the normal estimate
-        // missed provider-side costs.
-        if selectedCut == nil {
-            let fallbackCuts = Self.validCuts(
-                in: context.conversationThread,
-                maximum: context.conversationThread.count - 1,
-                assistantSender: context.agentID.rawValue
-            )
-            selectedCut = try await selectCut(
-                from: fallbackCuts,
+        for archivedCount in cuts {
+            let archived = Array(context.conversationThread.prefix(archivedCount))
+            let summary = try await summarizeInBoundedChunks(
                 context: context,
-                request: request,
-                retainedTarget: retainedTarget,
-                requireProgress: forced
+                archived: archived,
+                window: hardLimit,
+                outputReserve: effectiveOutputReserve,
+                summarize: summarize,
+                measure: measure
             )
-            if selectedCut == nil, forced {
-                // The provider has already established that the request is
-                // too large. In recovery mode, progress is more important
-                // than satisfying Hail's estimate: archive the largest
-                // complete prefix available and let the bounded summarizer
-                // decide whether that prefix itself is representable.
-                selectedCut = fallbackCuts.last(where: { $0 > 0 })
-            }
+            let candidateContext = Self.compactedContext(
+                context,
+                summary: summary,
+                archivedCount: archivedCount
+            )
+            let assembledCandidate = assemble(candidateContext)
+                .appending(suffix: request.suffix, tools: request.tools)
+            let candidateRequest = assembledCandidate.withInput(
+                request.input(for: assembledCandidate.messages)
+            )
+            let candidateCount = try await self.measure(
+                candidateRequest,
+                fallback: estimator,
+                measure: measure
+            )
+            guard candidateCount <= retainedTarget else { continue }
+
+            return .compacted(
+                ConversationCompaction(summary: summary, archivedCount: archivedCount)
+            )
         }
 
-        guard let archivedCount = selectedCut else {
-            // Hail does not turn an estimate into a terminal provider error.
-            // The endpoint gets to make the final decision; a reported
-            // overflow can come back through the trigger-aware path above.
-            return .unchanged
+        // A provider-reported overflow must not be sent back unchanged when
+        // no valid compacted request fits. Normal threshold checks leave the
+        // final decision to the provider, preserving the existing behavior for
+        // contexts whose oversized part cannot be archived.
+        if trigger == .contextLengthExceeded {
+            throw AgentRuntimeError.contextLengthExceeded
         }
-        guard archivedCount > 0 else { return .unchanged }
-
-        let archived = Array(context.conversationThread.prefix(archivedCount))
-        let summary = try await summarizeInBoundedChunks(
-            context: context,
-            archived: archived,
-            window: hardLimit,
-            summarize: summarize
-        )
-        return .compacted(
-            ConversationCompaction(summary: summary, archivedCount: archivedCount)
-        )
-    }
-
-    private func selectCut(
-        from cuts: [Int],
-        context: PromptContext,
-        request: PreparedRequest,
-        retainedTarget: Int,
-        requireProgress: Bool
-    ) async throws(AgentRuntimeError) -> Int? {
-        let candidates = requireProgress ? cuts.filter { $0 > 0 } : cuts
-        guard !candidates.isEmpty else { return nil }
-
-        // Find the smallest archive prefix whose complete request fits the
-        // retained target. Since removing an older prefix only removes tokens,
-        // valid cuts are monotonic and can be searched without trying every
-        // possible suffix.
-        var lower = 0
-        var upper = candidates.count - 1
-        var selectedCut: Int?
-        while lower <= upper {
-            let middle = (lower + upper) / 2
-            let cut = candidates[middle]
-            let candidate = request.retainingConversation(after: cut)
-            let count = try await measure(context: context, request: candidate)
-            if count <= retainedTarget {
-                selectedCut = cut
-                upper = middle - 1
-            } else {
-                lower = middle + 1
-            }
-        }
-        return selectedCut
+        return .unchanged
     }
 
     /// Summarizes an archived prefix in bounded groups. A single large tool
@@ -191,7 +153,9 @@ public struct SlidingWindowCompactor: ContextCompactor {
         context: PromptContext,
         archived: [ChatMessage],
         window: Int,
-        summarize: @Sendable ([LLMMessage]) async throws(AgentRuntimeError) -> String
+        outputReserve: Int,
+        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String,
+        measure: RequestMeasurer?
     ) async throws(AgentRuntimeError) -> String {
         let summaryBudget = max(1, window - outputReserve)
         var rollingSummary = context.contextSummary
@@ -210,10 +174,11 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 archived: candidate,
                 agentID: context.agentID
             )
-            let candidateCost = try await measure(
+            let candidateCost = try await self.measure(
                 context: context,
                 messages: candidatePrompt,
-                tools: []
+                tools: [],
+                measure: measure
             )
             if candidateCost <= summaryBudget {
                 pending = candidate
@@ -223,11 +188,15 @@ public struct SlidingWindowCompactor: ContextCompactor {
 
             if !pending.isEmpty {
                 rollingSummary = try await summarize(
-                    SummaryPrompt.messages(
-                        priorSummary: rollingSummary,
-                        archived: pending,
-                        agentID: context.agentID
-                    ))
+                    CompactionSummaryRequest(
+                        messages: SummaryPrompt.messages(
+                            priorSummary: rollingSummary,
+                            archived: pending,
+                            agentID: context.agentID
+                        ),
+                        maxOutputTokens: outputReserve
+                    )
+                )
                 pending = []
                 // Re-evaluate the same group with the newly folded summary.
                 // The summary itself consumes input space too.
@@ -243,7 +212,8 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 group,
                 context: context,
                 priorSummary: rollingSummary,
-                budget: summaryBudget
+                budget: summaryBudget,
+                measure: measure
             )
             groups.replaceSubrange(groupIndex...groupIndex, with: fragments)
         }
@@ -252,11 +222,15 @@ public struct SlidingWindowCompactor: ContextCompactor {
             throw AgentRuntimeError.modelMisbehavior("Compaction produced no summary input")
         }
         return try await summarize(
-            SummaryPrompt.messages(
-                priorSummary: rollingSummary,
-                archived: pending,
-                agentID: context.agentID
-            ))
+            CompactionSummaryRequest(
+                messages: SummaryPrompt.messages(
+                    priorSummary: rollingSummary,
+                    archived: pending,
+                    agentID: context.agentID
+                ),
+                maxOutputTokens: outputReserve
+            )
+        )
     }
 
     /// Breaks an oversized semantic interaction into bounded summary-only
@@ -267,7 +241,8 @@ public struct SlidingWindowCompactor: ContextCompactor {
         _ group: [ChatMessage],
         context: PromptContext,
         priorSummary: String?,
-        budget: Int
+        budget: Int,
+        measure: RequestMeasurer?
     ) async throws(AgentRuntimeError) -> [[ChatMessage]] {
         var maximumCharacters = max(32, budget * 2)
 
@@ -287,7 +262,12 @@ public struct SlidingWindowCompactor: ContextCompactor {
                     archived: fragment,
                     agentID: context.agentID
                 )
-                if try await measure(context: context, messages: prompt, tools: []) > budget {
+                if try await self.measure(
+                    context: context,
+                    messages: prompt,
+                    tools: [],
+                    measure: measure
+                ) > budget {
                     fits = false
                     break
                 }
@@ -335,6 +315,18 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 .text(sender: agentID.rawValue, content: $0, timestamp: timestamp)
             }
 
+        case .assistantToolCall(let content, let thinking, let calls, let timestamp):
+            let rendered = calls.map {
+                "\($0.name)(\($0.arguments.json))"
+            }.joined(separator: ", ")
+            let reasoning = thinking.map { " reasoning: \($0)" } ?? ""
+            return contentChunks(
+                "assistant: \(content)\(reasoning) called tools: \(rendered)",
+                maximumCharacters: maximumCharacters
+            ).map {
+                .text(sender: agentID.rawValue, content: $0, timestamp: timestamp)
+            }
+
         case .failure, .decisionRequest, .decisionResolved:
             return [message]
         }
@@ -354,6 +346,38 @@ public struct SlidingWindowCompactor: ContextCompactor {
     }
 
     // MARK: - Budget fitting
+
+    /// Starts with the largest archive that preserves the preferred recent
+    /// tail. If that rebuilt request is still too large, progressively archives
+    /// more complete interactions from the fallback boundaries.
+    private static func compactionCuts(
+        preferred: [Int],
+        fallback: [Int]
+    ) -> [Int] {
+        let preferredCut = preferred.last(where: { $0 > 0 })
+        let minimumFallbackCut = preferredCut ?? 0
+        let additionalCuts = fallback.filter { $0 > minimumFallbackCut }
+        if let preferredCut {
+            return [preferredCut] + additionalCuts
+        }
+        return additionalCuts
+    }
+
+    private static func compactedContext(
+        _ context: PromptContext,
+        summary: String,
+        archivedCount: Int
+    ) -> PromptContext {
+        PromptContext(
+            agentID: context.agentID,
+            definition: context.definition,
+            workingMemory: context.workingMemory,
+            contextSummary: summary,
+            conversationThread: Array(context.conversationThread.dropFirst(archivedCount)),
+            contextManifest: context.contextManifest,
+            instructions: context.instructions
+        )
+    }
 
     /// Returns archive boundaries that do not split a tool call from any of
     /// its results. A cut at `n` archives `0..<n` and retains `n...`.
@@ -452,32 +476,55 @@ public struct SlidingWindowCompactor: ContextCompactor {
     private func measure(
         context: PromptContext,
         messages: [LLMMessage],
-        tools: [LLMToolSchema]
+        tools: [LLMToolSchema],
+        measure: RequestMeasurer?
     ) async throws(AgentRuntimeError) -> Int {
-        try await measure(
-            context: context,
-            request: PreparedRequest(
+        try await self.measure(
+            PreparedRequest(
                 prefix: [],
                 conversation: messages.enumerated().map {
                     PreparedRequest.ConversationEntry(sourceIndex: $0.offset, message: $0.element)
                 },
                 tools: tools
-            )
+            ),
+            fallback: estimator,
+            measure: measure
         )
     }
 
     private func measure(
-        context: PromptContext,
-        request: PreparedRequest
+        _ request: PreparedRequest,
+        fallback estimator: TokenEstimator
     ) async throws(AgentRuntimeError) -> Int {
-        let input = request.input(for: request.messages)
-        switch context.measurement.tokenCounting {
-        case .available(let counter):
-            return max(0, try await counter(request.messages, request.tools))
-        case .availableInput(let counter):
-            return max(0, try await counter(input, request.tools))
-        case .unavailable:
-            return try await estimator.estimate(messages: request.messages, tools: request.tools)
+        try await estimator.estimate(messages: request.messages, tools: request.tools)
+    }
+
+    private func measure(
+        _ request: PreparedRequest,
+        fallback estimator: TokenEstimator,
+        measure: RequestMeasurer?
+    ) async throws(AgentRuntimeError) -> Int {
+        if let measure {
+            return try await measure(request).tokenCount
         }
+        return try await self.measure(request, fallback: estimator)
+    }
+
+    private func measure(
+        messages: [LLMMessage],
+        tools: [LLMToolSchema],
+        measure: RequestMeasurer?
+    ) async throws(AgentRuntimeError) -> Int {
+        try await self.measure(
+            PreparedRequest(
+                prefix: [],
+                conversation: messages.enumerated().map {
+                    PreparedRequest.ConversationEntry(sourceIndex: $0.offset, message: $0.element)
+                },
+                tools: tools
+            ),
+            fallback: estimator,
+            measure: measure
+        )
     }
 }

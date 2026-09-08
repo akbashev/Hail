@@ -40,6 +40,10 @@ enum SummaryPrompt {
         case .toolCall(let calls, _):
             let rendered = calls.map { "\($0.name)(\($0.arguments.json))" }.joined(separator: ", ")
             return "assistant called tools: \(rendered)"
+        case .assistantToolCall(let content, let thinking, let calls, _):
+            let rendered = calls.map { "\($0.name)(\($0.arguments.json))" }.joined(separator: ", ")
+            let reasoning = thinking.map { " reasoning: \($0)" } ?? ""
+            return "assistant: \(content)\(reasoning) called tools: \(rendered)"
         case .toolResult(_, let content, _):
             return "tool result: \(content)"
         case .failure(let error, _):

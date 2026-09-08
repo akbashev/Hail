@@ -24,18 +24,23 @@ public protocol AgentInput: Codable & Sendable {
     /// LLM context for the turn.
     func asChatMessage(timestamp: Date) -> ChatMessage
 
-    /// Optional system instructions that belong to this specific input.
+    /// Optional context that belongs only to this input.
     ///
-    /// The runtime appends these as system messages after the generic context
-    /// so the model sees input-specific rules (e.g. which outcome tool to call)
-    /// without the prompt policy needing to know about product types.
-    func systemInstructions() -> [String]
+    /// This is request-local data — timestamps, retrieved facts, profile
+    /// details — never behavioral instructions, which keep their
+    /// system/developer role. The runtime places this context after the
+    /// durable history and immediately before the current input. It is
+    /// intentionally not a system message:
+    /// providers such as Ollama collate every system message at the front of
+    /// the request, which would make changing per-turn data invalidate the
+    /// reusable prompt prefix.
+    func turnContext() -> [String]
 }
 
 extension AgentInput {
     public var inputID: String? { nil }
 
-    public func systemInstructions() -> [String] { [] }
+    public func turnContext() -> [String] { [] }
 }
 
 extension String: AgentInput {

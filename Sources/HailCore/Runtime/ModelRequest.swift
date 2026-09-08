@@ -72,6 +72,9 @@ public struct ModelRequestRecord: Codable, Sendable, Equatable {
     public var durationMilliseconds: Int?
     public var usage: ModelUsage?
     public var outcome: ModelRequestOutcome
+    /// Digest chain over the rendered request: tool schemas first, then each
+    /// message. Comparing chains between rounds pinpoints prompt divergence.
+    public var contentHashes: [String]?
 
     public init(
         id: ModelRequestID,
@@ -82,7 +85,8 @@ public struct ModelRequestRecord: Codable, Sendable, Equatable {
         completedAt: Date? = nil,
         durationMilliseconds: Int? = nil,
         usage: ModelUsage? = nil,
-        outcome: ModelRequestOutcome = .running
+        outcome: ModelRequestOutcome = .running,
+        contentHashes: [String]? = nil
     ) {
         self.id = id
         self.turnID = turnID
@@ -93,10 +97,12 @@ public struct ModelRequestRecord: Codable, Sendable, Equatable {
         self.durationMilliseconds = durationMilliseconds
         self.usage = usage
         self.outcome = outcome
+        self.contentHashes = contentHashes
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, turnID, model, kind, startedAt, completedAt, durationMilliseconds, usage, outcome
+        case contentHashes
     }
 
     /// `kind` was added after request records were first journaled; old
@@ -112,6 +118,7 @@ public struct ModelRequestRecord: Codable, Sendable, Equatable {
         durationMilliseconds = try container.decodeIfPresent(Int.self, forKey: .durationMilliseconds)
         usage = try container.decodeIfPresent(ModelUsage.self, forKey: .usage)
         outcome = try container.decode(ModelRequestOutcome.self, forKey: .outcome)
+        contentHashes = try container.decodeIfPresent([String].self, forKey: .contentHashes)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -125,6 +132,7 @@ public struct ModelRequestRecord: Codable, Sendable, Equatable {
         try container.encodeIfPresent(durationMilliseconds, forKey: .durationMilliseconds)
         try container.encodeIfPresent(usage, forKey: .usage)
         try container.encode(outcome, forKey: .outcome)
+        try container.encodeIfPresent(contentHashes, forKey: .contentHashes)
     }
 }
 
@@ -163,6 +171,49 @@ public struct AgentStatusSnapshot: Codable, Sendable, Equatable {
         self.currentToolName = currentToolName
         self.turnStartedAt = turnStartedAt
         self.contextUsage = contextUsage
+    }
+}
+
+/// Read-only context diagnostics for operators and user-facing integrations.
+/// This is a projection of the event-sourced agent state; it is never added to
+/// a model prompt.
+public struct AgentContextSnapshot: Codable, Sendable, Equatable {
+    public let agentID: AgentID
+    public let phase: AgentPhase
+    public let turnID: TurnID?
+    public let activeModelRequestID: ModelRequestID?
+    public let currentToolName: String?
+    public let turnStartedAt: Date?
+    public let contextUsage: ContextUsage?
+    public let usageSummary: AgentUsageSummary
+    public let recentModelRequestCount: Int
+    public let conversationMessageCount: Int
+    public let hasContextSummary: Bool
+
+    public init(
+        agentID: AgentID,
+        phase: AgentPhase,
+        turnID: TurnID? = nil,
+        activeModelRequestID: ModelRequestID? = nil,
+        currentToolName: String? = nil,
+        turnStartedAt: Date? = nil,
+        contextUsage: ContextUsage? = nil,
+        usageSummary: AgentUsageSummary = .init(),
+        recentModelRequestCount: Int = 0,
+        conversationMessageCount: Int = 0,
+        hasContextSummary: Bool = false
+    ) {
+        self.agentID = agentID
+        self.phase = phase
+        self.turnID = turnID
+        self.activeModelRequestID = activeModelRequestID
+        self.currentToolName = currentToolName
+        self.turnStartedAt = turnStartedAt
+        self.contextUsage = contextUsage
+        self.usageSummary = usageSummary
+        self.recentModelRequestCount = recentModelRequestCount
+        self.conversationMessageCount = conversationMessageCount
+        self.hasContextSummary = hasContextSummary
     }
 }
 

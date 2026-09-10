@@ -13,7 +13,6 @@ import ScopedEffect
 /// by ``withEffect(_:authority:)`` after the current authority grants it.
 public struct FileEffect: ScopedEffect, Sendable {
     public enum Action: String, Sendable { case read, write, list }
-    public typealias Output = FileResult
 
     public let name = "file"
     public let path: String
@@ -38,7 +37,6 @@ public enum FileEffectError: Error, Equatable, Sendable {
 }
 
 public struct TerminalEffect: ScopedEffect, Sendable {
-    public typealias Output = ProcessResult
 
     public let name = "terminal"
     public let command: String
@@ -57,7 +55,6 @@ public struct TerminalEffect: ScopedEffect, Sendable {
 }
 
 public struct ProcessEffect: ScopedEffect, Sendable {
-    public typealias Output = ProcessResult
 
     public let name = "process"
     public let executable: String
@@ -72,7 +69,6 @@ public struct ProcessEffect: ScopedEffect, Sendable {
 }
 
 public struct NetworkEffect: ScopedEffect, Sendable {
-    public typealias Output = NetworkResponse
 
     public let name = "network"
     public let host: String
@@ -263,7 +259,6 @@ public enum NetworkEffectError: Error, Equatable, Sendable {
 /// An externally visible host operation that is not naturally a file,
 /// terminal, process, or network effect.
 public struct CoordinationEffect: ScopedEffect, Sendable {
-    public typealias Output = String
 
     public let name = "coordination"
     public let subsystem: String
@@ -361,7 +356,6 @@ public func withDependencies<Result>(
 }
 
 public struct ClockEffect: ScopedEffect, Sendable {
-    public typealias Output = Date
     public let name = "clock"
 
     public init() {}

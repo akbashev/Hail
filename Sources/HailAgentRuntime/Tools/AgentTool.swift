@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import DistributedCluster
 import HailCore
 import HailModelRuntime
@@ -12,6 +13,7 @@ import VirtualActors
 
 @Tool
 public struct AgentTool {
+    @Generable
     public enum Action: String, Codable, Sendable {
         case send
         case listAgents = "list_agents"
@@ -31,9 +33,13 @@ public struct AgentTool {
         public var description: String { rawValue }
     }
 
-    public struct Input: Codable, Sendable {
+    @Generable
+    public struct Input: Sendable {
         public let action: Action
-        public let target: MessageTarget?
+        /// Agent IDs are opaque model-provided identifiers. Keep them as a
+        /// string in generated content and validate them at the effect
+        /// boundary instead of exposing a wrapper-shaped object to the model.
+        public let target: String?
         public let message: String?
     }
 
@@ -70,7 +76,7 @@ public struct AgentTool {
                         description: "The message to send. Required for send.",
                         schema: ToolSchema.string(name: "AgentMessage"),
                         isOptional: true
-                    )
+                    ),
                 ]
             )
         )
@@ -113,7 +119,7 @@ public struct AgentTool {
             return lines.joined(separator: "\n")
 
         case .send:
-            guard let target = input.target, !target.rawValue.isEmpty else {
+            guard let target = input.target, !target.isEmpty else {
                 throw ToolError.missingArgument("target")
             }
             guard let messageText = input.message, !messageText.isEmpty else {
@@ -126,9 +132,9 @@ public struct AgentTool {
             // runtime may reactivate a passivated agent, just like Orleans or
             // Akka Cluster Sharding; the active directory is only a discovery
             // projection and is not consulted for correctness.
-            guard let targetID = AgentID(rawValue: target.rawValue) else {
+            guard let targetID = AgentID(rawValue: target) else {
                 throw AgentRuntimeError.modelMisbehavior(
-                    "Invalid agent id '\(target.rawValue)'. Use a full agent id such as 'coder-T-42'."
+                    "Invalid agent id '\(target)'. Use a full agent id such as 'coder-T-42'."
                 )
             }
             guard targetID != sourceAgentID else {

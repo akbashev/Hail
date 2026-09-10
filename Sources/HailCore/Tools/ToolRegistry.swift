@@ -61,7 +61,7 @@ public actor ToolRegistry: Sendable {
 
     public func register(tools: [any Tool]) {
         for tool in tools {
-            register(tool)
+            self.tools[tool.name] = AnyTool(tool)
         }
     }
 
@@ -168,9 +168,11 @@ public actor ToolRegistry: Sendable {
         case .keyNotFound(let key, let context):
             return "at \(codingPath(context.codingPath)): missing key '\(key.stringValue)'"
         case .typeMismatch(let type, let context):
-            return "at \(codingPath(context.codingPath)): expected \(String(describing: type)); \(context.debugDescription)"
+            return
+                "at \(codingPath(context.codingPath)): expected \(String(describing: type)); \(context.debugDescription)"
         case .valueNotFound(let type, let context):
-            return "at \(codingPath(context.codingPath)): expected \(String(describing: type)); \(context.debugDescription)"
+            return
+                "at \(codingPath(context.codingPath)): expected \(String(describing: type)); \(context.debugDescription)"
         case .dataCorrupted(let context):
             return "at \(codingPath(context.codingPath)): \(context.debugDescription)"
         @unknown default:

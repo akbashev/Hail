@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import Hail
 import ScopedEffect
 import Testing
@@ -17,7 +18,7 @@ struct NowToolTests {
             $0.date = .fixed(expected)
         } operation: {
             try await NowTool().run(
-                input: .init(timeZone: TimeZone(identifier: "Europe/Berlin")!),
+                input: .init(timeZone: "Europe/Berlin"),
                 authority: FullAuthority()
             )
         }
@@ -33,7 +34,7 @@ struct NowToolTests {
             $0.date = .fixed(expected)
         } operation: {
             try await NowTool().run(
-                input: .init(timeZone: TimeZone(identifier: "America/New_York")!),
+                input: .init(timeZone: "America/New_York"),
                 authority: FullAuthority()
             )
         }
@@ -51,12 +52,12 @@ struct NowToolTests {
             $0.date = .fixed(expected)
         } operation: {
             try await NowTool().run(
-                input: .init(timeZone: utc),
+                input: .init(timeZone: utc.identifier),
                 authority: FullAuthority()
             )
         }
         let live = try await NowTool().run(
-            input: .init(timeZone: utc),
+            input: .init(timeZone: utc.identifier),
             authority: FullAuthority()
         )
 
@@ -70,14 +71,14 @@ struct NowToolTests {
 
         let encoded = try! JSONEncoder().encode(schema.parameters)
         let serialized = String(decoding: encoded, as: UTF8.self)
-        #expect(serialized.contains("time_zone"))
+        #expect(serialized.contains("timeZone"))
     }
 
-    @Test("encodes the timezone across the model boundary")
-    func encodesTimezoneForModelBoundary() throws {
-        let input = NowTool.Input(timeZone: TimeZone(identifier: "Europe/Berlin")!)
-        let data = try JSONEncoder().encode(input)
+    @Test("decodes the generated timezone value")
+    func decodesGeneratedTimezone() throws {
+        let content = GeneratedContent(properties: ["timeZone": "Europe/Berlin"])
+        let input = try NowTool.Input(content)
 
-        #expect(String(data: data, encoding: .utf8) == "{\"time_zone\":\"Europe\\/Berlin\"}")
+        #expect(input.timeZone == "Europe/Berlin")
     }
 }

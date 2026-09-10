@@ -465,8 +465,11 @@ struct UsageAccountingTests {
             name: "TimerInput",
             description: "Timer input.",
             choices: [
-                DynamicGenerationSchema(name: "CreateTimer", properties: [.init(name: "message", schema: ToolSchema.string(name: "Message"))]),
-                DynamicGenerationSchema(name: "CancelTimer", properties: [.init(name: "id", schema: ToolSchema.string(name: "ID"))]),
+                DynamicGenerationSchema(
+                    name: "CreateTimer",
+                    properties: [.init(name: "message", schema: ToolSchema.string(name: "Message"))]),
+                DynamicGenerationSchema(
+                    name: "CancelTimer", properties: [.init(name: "id", schema: ToolSchema.string(name: "ID"))]),
             ]
         )
         let tool = ToolDefinition(name: "timer", description: "Manage timers.", parameters: schema)
@@ -485,7 +488,10 @@ struct UsageAccountingTests {
             input: ModelInput(messages: [LLMMessage(role: .user, content: "create a timer")]),
             tools: [tool]
         ) { events.append(event) }
-        #expect(events.contains { if case .failed(.invalidRequest(let message)) = $0 { message.contains("root union") } else { false } })
+        #expect(
+            events.contains {
+                if case .failed(.invalidRequest(let message)) = $0 { message.contains("root union") } else { false }
+            })
     }
 
     @Test("Ollama resolves references inside array items")

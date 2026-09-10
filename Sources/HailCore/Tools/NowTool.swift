@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import ScopedEffect
 
 #if canImport(FoundationEssentials)
@@ -15,37 +16,15 @@ import ScopedEffect
 /// one model-facing string.
 @Tool
 public struct NowTool {
-    public struct Input: Codable, Sendable {
+    @Generable
+    public struct Input: Sendable {
         /// The IANA timezone in which the wall-clock reading is required.
         /// There is deliberately no default: a host must not silently use
         /// the server timezone for a user who may be elsewhere in the world.
-        public let timeZone: TimeZone
+        /// It is a string at the model boundary because `TimeZone` is a
+        /// runtime Foundation value; the tool validates it before use.
+        public let timeZone: String
 
-        private enum CodingKeys: String, CodingKey {
-            case timeZone = "time_zone"
-        }
-
-        public init(timeZone: TimeZone) {
-            self.timeZone = timeZone
-        }
-
-        public init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            let identifier = try container.decode(String.self, forKey: .timeZone)
-            guard let timeZone = TimeZone(identifier: identifier) else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .timeZone,
-                    in: container,
-                    debugDescription: "Invalid IANA timezone: \(identifier)"
-                )
-            }
-            self.timeZone = timeZone
-        }
-
-        public func encode(to encoder: Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encode(timeZone.identifier, forKey: .timeZone)
-        }
     }
 
     public let name = "now"
@@ -58,17 +37,7 @@ public struct NowTool {
         ToolDefinition(
             name: name,
             description: description,
-            parameters: ToolSchema.object(
-                name: "NowArguments",
-                description: "Arguments for reading the current time.",
-                properties: [
-                    .init(
-                        name: "time_zone",
-                        description: "Required IANA timezone, for example Europe/Berlin.",
-                        schema: ToolSchema.string(name: "TimeZone")
-                    )
-                ]
-            )
+            parameters: Input.generationSchema
         )
     }
 
@@ -79,7 +48,9 @@ public struct NowTool {
     public func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
         let instant = try await ClockEffect.run(in: token)
         let utc = instant.ISO8601Format()
-        let timeZone = input.timeZone
+        guard let timeZone = TimeZone(identifier: input.timeZone) else {
+            throw ToolError.invalidArgument("time_zone", value: input.timeZone)
+        }
 
         let local = instant.formatted(
             Date.FormatStyle(

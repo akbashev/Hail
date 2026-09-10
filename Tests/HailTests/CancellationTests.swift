@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import HailCore
 import ScopedEffect
 import Testing
@@ -199,7 +200,8 @@ struct ReasoningLoopCancellationTests {
             try JSONDecoder().decode(
                 ToolResult.self,
                 from: Data(
-                    #"{"tool_call_id":"\#(id)","name":"timer","output":"\#(output)","failure_kind":"invalidArguments"}"#.utf8
+                    #"{"tool_call_id":"\#(id)","name":"timer","output":"\#(output)","failure_kind":"invalidArguments"}"#
+                        .utf8
                 )
             )
         }
@@ -212,10 +214,12 @@ struct ReasoningLoopCancellationTests {
 
         let first = tracker.record(results: [failure])
         let second = tracker.record(results: [failure])
-        let changed = tracker.record(results: [try result(
-            id: "call-3",
-            output: "Error: tool timer received invalid arguments at trigger: expected object; found array"
-        )])
+        let changed = tracker.record(results: [
+            try result(
+                id: "call-3",
+                output: "Error: tool timer received invalid arguments at trigger: expected object; found array"
+            )
+        ])
         #expect(!first)
         #expect(second)
         #expect(!changed)
@@ -245,8 +249,10 @@ struct ReasoningLoopCancellationTests {
 /// a model-visible error that lets the round continue.
 @Suite("ToolRegistry cancellation")
 struct ToolRegistryCancellationTests {
-    private struct CancellationThrowingTool: Tool {
-        struct Input: Codable, Sendable {}
+    @Tool
+    struct CancellationThrowingTool {
+        @Generable
+        struct Input: Sendable {}
 
         let name = "cancellation_throwing_tool"
         let description = "Always throws CancellationError when executed."
@@ -264,8 +270,10 @@ struct ToolRegistryCancellationTests {
         }
     }
 
-    private struct FailingTool: Tool {
-        struct Input: Codable, Sendable {}
+    @Tool
+    struct FailingTool {
+        @Generable
+        struct Input: Sendable {}
 
         let name = "failing_tool"
         let description = "Always fails with an ordinary tool error."
@@ -283,9 +291,16 @@ struct ToolRegistryCancellationTests {
         }
     }
 
-    private struct NestedInputTool: Tool {
-        struct Input: Codable, Sendable {
-            let trigger: [String: String]
+    @Tool
+    struct NestedInputTool {
+        @Generable
+        struct Trigger: Sendable {
+            let value: String
+        }
+
+        @Generable
+        struct Input: Sendable {
+            let trigger: Trigger
         }
 
         let name = "nested_input_tool"

@@ -418,12 +418,13 @@ struct ReasoningLoopCompactionTests {
     ) -> ReasoningLoop<ContinuousClock> {
         final class Index: @unchecked Sendable { var value = 0 }
         let index = Index()
-        let rebuild = rebuildContext ?? { (_: TurnContext) async throws(AgentRuntimeError) -> TurnContext in
-            let i = min(index.value, contexts.count - 1)
-            index.value += 1
-            _ = await recorder.nextContext()
-            return contexts[i]
-        }
+        let rebuild =
+            rebuildContext ?? { (_: TurnContext) async throws(AgentRuntimeError) -> TurnContext in
+                let i = min(index.value, contexts.count - 1)
+                index.value += 1
+                _ = await recorder.nextContext()
+                return contexts[i]
+            }
         return ReasoningLoop<ContinuousClock>(
             agentID: agentID,
             authority: FullAuthority(),
@@ -449,10 +450,12 @@ struct ReasoningLoopCompactionTests {
     @Test("a compaction result is journaled atomically and the context rebuilt")
     func compactionJournaledAndContextRebuilt() async throws {
         let recorder = Recorder()
-        let original = try makeContext(thread: [
-            .text(sender: "user", content: "m1", timestamp: Date()),
-            .text(sender: "user", content: "m2", timestamp: Date()),
-        ], manifest: ContextManifest(items: [.inline(text: "stable context")]), instructions: PromptAssemblyInstructions(interactive: "stable instruction"))
+        let original = try makeContext(
+            thread: [
+                .text(sender: "user", content: "m1", timestamp: Date()),
+                .text(sender: "user", content: "m2", timestamp: Date()),
+            ], manifest: ContextManifest(items: [.inline(text: "stable context")]),
+            instructions: PromptAssemblyInstructions(interactive: "stable instruction"))
         let rebuilt = try makeContext(
             thread: [],
             manifest: original.promptContext.contextManifest,

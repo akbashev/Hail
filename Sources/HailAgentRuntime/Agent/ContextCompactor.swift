@@ -89,9 +89,10 @@ public struct RequestMeasurement: Sendable, Equatable {
 /// Measures a candidate request. Compaction uses this for candidate cuts and
 /// summary chunks; the initial request measurement is passed separately so it
 /// is not recomputed or hidden inside the agent context.
-public typealias RequestMeasurer = @Sendable (
-    PreparedRequest
-) async throws(AgentRuntimeError) -> RequestMeasurement
+public typealias RequestMeasurer =
+    @Sendable (
+        PreparedRequest
+    ) async throws(AgentRuntimeError) -> RequestMeasurement
 
 /// The exact sections of one stateless model request. Keeping these sections
 /// explicit lets a compactor replace only the conversation suffix without
@@ -140,9 +141,11 @@ public struct PreparedRequest: Sendable {
     /// conversation source entry. The source index is stable across prompt
     /// rebuilds even when compaction changes the number of retained messages.
     func messageIndex(forSourceIndex sourceIndex: Int) -> Int? {
-        guard let conversationIndex = conversation.lastIndex(where: {
-            $0.sourceIndex == sourceIndex
-        }) else {
+        guard
+            let conversationIndex = conversation.lastIndex(where: {
+                $0.sourceIndex == sourceIndex
+            })
+        else {
             return nil
         }
         return prefix.count + conversationIndex

@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import ScopedEffect
 
 #if canImport(FoundationEssentials)
@@ -78,8 +79,35 @@ public struct ToolArguments: Codable, Sendable, Equatable, CustomStringConvertib
     }
 }
 
+/// The model input for a tool command that takes no arguments.
+public struct EmptyToolInput: Generable, Sendable {
+    public init() {}
+
+    public init(_ content: GeneratedContent) throws {
+        guard case .structure(let properties, _) = content.kind,
+            properties.isEmpty
+        else {
+            throw GeneratedContentConversionError.typeMismatch
+        }
+    }
+
+    public static var generationSchema: GenerationSchema {
+        GenerationSchema(
+            type: Self.self,
+            description: "This command takes no arguments.",
+            properties: []
+        )
+    }
+
+    public var generatedContent: GeneratedContent {
+        GeneratedContent(properties: [:])
+    }
+}
+
 public protocol Tool<Input>: Sendable {
-    associatedtype Input: Codable, Sendable
+    /// Model-facing arguments. `Generable` owns both the schema sent to the
+    /// provider and conversion from provider-generated content.
+    associatedtype Input: Generable & Sendable
     associatedtype Effect: ScopedEffect
 
     var name: String { get }
@@ -124,8 +152,15 @@ extension Tool {
 
 }
 
-/// Type-erased tool that accepts raw JSON arguments and decodes them directly
-/// into the concrete tool's typed `Input` before execution.
+extension Tool {
+    public var schema: ToolDefinition {
+        ToolDefinition(name: name, description: description, parameters: Input.generationSchema)
+    }
+}
+
+/// Type-erased tool. JSON remains the transport representation at the
+/// provider boundary, while the actual argument conversion is performed by
+/// `Input.init(_:)` from AnyLanguageModel's `GeneratedContent`.
 public struct AnyTool: Sendable {
     public let name: String
     public let description: String
@@ -133,13 +168,19 @@ public struct AnyTool: Sendable {
     /// Type erasure closes over the concrete effect type, so only this path
     /// can manufacture the matching token and invoke the tool.
     private let _runWithAuthority: @Sendable (ToolArguments, any Authority) async throws -> ToolOutput
+    private let _runGeneratedWithAuthority: @Sendable (GeneratedContent, any Authority) async throws -> ToolOutput
 
     public init<T: Tool>(_ tool: T) {
         self.name = tool.name
         self.description = tool.description
         self.schema = tool.schema
         self._runWithAuthority = { input, authority in
-            let decoded = try JSONDecoder().decode(T.Input.self, from: input.data)
+            let generated = try GeneratedContent(json: input.json)
+            let decoded = try T.Input(generated)
+            return try await tool.runOutput(input: decoded, authority: authority)
+        }
+        self._runGeneratedWithAuthority = { generated, authority in
+            let decoded = try T.Input(generated)
             return try await tool.runOutput(input: decoded, authority: authority)
         }
     }
@@ -150,6 +191,22 @@ public struct AnyTool: Sendable {
 
     public func runOutput(input: ToolArguments, authority: any Authority) async throws -> ToolOutput {
         try await _runWithAuthority(input, authority)
+    }
+
+    /// Executes arguments that have already been parsed by
+    /// AnyLanguageModel. No provider JSON round-trip is needed here.
+    public func run(
+        generatedContent: GeneratedContent,
+        authority: any Authority
+    ) async throws -> String {
+        try await _runGeneratedWithAuthority(generatedContent, authority).transcript
+    }
+
+    public func runOutput(
+        generatedContent: GeneratedContent,
+        authority: any Authority
+    ) async throws -> ToolOutput {
+        try await _runGeneratedWithAuthority(generatedContent, authority)
     }
 
 }

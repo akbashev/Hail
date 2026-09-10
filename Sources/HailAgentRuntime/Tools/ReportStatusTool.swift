@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import DistributedCluster
 import HailCore
 import HailModelRuntime
@@ -15,16 +16,11 @@ import VirtualActors
 /// resolved through the virtual actors API per call.
 @Tool
 public struct ReportStatusTool {
-    public struct Input: Codable, Sendable {
-        public let contextID: AgentContextID
+    @Generable
+    public struct Input: Sendable {
+        public let contextID: String
         public let message: String
-        public let timestamp: Date?
-
-        enum CodingKeys: String, CodingKey {
-            case contextID = "context_id"
-            case message
-            case timestamp
-        }
+        public let timestamp: String?
     }
 
     public let name = "report_status"
@@ -48,7 +44,7 @@ public struct ReportStatusTool {
                         name: "message",
                         description: "A short status message.",
                         schema: ToolSchema.string(name: "StatusMessage")
-                    )
+                    ),
                 ]
             )
         )
@@ -80,7 +76,8 @@ public struct ReportStatusTool {
             identifiedBy: VirtualActorID(rawValue: sourceAgentID.rawValue),
             dependency: spawnConfig
         )
-        try await agent.recordStatusActivity(input.message, at: input.timestamp ?? Date())
+        let timestamp = input.timestamp.flatMap { try? Date.ISO8601FormatStyle().parse($0) } ?? Date()
+        try await agent.recordStatusActivity(input.message, at: timestamp)
         return "Status reported."
     }
 }

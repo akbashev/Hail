@@ -217,7 +217,8 @@ struct PrefixStabilityTests {
             currentMessage: current,
             in: [LLMMessage(role: .assistant, content: "old"), current]
         )
-        let live = prompt
+        let live =
+            prompt
             .appending(toolCall)
             .appending(toolResult)
         let rebased = live.rebased(

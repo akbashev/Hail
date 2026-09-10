@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import ScopedEffect
 
 #if canImport(FoundationEssentials)
@@ -8,6 +9,7 @@ import ScopedEffect
 
 @Tool
 public struct FileTool {
+    @Generable
     public enum Action: String, Codable, Sendable {
         case read, write, replace, list, exists
 
@@ -21,7 +23,8 @@ public struct FileTool {
         }
     }
 
-    public struct Input: Codable, Sendable {
+    @Generable
+    public struct Input: Sendable {
         public let action: Action
         public let path: String
         public let content: String?
@@ -77,7 +80,7 @@ public struct FileTool {
                         description: "Replacement text for replace action.",
                         schema: ToolSchema.string(name: "NewFileContent"),
                         isOptional: true
-                    )
+                    ),
                 ]
             )
         )

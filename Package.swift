@@ -1,6 +1,6 @@
+import CompilerPluginSupport
 // swift-tools-version: 6.4
 import PackageDescription
-import CompilerPluginSupport
 
 let package = Package(
     name: "Hail",

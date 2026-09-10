@@ -45,10 +45,11 @@ struct ToolFailureSignature: Equatable, Sendable {
     let entries: [Entry]
 
     init(results: [ToolResult]) {
-        self.entries = results
+        self.entries =
+            results
             .compactMap { result -> Entry? in
                 guard let failureKind = result.failureKind,
-                      failureKind == .invalidArguments || failureKind == .rejected
+                    failureKind == .invalidArguments || failureKind == .rejected
                 else { return nil }
                 return Entry(
                     name: result.name,
@@ -782,7 +783,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         // before the current input instead, so it cannot be mistaken for the
         // user's latest request.
         let turnContextLines = input.turnContext()
-        let turnContextMessages: [LLMMessage] = turnContextLines.isEmpty
+        let turnContextMessages: [LLMMessage] =
+            turnContextLines.isEmpty
             ? []
             : [
                 LLMMessage(
@@ -834,7 +836,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             tools: schemas
         )
         let currentSourceIndex = turnContext.promptContext.conversationThread.indices.last
-        let currentIndex = inputMessage == nil
+        let currentIndex =
+            inputMessage == nil
             ? nil
             : currentSourceIndex.flatMap {
                 turnContext.preparedRequest.messageIndex(forSourceIndex: $0)
@@ -980,7 +983,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 }
                 throw AgentRuntimeError.toolFailed(
                     name: failure?.name ?? calls.first?.name ?? "unknown",
-                    reason: "The model repeated the same failed tool call twice. \(failure?.output ?? "Tool execution failed.")"
+                    reason:
+                        "The model repeated the same failed tool call twice. \(failure?.output ?? "Tool execution failed.")"
                 )
             }
             return try await runTurn(

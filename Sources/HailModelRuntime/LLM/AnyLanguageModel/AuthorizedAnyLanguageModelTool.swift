@@ -4,9 +4,9 @@ import HailCore
 /// Adapts a Hail tool to AnyLanguageModel's tool protocol without moving
 /// effect authorization into the model session.
 ///
-/// AnyLanguageModel supplies decoded `GeneratedContent`; Hail converts it to
-/// its existing argument boundary and lets `AnyTool` derive and open the
-/// concrete effect token with the supplied authority.
+/// AnyLanguageModel supplies decoded `GeneratedContent`; Hail decodes that
+/// content through the tool's native input boundary and opens the concrete
+/// effect token with the supplied authority.
 struct AuthorizedAnyLanguageModelTool: AnyLanguageModel.Tool {
     typealias Arguments = GeneratedContent
     typealias Output = String
@@ -25,7 +25,7 @@ struct AuthorizedAnyLanguageModelTool: AnyLanguageModel.Tool {
 
     func call(arguments: GeneratedContent) async throws -> String {
         try await tool.run(
-            input: ToolArguments(json: arguments.jsonString),
+            generatedContent: arguments,
             authority: authority
         )
     }

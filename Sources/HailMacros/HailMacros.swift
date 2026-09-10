@@ -6,19 +6,41 @@ import SwiftSyntaxMacros
 private struct EffectMethod {
     let function: FunctionDeclSyntax
     let name: String
+    let description: String?
     let argumentsType: String?
     let effectType: String
     let argumentLabel: String?
     let isThrowing: Bool
 }
 
-private func stringArgument(_ node: AttributeSyntax) -> String? {
-    guard let arguments = node.arguments?.as(LabeledExprListSyntax.self),
-        let expression = arguments.first?.expression.as(StringLiteralExprSyntax.self)
-    else { return nil }
+private struct ToolMetadata {
+    let name: String?
+    let description: String?
+}
+
+private func stringLiteral(_ expression: ExprSyntax?) -> String? {
+    guard let expression = expression?.as(StringLiteralExprSyntax.self) else { return nil }
     return expression.segments.compactMap {
         $0.as(StringSegmentSyntax.self)?.content.text
     }.joined()
+}
+
+private func metadata(_ node: AttributeSyntax) -> ToolMetadata {
+    guard let arguments = node.arguments?.as(LabeledExprListSyntax.self) else {
+        return ToolMetadata(name: nil, description: nil)
+    }
+
+    let positionalName = arguments.first(where: { $0.label == nil }).flatMap {
+        stringLiteral($0.expression)
+    }
+    let labeledDescription = arguments.first(where: { $0.label?.text == "description" }).flatMap {
+        stringLiteral($0.expression)
+    }
+    return ToolMetadata(name: positionalName, description: labeledDescription)
+}
+
+private func stringArgument(_ node: AttributeSyntax) -> String? {
+    metadata(node).name
 }
 
 private func attribute(named name: String, in attributes: AttributeListSyntax) -> AttributeSyntax? {
@@ -40,6 +62,7 @@ private func effectMethods(in declaration: some DeclGroupSyntax) -> [EffectMetho
         return EffectMethod(
             function: function,
             name: stringArgument(command) ?? function.name.text,
+            description: metadata(command).description,
             argumentsType: parameter?.type.trimmedDescription,
             effectType: returnType.trimmedDescription,
             argumentLabel: parameter.flatMap { $0.firstName.text == "_" ? nil : $0.firstName.text },
@@ -61,6 +84,7 @@ private func standaloneEffect(in declaration: some DeclGroupSyntax) -> EffectMet
         return EffectMethod(
             function: function,
             name: "",
+            description: nil,
             argumentsType: parameter?.type.trimmedDescription,
             effectType: returnType.trimmedDescription,
             argumentLabel: parameter.flatMap { $0.firstName.text == "_" ? nil : $0.firstName.text },
@@ -81,6 +105,15 @@ private func hasExistingToolImplementation(in declaration: some DeclGroupSyntax)
     }
 }
 
+private func hasStoredProperty(named name: String, in declaration: some DeclGroupSyntax) -> Bool {
+    declaration.memberBlock.members.contains { member in
+        guard let variable = member.decl.as(VariableDeclSyntax.self) else { return false }
+        return variable.bindings.contains { binding in
+            binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text == name
+        }
+    }
+}
+
 public struct CommandMacro: PeerMacro {
     public static func expansion(
         of node: AttributeSyntax,
@@ -98,16 +131,28 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
     ) throws -> [DeclSyntax] {
         let commands = effectMethods(in: declaration)
         guard !commands.isEmpty else {
-            guard let method = standaloneEffect(in: declaration),
-                hasRenderMethod(in: declaration),
-                !hasExistingToolImplementation(in: declaration)
-            else {
+            guard let method = standaloneEffect(in: declaration) else {
                 return []
             }
+            let toolMetadata = metadata(node)
+            var generated: [DeclSyntax] = []
+            if !hasStoredProperty(named: "name", in: declaration), let name = toolMetadata.name {
+                generated.append(DeclSyntax(stringLiteral: #"public let name = "\#(name)""#))
+            }
+            if !hasStoredProperty(named: "description", in: declaration), let description = toolMetadata.description {
+                generated.append(DeclSyntax(stringLiteral: #"public let description = "\#(description)""#))
+            }
+
+            // Existing run/schema implementations only need metadata. The
+            // macro must not replace their execution path.
+            guard !hasExistingToolImplementation(in: declaration), hasRenderMethod(in: declaration) else {
+                return generated
+            }
+
             let input =
                 method.argumentsType.map { "public typealias Input = \($0)" }
                 ?? "public typealias Input = HailCore.EmptyToolInput"
-            return [
+            generated.append(contentsOf: [
                 DeclSyntax(stringLiteral: input),
                 DeclSyntax(stringLiteral: "public typealias Effect = \(method.effectType)"),
                 DeclSyntax(
@@ -124,7 +169,8 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                             return render(output)
                         }
                         """),
-            ]
+            ])
+            return generated
         }
 
         let type = declaration.as(StructDeclSyntax.self)?.name.text ?? "Tool"
@@ -161,7 +207,7 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                             public typealias Effect = \(command.effectType)
                             public let owner: \(type)
                             public var name: String { "\(groupName)_\(command.name)" }
-                            public var description: String { "\(command.name)" }
+                            public var description: String { "\(command.description ?? command.name)" }
                             public var schema: ToolDefinition { ToolDefinition(name: name, description: description, parameters: Input.generationSchema) }
                             public func effect(for input: Input) throws -> Effect { \(invocation) }
                             public func run(input: Input, token: borrowing EffectToken<Effect>) async throws -> String {

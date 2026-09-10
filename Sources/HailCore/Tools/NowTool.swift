@@ -14,7 +14,10 @@ import ScopedEffect
 /// for wall-clock operations such as reminders and schedules. A `Date` has no
 /// timezone of its own, so the two representations must not be collapsed into
 /// one model-facing string.
-@Tool
+@Tool(
+    "now",
+    description: "Get the current time in an explicit IANA timezone. Always provide time_zone, for example Europe/Berlin. Never infer it from the server or from a message timestamp."
+)
 public struct NowTool {
     @Generable
     public struct Input: Sendable {
@@ -26,10 +29,6 @@ public struct NowTool {
         public let timeZone: String
 
     }
-
-    public let name = "now"
-    public let description =
-        "Get the current time in an explicit IANA timezone. Always provide time_zone, for example Europe/Berlin. Never infer it from the server or from a message timestamp."
 
     public init() {}
 

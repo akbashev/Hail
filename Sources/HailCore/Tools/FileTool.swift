@@ -7,7 +7,10 @@ import ScopedEffect
     import Foundation
 #endif
 
-@Tool
+@Tool(
+    "file",
+    description: "Read and write files in the project. Use this to read code, write new files, or edit existing ones."
+)
 public struct FileTool {
     @Generable
     public enum Action: String, Codable, Sendable {
@@ -37,10 +40,6 @@ public struct FileTool {
             case newContent = "new_content"
         }
     }
-
-    public let name = "file"
-    public let description =
-        "Read and write files in the project. Use this to read code, write new files, or edit existing ones."
 
     public var schema: ToolDefinition {
         ToolDefinition(

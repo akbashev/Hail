@@ -41,7 +41,7 @@ struct ToolRegistryTests {
 
     @Tool("test")
     struct ParameterlessCommands {
-        @Command("ping")
+        @Command("ping", description: "Check that the command is reachable.")
         func ping() -> ClockEffect {
             ClockEffect()
         }
@@ -55,6 +55,7 @@ struct ToolRegistryTests {
     func parameterlessCommand() async throws {
         let tool = ParameterlessCommands.PingTool(owner: ParameterlessCommands())
 
+        #expect(tool.description == "Check that the command is reachable.")
         let output = try await AnyTool(tool).run(
             generatedContent: GeneratedContent(properties: [:]),
             authority: FullAuthority()

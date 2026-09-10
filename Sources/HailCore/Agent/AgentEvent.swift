@@ -13,10 +13,6 @@ public enum AgentEvent: Codable, Sendable {
     /// shape, so pre-identification journals remain replayable.
     case turnIdentified(id: TurnID)
     case messageReceived(ChatMessage)
-    /// Assistant text accompanying a tool call. Unlike streamed fragments,
-    /// this is a single semantic message that must survive context rebuilds
-    /// after tool execution and compaction.
-    case assistantText(content: String, at: Date)
     /// The exact assistant message sent before executing a tool round. Keeping
     /// narration, provider reasoning, and calls together matters for model
     /// protocols that require reasoning to accompany tool calls.
@@ -26,10 +22,7 @@ public enum AgentEvent: Codable, Sendable {
         calls: [ToolCall],
         at: Date
     )
-    case contextSet(contextID: AgentContextID)
-    case toolInvoked(ToolCall, at: Date?)
     case toolResult(ToolResult, at: Date?)
-    case memoryCommitted(summary: String)
     /// The oldest `archivedCount` thread entries were compacted into
     /// `summary`, which replaces ``AgentState/contextSummary`` (rolling
     /// summary). One atomic event: the summary is a non-deterministic fold
@@ -148,16 +141,41 @@ public struct ToolCall: Codable, Sendable, Equatable {
     }
 }
 
+public enum ToolFailureKind: String, Codable, Sendable, Equatable {
+    /// The model supplied arguments that cannot be decoded or validated.
+    case invalidArguments
+    /// The request was understood but the operation was refused.
+    case rejected
+    /// The tool could not currently be reached or configured to run.
+    case unavailable
+    /// The tool ran into an execution failure that is not otherwise classified.
+    case failed
+}
+
 public struct ToolResult: Codable, Sendable, Equatable {
     public let toolCallID: String
     public let name: String
     public let output: String
-    public let isError: Bool
+    public let failureKind: ToolFailureKind?
+
+    public var isError: Bool { failureKind != nil }
+
+    public init(
+        toolCallID: String,
+        name: String,
+        output: String,
+        failureKind: ToolFailureKind? = nil
+    ) {
+        self.toolCallID = toolCallID
+        self.name = name
+        self.output = output
+        self.failureKind = failureKind
+    }
 
     enum CodingKeys: String, CodingKey {
         case toolCallID = "tool_call_id"
         case name
         case output
-        case isError = "is_error"
+        case failureKind = "failure_kind"
     }
 }

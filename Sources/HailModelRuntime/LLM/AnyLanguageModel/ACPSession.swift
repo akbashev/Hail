@@ -98,7 +98,6 @@ actor ACPSession {
 
     /// The working-memory snapshot last sent to the live session. Re-sent only
     /// when it changes.
-    private var lastMemorySnapshot: String?
 
     /// The journaled session to resume on the first turn, if any. Consumed on
     /// the first session setup attempt.
@@ -294,7 +293,7 @@ actor ACPSession {
     /// Routes one turn to the ACP session.
     ///
     /// Warm path — the session is alive and its identity fingerprint matches:
-    /// send only the turn's delta (plus the memory snapshot when it changed).
+    /// send only the turn's delta.
     /// Cold path — no session, or the agent's identity changed: drop whatever
     /// is left and bootstrap a fresh session with the full transcript.
     ///
@@ -311,7 +310,6 @@ actor ACPSession {
     func executeTurnPrompt(
         bootstrap: String,
         delta: String,
-        memorySnapshot: String?,
         identity: SessionIdentity,
         authority: (any Authority)? = nil
     ) async throws -> (
@@ -331,13 +329,7 @@ actor ACPSession {
             return flagged
         }
         if !promptWasCancelled, sessionId != nil, sessionIdentity == identity {
-            var parts: [String] = []
-            if let memorySnapshot, memorySnapshot != lastMemorySnapshot {
-                parts.append(memorySnapshot)
-                lastMemorySnapshot = memorySnapshot
-            }
-            parts.append(delta)
-            text = parts.joined(separator: "\n\n")
+            text = delta
             logger.info(
                 "Sending warm delta to ACP session",
                 metadata: [
@@ -348,19 +340,10 @@ actor ACPSession {
         } else {
             await reset()
             sessionIdentity = identity
-            lastMemorySnapshot = memorySnapshot
             if try await resumeJournaledSession(identity: identity) {
-                // The CLI session already holds the history — only the delta
-                // is new. Memory is re-sent once because the journaled
-                // snapshot may postdate what the session last saw.
-                lastMemorySnapshot = nil
-                var parts: [String] = []
-                if let memorySnapshot {
-                    parts.append(memorySnapshot)
-                    lastMemorySnapshot = memorySnapshot
-                }
-                parts.append(delta)
-                text = parts.joined(separator: "\n\n")
+                // The CLI session already holds the history; only the delta
+                // is new.
+                text = delta
                 logger.info(
                     "Resumed ACP session; sending delta",
                     metadata: [
@@ -899,7 +882,6 @@ actor ACPSession {
         delegate = nil
         sessionId = nil
         sessionIdentity = nil
-        lastMemorySnapshot = nil
     }
 
     /// Tears down the live session, terminating the harness process. Called

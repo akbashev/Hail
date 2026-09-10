@@ -21,7 +21,7 @@ public enum AgentOutputContract: Codable, Sendable {
     ///
     /// The tool name is also used by adapters such as ``KimiCodeEndpoint`` to
     /// intercept the call and decode the arguments into the typed output.
-    case reportTool(name: String, schema: LLMToolSchema)
+    case reportTool(name: String, schema: ToolDefinition)
 }
 
 extension String: AgentOutput {

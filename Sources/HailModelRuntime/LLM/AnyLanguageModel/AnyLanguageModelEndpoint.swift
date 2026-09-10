@@ -17,8 +17,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         modelIdentifier: String,
         temperature: Double,
         effectiveContextWindow: Int? = nil,
-        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
-        countInputTokens: (@Sendable (ModelInput, [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
+        countTokens: (@Sendable ([LLMMessage], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
+        countInputTokens: (@Sendable (ModelInput, [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
         generationOptions: GenerationOptions? = nil
     ) {
         self.languageModel = languageModel
@@ -34,7 +34,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
 
     public func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?
+        tools: [ToolDefinition]?
     ) -> AsyncStream<ModelEvent<String>> {
         AsyncStream(ModelEvent<String>.self) { continuation in
             let task = Task {
@@ -43,7 +43,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
 
                     continuation.yield(.status("Generating..."))
 
-                    let adaptedTools = try (tools ?? []).map { try AnyLanguageModelToolAdapter($0) }
+                    let adaptedTools = (tools ?? []).map { SchemaOnlyAnyLanguageModelTool($0) }
                     let session = LanguageModelSession(
                         model: languageModel,
                         tools: adaptedTools,
@@ -105,7 +105,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
 
     public func stream<T: AgentOutput>(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         AsyncStream(ModelEvent<T>.self) { continuation in
@@ -115,7 +115,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
 
                     continuation.yield(.status("Generating..."))
 
-                    let adaptedTools = try (tools ?? []).map { try AnyLanguageModelToolAdapter($0) }
+                    let adaptedTools = (tools ?? []).map { SchemaOnlyAnyLanguageModelTool($0) }
                     let session = LanguageModelSession(
                         model: languageModel,
                         tools: adaptedTools,
@@ -225,8 +225,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
 // MARK: - Tool adapter
 
 /// A lightweight wrapper that lets us build AnyLanguageModel tools directly from
-/// an `LLMToolSchema` without requiring a full Hail ``Tool`` instance.
-private struct AnyLanguageModelToolAdapter: AnyLanguageModel.Tool {
+/// a ``ToolDefinition`` without requiring a full Hail ``Tool`` instance.
+private struct SchemaOnlyAnyLanguageModelTool: AnyLanguageModel.Tool {
     typealias Arguments = GeneratedContent
     typealias Output = String
 
@@ -234,10 +234,10 @@ private struct AnyLanguageModelToolAdapter: AnyLanguageModel.Tool {
     let description: String
     let parameters: GenerationSchema
 
-    init(_ schema: LLMToolSchema) throws {
-        self.name = schema.function.name
-        self.description = schema.function.description
-        self.parameters = try Self.makeParameters(from: schema)
+    init(_ definition: ToolDefinition) {
+        self.name = definition.name
+        self.description = definition.description
+        self.parameters = definition.parameters
     }
 
     func call(arguments: GeneratedContent) async throws -> String {
@@ -247,69 +247,6 @@ private struct AnyLanguageModelToolAdapter: AnyLanguageModel.Tool {
         return ""
     }
 
-    // MARK: - Schema conversion
-
-    private static func makeParameters(from schema: LLMToolSchema) throws -> GenerationSchema {
-        let properties = schema.function.parameters.properties ?? [:]
-        let required = Set(schema.function.parameters.required ?? [])
-
-        let dynamicProperties: [DynamicGenerationSchema.Property] = properties.map { key, prop in
-            DynamicGenerationSchema.Property(
-                name: key,
-                description: prop.description,
-                schema: dynamicSchema(for: prop),
-                isOptional: !required.contains(key)
-            )
-        }
-
-        let dynamic = DynamicGenerationSchema(
-            name: schema.function.name,
-            description: schema.function.description,
-            properties: dynamicProperties
-        )
-
-        return try GenerationSchema(root: dynamic, dependencies: [])
-    }
-
-    private static func dynamicSchema(for prop: LLMToolSchema.PropertySchema) -> DynamicGenerationSchema {
-        if let choices = prop.enumValues, !choices.isEmpty {
-            return DynamicGenerationSchema(
-                name: prop.type,
-                description: prop.description,
-                anyOf: choices
-            )
-        }
-
-        switch prop.type {
-        case "array":
-            return DynamicGenerationSchema(
-                arrayOf: prop.items.map(dynamicSchema(for:)) ?? DynamicGenerationSchema(type: String.self)
-            )
-        case "object":
-            let properties = prop.properties ?? [:]
-            let required = Set(prop.required ?? [])
-            return DynamicGenerationSchema(
-                name: "object",
-                description: prop.description,
-                properties: properties.map { key, nested in
-                    DynamicGenerationSchema.Property(
-                        name: key,
-                        description: nested.description,
-                        schema: dynamicSchema(for: nested),
-                        isOptional: !required.contains(key)
-                    )
-                }
-            )
-        case "boolean":
-            return DynamicGenerationSchema(type: Bool.self)
-        case "integer":
-            return DynamicGenerationSchema(type: Int.self)
-        case "number":
-            return DynamicGenerationSchema(type: Double.self)
-        default:
-            return DynamicGenerationSchema(type: String.self)
-        }
-    }
 }
 
 // MARK: - Delegate

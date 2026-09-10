@@ -54,7 +54,7 @@ struct ACPModelEndpoint: ModelEndpoint {
 
     func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?
+        tools: [ToolDefinition]?
     ) -> AsyncStream<ModelEvent<String>> {
         AsyncStream(ModelEvent<String>.self) { continuation in
             let task = Task {
@@ -64,7 +64,6 @@ struct ACPModelEndpoint: ModelEndpoint {
                     let outcome = try await runPrompt(
                         bootstrap: parts.bootstrap,
                         delta: parts.delta,
-                        memorySnapshot: parts.memorySnapshot,
                         identity: parts.identity,
                         responseType: String.self,
                         continuation: continuation
@@ -85,7 +84,7 @@ struct ACPModelEndpoint: ModelEndpoint {
 
     func stream<T: AgentOutput>(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         stream(input: input, turnDelta: nil, tools: tools, responseType: responseType)
@@ -100,7 +99,7 @@ struct ACPModelEndpoint: ModelEndpoint {
         input: ModelInput,
         turnDelta: TurnDelta?,
         authority: (any Authority)? = nil,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         AsyncStream(ModelEvent<T>.self) { continuation in
@@ -111,7 +110,6 @@ struct ACPModelEndpoint: ModelEndpoint {
                     let outcome = try await runPrompt(
                         bootstrap: parts.bootstrap,
                         delta: parts.delta,
-                        memorySnapshot: parts.memorySnapshot,
                         identity: parts.identity,
                         authority: authority,
                         responseType: T.self,
@@ -147,14 +145,13 @@ struct ACPModelEndpoint: ModelEndpoint {
 
     /// Computes the bootstrap/delta/identity triple for one turn. With a
     /// precise ``TurnDelta`` from the reasoning loop the warm path sends only
-    /// the new content (plus the memory snapshot when it changed); without one
-    /// the delta falls back to the conversation tail and the identity to the
-    /// system prefix.
+    /// the new content; without one the delta falls back to the conversation
+    /// tail and the identity to the system prefix.
     private func turnParts<T: AgentOutput>(
         messages: [LLMMessage],
         turnDelta: TurnDelta?,
         responseType: T.Type
-    ) -> (bootstrap: String, delta: String, memorySnapshot: String?, identity: SessionIdentity) {
+    ) -> (bootstrap: String, delta: String, identity: SessionIdentity) {
         let bootstrap = Self.appendOutcomeInstruction(
             prompt: Self.formatPrompt(messages: messages),
             responseType: responseType
@@ -164,12 +161,7 @@ struct ACPModelEndpoint: ModelEndpoint {
                 prompt: Self.formatCompactMessages(turnDelta.current.messages),
                 responseType: responseType
             )
-            let memorySnapshot =
-                turnDelta.workingMemory.isEmpty
-                ? nil
-                : "Current working memory (supersedes any earlier memory in this session):\n"
-                    + turnDelta.workingMemory.map { "- \($0)" }.joined(separator: "\n")
-            return (bootstrap, delta, memorySnapshot, turnDelta.sessionIdentity)
+            return (bootstrap, delta, turnDelta.sessionIdentity)
         }
         let delta = Self.appendOutcomeInstruction(
             prompt: Self.formatCompactMessages(messages.filter { $0.role != .system }),
@@ -179,7 +171,7 @@ struct ACPModelEndpoint: ModelEndpoint {
             model: model,
             systemPrompt: messages.filter { $0.role == .system }.map(\.content).joined(separator: "\n\n")
         )
-        return (bootstrap, delta, nil, identity)
+        return (bootstrap, delta, identity)
     }
 
     /// Runs a prompt through the ACP session, yielding text/thinking/status
@@ -192,7 +184,6 @@ struct ACPModelEndpoint: ModelEndpoint {
     private func runPrompt<T: AgentOutput>(
         bootstrap: String,
         delta: String,
-        memorySnapshot: String?,
         identity: SessionIdentity,
         authority: (any Authority)? = nil,
         responseType: T.Type,
@@ -218,7 +209,6 @@ struct ACPModelEndpoint: ModelEndpoint {
         let (stream, responseTask) = try await session.executeTurnPrompt(
             bootstrap: bootstrap,
             delta: delta,
-            memorySnapshot: memorySnapshot,
             identity: identity,
             authority: authority
         )
@@ -490,7 +480,7 @@ extension ACPModelEndpoint: SessionOwningEndpoint {
         input: ModelInput,
         delta turnDelta: TurnDelta,
         authority: any Authority,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         stream(

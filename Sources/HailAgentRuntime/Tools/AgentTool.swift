@@ -10,7 +10,8 @@ import VirtualActors
     import Foundation
 #endif
 
-public struct AgentTool: Tool {
+@Tool
+public struct AgentTool {
     public enum Action: String, Codable, Sendable {
         case send
         case listAgents = "list_agents"
@@ -42,35 +43,35 @@ public struct AgentTool: Tool {
         + "Messages are queued asynchronously on a best-effort basis: the recipient processes them in its own time and responds with a message of its own — do not expect a synchronous reply or delivery across a process restart. "
         + "The current agent is not a valid recipient; continue the task in this turn instead of sending a message to yourself."
 
-    public var schema: LLMToolSchema {
-        LLMToolSchema(
-            type: "function",
-            function: LLMToolSchema.FunctionSchema(
-                name: name,
-                description: description,
-                parameters: LLMToolSchema.ParameterSchema(
-                    type: "object",
-                    properties: [
-                        "action": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "The action to perform: 'send' or 'list_agents'",
-                            enumValues: ["send", "list_agents"]
-                        ),
-                        "target": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description:
-                                "For 'send': the recipient's full agent id (e.g. 'supervisor-main', 'coder-chat', 'coder-T-42'). Use list_agents to discover currently active ids.",
-                            enumValues: nil
-                        ),
-                        "message": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description:
-                                "The message to send. Required for 'send'.",
-                            enumValues: nil
-                        ),
-                    ],
-                    required: ["action"]
-                )
+    public var schema: ToolDefinition {
+        ToolDefinition(
+            name: name,
+            description: description,
+            parameters: ToolSchema.object(
+                name: "AgentArguments",
+                description: "Arguments for communicating with another agent.",
+                properties: [
+                    .init(
+                        name: "action",
+                        description: "The action to perform: send or list_agents.",
+                        schema: ToolSchema.string(
+                            name: "AgentAction",
+                            choices: ["send", "list_agents"]
+                        )
+                    ),
+                    .init(
+                        name: "target",
+                        description: "For send: the recipient's full agent id.",
+                        schema: ToolSchema.string(name: "AgentTarget"),
+                        isOptional: true
+                    ),
+                    .init(
+                        name: "message",
+                        description: "The message to send. Required for send.",
+                        schema: ToolSchema.string(name: "AgentMessage"),
+                        isOptional: true
+                    )
+                ]
             )
         )
     }

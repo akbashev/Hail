@@ -93,7 +93,6 @@ struct ACPSessionResumeTests {
         let (stream, response) = try await session.executeTurnPrompt(
             bootstrap: "BOOTSTRAP",
             delta: "DELTA-1",
-            memorySnapshot: nil,
             identity: SessionIdentity("id-A")
         )
         for try await _ in stream {}
@@ -124,7 +123,6 @@ struct ACPSessionResumeTests {
         let (stream, response) = try await session.executeTurnPrompt(
             bootstrap: "BOOTSTRAP",
             delta: "DELTA-1",
-            memorySnapshot: nil,
             identity: SessionIdentity("id-A")
         )
         for try await _ in stream {}
@@ -154,7 +152,6 @@ struct ACPSessionResumeTests {
         let (stream, response) = try await session.executeTurnPrompt(
             bootstrap: "BOOTSTRAP",
             delta: "DELTA-1",
-            memorySnapshot: nil,
             identity: SessionIdentity("id-A")
         )
         for try await _ in stream {}

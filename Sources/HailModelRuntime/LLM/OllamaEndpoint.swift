@@ -42,8 +42,8 @@ public struct OllamaEndpoint: ModelEndpoint {
         numContext: Int? = nil,
         think: Bool? = nil,
         requestTimeout: TimeInterval = 3_600,
-        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
-        countInputTokens: (@Sendable (ModelInput, [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil
+        countTokens: (@Sendable ([LLMMessage], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
+        countInputTokens: (@Sendable (ModelInput, [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil
     ) {
         self.init(
             model: model,
@@ -66,8 +66,8 @@ public struct OllamaEndpoint: ModelEndpoint {
         temperature: Double,
         numContext: Int? = nil,
         think: Bool? = nil,
-        countTokens: (@Sendable ([LLMMessage], [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
-        countInputTokens: (@Sendable (ModelInput, [LLMToolSchema]) async throws(AgentRuntimeError) -> Int)? = nil,
+        countTokens: (@Sendable ([LLMMessage], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
+        countInputTokens: (@Sendable (ModelInput, [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
         transport: @escaping OllamaTransport
     ) {
         self.model = model
@@ -85,14 +85,14 @@ public struct OllamaEndpoint: ModelEndpoint {
 
     public func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?
+        tools: [ToolDefinition]?
     ) -> AsyncStream<ModelEvent<String>> {
         stream(input: input, tools: tools, purpose: .generation)
     }
 
     public func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         purpose: ModelRequestPurpose
     ) -> AsyncStream<ModelEvent<String>> {
         streamRaw(input: input, tools: tools, purpose: purpose)
@@ -102,7 +102,7 @@ public struct OllamaEndpoint: ModelEndpoint {
     /// that the selected Ollama runner implements native JSON-schema constraints.
     public func stream<T: AgentOutput>(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         streamContract(
@@ -114,10 +114,10 @@ public struct OllamaEndpoint: ModelEndpoint {
 
     private func streamContract<T: AgentOutput>(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
-        let reportTool: (name: String, schema: LLMToolSchema)?
+        let reportTool: (name: String, schema: ToolDefinition)?
         switch T.outputContract {
         case .plainText:
             reportTool = nil
@@ -125,10 +125,10 @@ public struct OllamaEndpoint: ModelEndpoint {
             reportTool = (name, schema)
         }
 
-        let requestTools: [LLMToolSchema]?
+        let requestTools: [ToolDefinition]?
         if let reportTool {
             var result = tools ?? []
-            if !result.contains(where: { $0.function.name == reportTool.name }) {
+            if !result.contains(where: { $0.name == reportTool.name }) {
                 result.append(reportTool.schema)
             }
             requestTools = result
@@ -216,7 +216,7 @@ public struct OllamaEndpoint: ModelEndpoint {
 
     private func streamRaw(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         purpose: ModelRequestPurpose
     ) -> AsyncStream<ModelEvent<String>> {
         AsyncStream(ModelEvent<String>.self) { continuation in
@@ -230,7 +230,10 @@ public struct OllamaEndpoint: ModelEndpoint {
                         temperature: temperature,
                         numContext: numContext,
                         numPredict: Self.compactionOutputLimit(for: purpose),
-                        think: think
+                        // Compaction is a bounded summarization operation, not
+                        // an agent decision. Do not let a reasoning-capable
+                        // model spend its normal hidden-token budget on it.
+                        think: Self.thinkingSetting(for: purpose, configured: think)
                     )
                     let response = try await transport(body)
                     guard (200..<300).contains(response.statusCode) else {
@@ -432,10 +435,18 @@ public struct OllamaEndpoint: ModelEndpoint {
         return max(1, maxOutputTokens)
     }
 
+    private static func thinkingSetting(
+        for purpose: ModelRequestPurpose,
+        configured: Bool?
+    ) -> Bool? {
+        guard case .compaction = purpose else { return configured }
+        return false
+    }
+
     private static func requestBody(
         model: String,
         input: ModelInput,
-        tools: [LLMToolSchema],
+        tools: [ToolDefinition],
         temperature: Double,
         numContext: Int?,
         numPredict: Int?,
@@ -444,7 +455,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         let request = ChatRequest(
             model: model,
             messages: try input.entries.map(RequestMessage.init),
-            tools: tools.isEmpty ? nil : tools.map(RequestTool.init),
+            tools: tools.isEmpty ? nil : try tools.map(RequestTool.init),
             options: RequestOptions(
                 temperature: temperature,
                 numContext: numContext,
@@ -591,11 +602,141 @@ private struct RequestFunctionCall: Encodable, Sendable {
 
 private struct RequestTool: Encodable, Sendable {
     let type: String
-    let function: LLMToolSchema.FunctionSchema
+    private let function: Function
 
-    init(_ tool: LLMToolSchema) {
-        self.type = tool.type
-        self.function = tool.function
+    private struct Function: Encodable, Sendable {
+        let name: String
+        let description: String
+        let parameters: AnyCodableValue
+    }
+
+    init(_ tool: ToolDefinition) throws {
+        self.type = "function"
+        self.function = Function(
+            name: tool.name,
+            description: tool.description,
+            parameters: try OllamaToolSchema.parameters(from: tool.parameters)
+        )
+    }
+}
+
+/// Adapts the canonical schema to Ollama's tool-call parser contract.
+///
+/// Ollama's Qwen-compatible parser determines the type of an XML parameter
+/// from the function's direct root `properties`. It does not resolve a root
+/// `$ref`/`anyOf` before doing that lookup. We therefore inline references and
+/// expose the union of object properties at the root. Hail still decodes the
+/// returned arguments against the original typed schema, so this adaptation
+/// only affects provider guidance and never weakens execution validation.
+private enum OllamaToolSchema {
+    static func parameters(from schema: GenerationSchema) throws -> AnyCodableValue {
+        let data = try JSONEncoder().encode(schema)
+        let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
+        guard case .object(let root) = value else {
+            throw ModelEndpointError.invalidRequest("Ollama tool parameters must be an object schema")
+        }
+
+        let definitions: [String: AnyCodableValue]
+        if case .object(let defs) = root["$defs"] {
+            definitions = defs
+        } else {
+            definitions = [:]
+        }
+
+        let rootNode = resolve(.object(root), definitions: definitions)
+        guard case .object(let resolvedRoot) = rootNode else {
+            throw ModelEndpointError.invalidRequest(
+                "Ollama tool parameters must resolve to an object schema"
+            )
+        }
+        let normalized = try normalizeRoot(resolvedRoot, definitions: definitions)
+        guard !containsUnresolvedReference(normalized, definitions: definitions) else {
+            throw ModelEndpointError.invalidRequest(
+                "Ollama tool schema contains an unresolved reference"
+            )
+        }
+        return normalized
+    }
+
+    private static func resolve(
+        _ value: AnyCodableValue,
+        definitions: [String: AnyCodableValue]
+    ) -> AnyCodableValue {
+        guard case .object(let object) = value,
+            case .string(let reference)? = object["$ref"],
+            let name = reference.split(separator: "/").last.map(String.init),
+            let definition = definitions[name]
+        else {
+            return value
+        }
+        return resolve(definition, definitions: definitions)
+    }
+
+    private static func normalizeRoot(
+        _ object: [String: AnyCodableValue],
+        definitions: [String: AnyCodableValue]
+    ) throws -> AnyCodableValue {
+        if object["anyOf"] != nil {
+            throw ModelEndpointError.invalidRequest(
+                "Ollama tool parameters cannot use a root union; expose each variant as a separate tool"
+            )
+        }
+        return normalizeObject(object, definitions: definitions)
+    }
+
+    private static func normalizeObject(
+        _ object: [String: AnyCodableValue],
+        definitions: [String: AnyCodableValue]
+    ) -> AnyCodableValue {
+        var result = object.filter { $0.key != "$defs" && $0.key != "$ref" }
+        if case .object(let properties)? = object["properties"] {
+            result["properties"] = .object(
+                properties.mapValues { normalize($0, definitions: definitions) }
+            )
+        }
+        if let items = object["items"] {
+            result["items"] = normalize(items, definitions: definitions)
+        }
+        return .object(result)
+    }
+
+    private static func normalize(
+        _ value: AnyCodableValue,
+        definitions: [String: AnyCodableValue]
+    ) -> AnyCodableValue {
+        let resolved = resolve(value, definitions: definitions)
+        guard case .object(let object) = resolved else { return resolved }
+
+        if case .array(let choices)? = object["anyOf"] {
+            return .objectUnion(
+                choices.map { normalize($0, definitions: definitions) }
+            )
+        }
+        return normalizeObject(object, definitions: definitions)
+    }
+
+    private static func containsUnresolvedReference(
+        _ value: AnyCodableValue,
+        definitions: [String: AnyCodableValue]
+    ) -> Bool {
+        switch value {
+        case .object(let object):
+            if case .string(let reference)? = object["$ref"],
+                let name = reference.split(separator: "/").last.map(String.init),
+                definitions[name] == nil
+            {
+                return true
+            }
+            return object.values.contains {
+                containsUnresolvedReference($0, definitions: definitions)
+            }
+        case .array(let values):
+            return values.contains {
+                containsUnresolvedReference($0, definitions: definitions)
+            }
+        case .string, .number, .bool, .null:
+            return false
+        }
     }
 }
 
@@ -672,13 +813,17 @@ private struct ChunkFunction: Decodable, Sendable {
 }
 
 /// A JSON value used only for preserving Ollama's arbitrary tool arguments.
-private enum AnyCodableValue: Codable, Sendable {
+private enum AnyCodableValue: Codable, Equatable, Sendable {
     case object([String: AnyCodableValue])
     case array([AnyCodableValue])
     case string(String)
     case number(Double)
     case bool(Bool)
     case null
+
+    static func objectUnion(_ values: [AnyCodableValue]) -> AnyCodableValue {
+        .object(["anyOf": .array(values)])
+    }
 
     init(from decoder: Decoder) throws {
         if let container = try? decoder.container(keyedBy: DynamicKey.self) {

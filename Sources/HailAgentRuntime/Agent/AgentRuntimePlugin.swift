@@ -117,7 +117,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     private let deliveryTracker: AgentDeliveryTracker
     private let modelRouter: ModelRouter
     /// Host-selected model used only when no definition provider is supplied.
-    public let defaultModel: AgentModelReference
+    public let defaultModel: AgentModel
     /// Host-selected effort used only when no definition provider is supplied.
     /// `nil` leaves the selected provider/model default unchanged.
     public let defaultReasoningEffort: ReasoningEffort?
@@ -164,7 +164,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     public let contextProvider: AgentContextProvider?
 
     public init(
-        defaultModel: AgentModelReference,
+        defaultModel: AgentModel,
         maxToolRounds: Int,
         routerConfiguration: ModelRouterConfiguration,
         mcpServerConfiguration: MCPServerConfiguration? = nil,

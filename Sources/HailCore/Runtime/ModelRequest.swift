@@ -331,8 +331,8 @@ public struct AgentHistoryReader: Sendable, Equatable {
             modelRequests[index].completedAt = at
             modelRequests[index].durationMilliseconds = durationMilliseconds
             modelRequests[index].outcome = .failed(error)
-        case .toolInvoked(let call, let at):
-            tools.append(ToolHistoryRecord(call: call, startedAt: at))
+        case .assistantToolRound(_, _, let calls, let at):
+            tools.append(contentsOf: calls.map { ToolHistoryRecord(call: $0, startedAt: at) })
         case .toolResult(let result, let at):
             guard let index = tools.lastIndex(where: { $0.call.id == result.toolCallID }) else { return }
             tools[index].result = result

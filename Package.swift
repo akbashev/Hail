@@ -1,5 +1,6 @@
 // swift-tools-version: 6.4
 import PackageDescription
+import CompilerPluginSupport
 
 let package = Package(
     name: "Hail",
@@ -13,6 +14,7 @@ let package = Package(
         .library(name: "ScopedEffect", targets: ["ScopedEffect"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", "509.0.0"..<"605.0.0"),
         .package(url: "https://github.com/apple/swift-distributed-actors.git", branch: "main"),
         .package(url: "https://github.com/akbashev/cluster-virtual-actors.git", branch: "main"),
         .package(url: "https://github.com/akbashev/cluster-event-sourcing.git", branch: "main"),
@@ -28,6 +30,13 @@ let package = Package(
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.21.0"),
     ],
     targets: [
+        .macro(
+            name: "HailMacros",
+            dependencies: [
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
+            ]
+        ),
         .target(
             name: "ScopedEffect",
             exclude: ["README.md"],
@@ -39,6 +48,7 @@ let package = Package(
             name: "HailCore",
             dependencies: [
                 "ScopedEffect",
+                "HailMacros",
                 .product(name: "AnyLanguageModel", package: "AnyLanguageModel"),
             ],
             swiftSettings: [
@@ -100,6 +110,14 @@ let package = Package(
             dependencies: ["Hail", "HailCore", "HailModelRuntime", "HailAgentRuntime", "ScopedEffect"],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")
+            ]
+        ),
+        .testTarget(
+            name: "HailMacrosTests",
+            dependencies: [
+                "HailMacros",
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
             ]
         ),
         .testTarget(

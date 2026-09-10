@@ -131,7 +131,7 @@ struct ACPSessionCancellationTests {
         let identity = SessionIdentity("cancel-cold-start")
 
         let (stream, _) = try await session.executeTurnPrompt(
-            bootstrap: "hello", delta: "hello", memorySnapshot: nil, identity: identity)
+            bootstrap: "hello", delta: "hello", identity: identity)
         let consumer = Task {
             do {
                 for try await _ in stream {}
@@ -148,7 +148,7 @@ struct ACPSessionCancellationTests {
         // onTermination, so by the time the consumer has ended the decision
         // is already forced — no settling wait is needed here.
         _ = try await session.executeTurnPrompt(
-            bootstrap: "again", delta: "again", memorySnapshot: nil, identity: identity)
+            bootstrap: "again", delta: "again", identity: identity)
 
         // The second prompt reached a *new* harness process.
         #expect(await stubLog(log, contains: "again"))
@@ -192,6 +192,52 @@ struct ReasoningLoopCancellationTests {
         }
         #expect(wrapped.emitsFailure)
     }
+
+    @Test("repeated identical tool failures stop after one correction attempt")
+    func repeatedToolFailuresAreBounded() throws {
+        func result(id: String, output: String) throws -> ToolResult {
+            try JSONDecoder().decode(
+                ToolResult.self,
+                from: Data(
+                    #"{"tool_call_id":"\#(id)","name":"timer","output":"\#(output)","failure_kind":"invalidArguments"}"#.utf8
+                )
+            )
+        }
+
+        let failure = try result(
+            id: "call-1",
+            output: "Error: tool timer received invalid arguments at trigger: expected object; found string"
+        )
+        var tracker = ToolFailureTracker()
+
+        let first = tracker.record(results: [failure])
+        let second = tracker.record(results: [failure])
+        let changed = tracker.record(results: [try result(
+            id: "call-3",
+            output: "Error: tool timer received invalid arguments at trigger: expected object; found array"
+        )])
+        #expect(!first)
+        #expect(second)
+        #expect(!changed)
+    }
+
+    @Test("transient tool failures do not trigger the deterministic failure guard")
+    func transientToolFailuresAreNotBoundedAsInvalidArguments() throws {
+        let failure = ToolResult(
+            toolCallID: "call-1",
+            name: "web_search",
+            output: "Error: service unavailable",
+            failureKind: .unavailable
+        )
+        var tracker = ToolFailureTracker()
+
+        let first = tracker.record(results: [failure])
+        let second = tracker.record(results: [failure])
+        let third = tracker.record(results: [failure])
+        #expect(!first)
+        #expect(!second)
+        #expect(!third)
+    }
 }
 
 /// A tool that throws `CancellationError` — standing in for a tool awaiting a
@@ -205,19 +251,8 @@ struct ToolRegistryCancellationTests {
         let name = "cancellation_throwing_tool"
         let description = "Always throws CancellationError when executed."
 
-        var schema: LLMToolSchema {
-            LLMToolSchema(
-                type: "function",
-                function: LLMToolSchema.FunctionSchema(
-                    name: name,
-                    description: description,
-                    parameters: LLMToolSchema.ParameterSchema(
-                        type: "object",
-                        properties: [:],
-                        required: []
-                    )
-                )
-            )
+        var schema: ToolDefinition {
+            TestToolDefinition.empty(name: name, description: description)
         }
 
         func effect(for input: Input) throws -> ClockEffect {
@@ -235,19 +270,8 @@ struct ToolRegistryCancellationTests {
         let name = "failing_tool"
         let description = "Always fails with an ordinary tool error."
 
-        var schema: LLMToolSchema {
-            LLMToolSchema(
-                type: "function",
-                function: LLMToolSchema.FunctionSchema(
-                    name: name,
-                    description: description,
-                    parameters: LLMToolSchema.ParameterSchema(
-                        type: "object",
-                        properties: [:],
-                        required: []
-                    )
-                )
-            )
+        var schema: ToolDefinition {
+            TestToolDefinition.empty(name: name, description: description)
         }
 
         func effect(for input: Input) throws -> ClockEffect {
@@ -256,6 +280,27 @@ struct ToolRegistryCancellationTests {
 
         func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
             throw ToolError.notConfigured("test")
+        }
+    }
+
+    private struct NestedInputTool: Tool {
+        struct Input: Codable, Sendable {
+            let trigger: [String: String]
+        }
+
+        let name = "nested_input_tool"
+        let description = "Requires an object in trigger."
+
+        var schema: ToolDefinition {
+            TestToolDefinition.empty(name: name, description: description)
+        }
+
+        func effect(for input: Input) throws -> ClockEffect {
+            ClockEffect()
+        }
+
+        func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
+            "ok"
         }
     }
 
@@ -281,5 +326,25 @@ struct ToolRegistryCancellationTests {
         ])
         try #require(results.count == 1)
         #expect(results[0].isError)
+        #expect(results[0].failureKind == .unavailable)
+    }
+
+    @Test("decoding failures include the failing argument path")
+    func decodingFailureIdentifiesArgumentPath() async throws {
+        let registry = ToolRegistry()
+        await registry.register(NestedInputTool())
+
+        let results = try await registry.execute([
+            ToolCall(
+                id: "call-1",
+                name: "nested_input_tool",
+                arguments: ToolArguments(json: #"{"trigger":"not-an-object"}"#)
+            )
+        ])
+
+        try #require(results.count == 1)
+        #expect(results[0].isError)
+        #expect(results[0].output.contains("at trigger"))
+        #expect(results[0].output.contains("found a string"))
     }
 }

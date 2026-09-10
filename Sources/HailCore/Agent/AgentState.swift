@@ -14,7 +14,6 @@ public struct AgentState: Codable, Sendable {
 
     public var agentID: AgentID
     public var conversationThread: [ChatMessage]
-    public var workingMemory: [String]
 
     /// The rolling summary of compacted-away conversation history. Each
     /// `conversationCompacted` event REPLACES it (the new summary folds the
@@ -101,16 +100,14 @@ public struct AgentState: Codable, Sendable {
 
     public init(
         agentID: AgentID,
-        conversationThread: [ChatMessage] = [],
-        workingMemory: [String] = []
+        conversationThread: [ChatMessage] = []
     ) {
         self.agentID = agentID
         self.conversationThread = conversationThread
-        self.workingMemory = workingMemory
     }
 
     private enum CodingKeys: String, CodingKey {
-        case agentID, conversationThread, workingMemory, contextSummary, activeTurn,
+        case agentID, conversationThread, contextSummary, activeTurn,
             pendingTurnRerun, modelSession, usageSummary,
             latestContextUsage, modelRequests, phase, currentToolName
     }
@@ -119,7 +116,6 @@ public struct AgentState: Codable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         agentID = try container.decode(AgentID.self, forKey: .agentID)
         conversationThread = try container.decode([ChatMessage].self, forKey: .conversationThread)
-        workingMemory = try container.decode([String].self, forKey: .workingMemory)
         contextSummary = try container.decodeIfPresent(String.self, forKey: .contextSummary)
         activeTurn = try container.decodeIfPresent(ActiveTurn.self, forKey: .activeTurn)
         pendingTurnRerun = try container.decodeIfPresent(ChatMessage.self, forKey: .pendingTurnRerun)
@@ -138,7 +134,6 @@ public struct AgentState: Codable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(agentID, forKey: .agentID)
         try container.encode(conversationThread, forKey: .conversationThread)
-        try container.encode(workingMemory, forKey: .workingMemory)
         try container.encodeIfPresent(contextSummary, forKey: .contextSummary)
         try container.encodeIfPresent(activeTurn, forKey: .activeTurn)
         try container.encodeIfPresent(pendingTurnRerun, forKey: .pendingTurnRerun)
@@ -153,7 +148,7 @@ public struct AgentState: Codable, Sendable {
     /// Apply a single event to this state. This is the only place where event
     /// replay mutates agent state, making the transition deterministic and
     /// testable.
-    public mutating func apply(_ event: AgentEvent, maxMemoryFragments: Int) {
+    public mutating func apply(_ event: AgentEvent) {
         switch event {
         case .activated(let agentID):
             self.agentID = agentID
@@ -202,11 +197,6 @@ public struct AgentState: Codable, Sendable {
                     }
                 }
             }
-        case .assistantText(let content, let at):
-            guard !content.isEmpty else { break }
-            conversationThread.append(
-                .text(sender: agentID.rawValue, content: content, timestamp: at)
-            )
         case .assistantToolRound(let content, let thinking, let calls, let at):
             conversationThread.append(
                 .assistantToolCall(
@@ -218,18 +208,6 @@ public struct AgentState: Codable, Sendable {
             )
             phase = .executingTool
             currentToolName = calls.first?.name
-        case .contextSet:
-            // Context is part of the immutable agent identity; no state change.
-            break
-        case .toolInvoked(let toolCall, let at):
-            // Old events may not carry tool timing. Derive their timestamp
-            // from durable state rather than wall-clock time so replay remains
-            // a deterministic fold.
-            conversationThread.append(
-                .toolCall(calls: [toolCall], timestamp: replayTimestamp(for: at))
-            )
-            phase = .executingTool
-            currentToolName = toolCall.name
         case .toolResult(let result, let at):
             conversationThread.append(
                 .toolResult(
@@ -240,12 +218,6 @@ public struct AgentState: Codable, Sendable {
             )
             phase = .generating
             currentToolName = nil
-        case .memoryCommitted(let summary):
-            workingMemory.append(summary)
-            let maxFragments = max(0, maxMemoryFragments)
-            if maxFragments > 0 && workingMemory.count > maxFragments {
-                workingMemory.removeFirst(workingMemory.count - maxFragments)
-            }
         case .conversationCompacted(let archivedCount, let summary):
             contextSummary = summary
             if archivedCount > 0 && archivedCount <= conversationThread.count {
@@ -330,9 +302,9 @@ public struct AgentState: Codable, Sendable {
     }
 
     /// Value-oriented reducer form used by projections and tests.
-    public func applying(_ event: AgentEvent, maxMemoryFragments: Int) -> AgentState {
+    public func applying(_ event: AgentEvent) -> AgentState {
         var next = self
-        next.apply(event, maxMemoryFragments: maxMemoryFragments)
+        next.apply(event)
         return next
     }
 }

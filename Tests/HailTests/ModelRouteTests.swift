@@ -8,43 +8,41 @@ import Testing
     import Foundation
 #endif
 
-@Suite("Model routes")
+@Suite("Models")
 struct ModelRouteTests {
-    @Test("a route is a validated provider/model pair")
-    func parsesCompleteRoute() throws {
-        let route = try AgentModelRoute(identifier: "gemini/gemini-2.5-pro")
+    @Test("a model contains a typed provider and model ID")
+    func parsesCompleteModel() throws {
+        let model = try AgentModel("gemini/gemini-2.5-pro")
 
-        #expect(route.provider == .gemini)
-        #expect(route.model == "gemini-2.5-pro")
-        #expect(route.identifier == "gemini/gemini-2.5-pro")
+        #expect(model.provider == .gemini)
+        #expect(model.id == AgentModelID(rawValue: "gemini-2.5-pro"))
+        #expect(model.identifier == "gemini/gemini-2.5-pro")
     }
 
-    @Test("a model reference rejects incomplete serialized routes")
-    func modelReferenceIsStrict() {
-        #expect(throws: AgentModelReferenceError.empty) {
-            try AgentModelReference("  ")
+    @Test("a model rejects incomplete serialized identifiers")
+    func modelIsStrict() {
+        #expect(throws: AgentModelError.empty) {
+            try AgentModel("  ")
         }
-        #expect(
-            throws: AgentModelReferenceError.invalidRoute(.missingModel("gemini"))
-        ) {
-            try AgentModelReference("gemini")
+        #expect(throws: AgentModelError.missingID("gemini")) {
+            try AgentModel("gemini")
         }
     }
 
     @Test("bare providers do not select a hidden model default")
     func rejectsMissingModel() {
-        #expect(throws: AgentModelRouteError.missingModel("gemini")) {
-            try AgentModelRoute(identifier: "gemini")
+        #expect(throws: AgentModelError.missingID("gemini")) {
+            try AgentModel("gemini")
         }
-        #expect(throws: AgentModelRouteError.missingModel("gemini")) {
-            try AgentModelRoute(identifier: "gemini/")
+        #expect(throws: AgentModelError.missingID("gemini")) {
+            try AgentModel("gemini/")
         }
     }
 
-    @Test("custom providers remain valid domain routes")
+    @Test("custom providers remain valid model values")
     func acceptsCustomProvider() throws {
-        let route = try AgentModelRoute(identifier: "mystery/model")
-        #expect(route.provider == AgentModelProvider.custom("mystery"))
+        let model = try AgentModel("mystery/model")
+        #expect(model.provider == AgentModelProvider.custom("mystery"))
     }
 
     @Test("the built-in router rejects providers without an endpoint")
@@ -53,7 +51,7 @@ struct ModelRouteTests {
             configuration: try ModelRouterConfiguration(temperature: 0.7)
         )
         await #expect(
-            throws: ModelRouterError.invalidRoute(.unknownProvider("mystery"))
+            throws: ModelRouterError.unsupportedProvider("mystery")
         ) {
             try await router.endpoint(
                 for: "mystery/model",
@@ -66,19 +64,19 @@ struct ModelRouteTests {
     @Test("built-in endpoint constructors reject missing models")
     func endpointRejectsMissingModel() {
         #expect(
-            throws: ModelRouterError.invalidRoute(.missingModel("claude"))
+            throws: ModelRouterError.invalidModel(.missingID("claude"))
         ) {
             try ClaudeCliEndpoint(model: " ", workingDirectory: "/tmp")
         }
         #expect(
-            throws: ModelRouterError.invalidRoute(
-                .missingModel(AgentModelProvider.kimiCode.rawValue)
+            throws: ModelRouterError.invalidModel(
+                .missingID(AgentModelProvider.kimiCode.rawValue)
             )
         ) {
             try KimiCodeEndpoint(model: "", workingDirectory: "/tmp")
         }
         #expect(
-            throws: ModelRouterError.invalidRoute(.missingModel("codex"))
+            throws: ModelRouterError.invalidModel(.missingID("codex"))
         ) {
             try CodexAppServerEndpoint(model: "", workingDirectory: "/tmp")
         }
@@ -91,7 +89,7 @@ struct ModelRouteTests {
         )
 
         await #expect(
-            throws: ModelRouterError.invalidRoute(.missingModel(""))
+            throws: ModelRouterError.invalidModel(.empty)
         ) {
             try await router.endpoint(
                 for: " ",
@@ -152,7 +150,7 @@ struct ModelRouteTests {
 
     @Test("model-specific context windows override provider defaults")
     func modelContextWindowOverridesProviderWindow() async throws {
-        let model = try AgentModelReference("ollama/qwen3.5:9b-mlx")
+        let model = try AgentModel("ollama/qwen3.5:9b-mlx")
         let router = ModelRouter(
             configuration: try ModelRouterConfiguration(
                 temperature: 0.7,
@@ -173,7 +171,7 @@ struct ModelRouteTests {
 
     @Test("invalid model context windows are rejected at construction")
     func invalidModelContextWindowThrows() throws {
-        let model = try AgentModelReference("ollama/qwen3.5:9b-mlx")
+        let model = try AgentModel("ollama/qwen3.5:9b-mlx")
         #expect(
             throws: ModelRouterConfigurationError.invalidModelContextWindow(model, 0)
         ) {
@@ -186,7 +184,7 @@ struct ModelRouteTests {
 
     @Test("host-declared model capabilities reject unsupported effort levels")
     func rejectsEffortOutsideConfiguredCapabilities() async throws {
-        let model = try AgentModelReference("gemini/gemini-2.5-pro")
+        let model = try AgentModel("gemini/gemini-2.5-pro")
         let router = ModelRouter(
             configuration: try ModelRouterConfiguration(
                 temperature: 0.7,
@@ -216,7 +214,7 @@ struct ModelRouteTests {
 
     @Test("host mappings allow Gemini's non-string thinking controls")
     func geminiUsesConfiguredThinkingEncoding() async throws {
-        let model = try AgentModelReference("gemini/gemini-2.5-pro")
+        let model = try AgentModel("gemini/gemini-2.5-pro")
         let router = ModelRouter(
             configuration: try ModelRouterConfiguration(
                 temperature: 0.7,
@@ -240,7 +238,7 @@ struct ModelRouteTests {
 
     @Test("reasoning capabilities reject invalid token budgets")
     func invalidReasoningTokenBudgetThrows() throws {
-        let model = try AgentModelReference("gemini/gemini-2.5-pro")
+        let model = try AgentModel("gemini/gemini-2.5-pro")
         #expect(throws: ModelRouterConfigurationError.invalidReasoningTokenBudget(model, 0)) {
             try ModelRouterConfiguration(
                 temperature: 0.7,
@@ -260,7 +258,7 @@ struct ModelRouteTests {
 
     @Test("Ollama maps the declared no-reasoning level to its think switch")
     func ollamaAcceptsDeclaredNoReasoningLevel() async throws {
-        let model = try AgentModelReference("ollama/qwen3:8b")
+        let model = try AgentModel("ollama/qwen3:8b")
         let router = ModelRouter(
             configuration: try ModelRouterConfiguration(
                 temperature: 0.7,
@@ -284,7 +282,7 @@ struct ModelRouteTests {
 
     @Test("Ollama rejects graded effort instead of approximating it")
     func ollamaRejectsGradedEffort() async throws {
-        let model = try AgentModelReference("ollama/qwen3:8b")
+        let model = try AgentModel("ollama/qwen3:8b")
         let router = ModelRouter(
             configuration: try ModelRouterConfiguration(
                 temperature: 0.7,
@@ -310,7 +308,7 @@ struct ModelRouteTests {
 
     @Test("reasoning capabilities reject duplicate effort levels")
     func duplicateReasoningEffortThrows() throws {
-        let model = try AgentModelReference("gemini/gemini-2.5-pro")
+        let model = try AgentModel("gemini/gemini-2.5-pro")
         #expect(throws: ModelRouterConfigurationError.duplicateReasoningEffort(model, .high)) {
             try ModelRouterConfiguration(
                 temperature: 0.7,

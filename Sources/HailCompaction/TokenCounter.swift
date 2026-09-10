@@ -1,4 +1,5 @@
 import HailCore
+import AnyLanguageModel
 import Tokenizers
 
 #if canImport(FoundationEssentials)
@@ -83,7 +84,7 @@ public struct TokenCounter: Sendable {
 
     public func count(
         messages: [LLMMessage],
-        tools: [LLMToolSchema] = []
+        tools: [ToolDefinition] = []
     ) throws -> Int {
         let prompt = messages.map(message)
         let toolSpecs = tools.isEmpty ? nil : tools.map(tool)
@@ -116,44 +117,24 @@ public struct TokenCounter: Sendable {
         return result
     }
 
-    private func tool(_ tool: LLMToolSchema) -> [String: any Sendable] {
+    private func tool(_ tool: ToolDefinition) -> [String: any Sendable] {
         [
-            "type": tool.type,
+            "type": "function",
             "function": [
-                "name": tool.function.name,
-                "description": tool.function.description,
-                "parameters": parameters(tool.function.parameters),
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": parameters(tool.parameters),
             ] as [String: any Sendable],
         ]
     }
 
-    private func parameters(_ parameters: LLMToolSchema.ParameterSchema) -> [String: any Sendable] {
-        var result: [String: any Sendable] = ["type": parameters.type]
-        if let properties = parameters.properties {
-            result["properties"] = properties.mapValues { propertySchema($0) }
-        }
-        if let required = parameters.required {
-            result["required"] = required
-        }
-        return result
-    }
-
-    private func propertySchema(_ property: LLMToolSchema.PropertySchema) -> [String: any Sendable] {
-        var result: [String: any Sendable] = [
-            "type": property.type,
-            "description": property.description,
-        ]
-        if let enumValues = property.enumValues {
-            result["enum"] = enumValues
-        }
-        if let items = property.items {
-            result["items"] = propertySchema(items)
-        }
-        if let properties = property.properties {
-            result["properties"] = properties.mapValues { propertySchema($0) }
-        }
-        if let required = property.required {
-            result["required"] = required
+    private func parameters(_ schema: GenerationSchema) -> [String: any Sendable] {
+        guard
+            let data = try? JSONEncoder().encode(schema),
+            let value = try? JSONSerialization.jsonObject(with: data),
+            let result = value as? [String: any Sendable]
+        else {
+            return [:]
         }
         return result
     }

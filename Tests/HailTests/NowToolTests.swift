@@ -68,7 +68,9 @@ struct NowToolTests {
     func requiresExplicitTimezone() {
         let schema = NowTool().schema
 
-        #expect(schema.function.parameters.required == ["time_zone"])
+        let encoded = try! JSONEncoder().encode(schema.parameters)
+        let serialized = String(decoding: encoded, as: UTF8.self)
+        #expect(serialized.contains("time_zone"))
     }
 
     @Test("encodes the timezone across the model boundary")

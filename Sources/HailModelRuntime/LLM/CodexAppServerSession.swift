@@ -32,7 +32,6 @@ actor CodexAppServerSession {
     private var liveSessionID: String?
     private var sessionIdentity: SessionIdentity?
     private var threadIsAttached = false
-    private var lastMemorySnapshot: String?
 
     /// Stall ceiling. A turn produces app-server traffic as it works, so a
     /// turn silent for this long is live-but-wedged (upstream stall,
@@ -93,7 +92,6 @@ actor CodexAppServerSession {
         fullPrompt: String,
         deltaPrompt: String?,
         identity: SessionIdentity?,
-        memorySnapshot: String?,
         outputSchema: Data?,
         turnAuthority: (any Authority)?,
         onNarration: @escaping @Sendable (CodexNarration) -> Void
@@ -111,8 +109,7 @@ actor CodexAppServerSession {
             let prompt = try await prepareThread(
                 fullPrompt: fullPrompt,
                 deltaPrompt: deltaPrompt,
-                identity: identity,
-                memorySnapshot: memorySnapshot
+                identity: identity
             )
             guard let sessionID else { throw CodexSessionError.missingThreadID }
             return try await executeTurn(
@@ -138,19 +135,18 @@ actor CodexAppServerSession {
     private func prepareThread(
         fullPrompt: String,
         deltaPrompt: String?,
-        identity: SessionIdentity?,
-        memorySnapshot: String?
+        identity: SessionIdentity?
     ) async throws -> String {
         let sessionTurn = identity != nil && deltaPrompt != nil
         let sameIdentity = sessionTurn && sessionIdentity == identity
 
-        if sameIdentity, threadIsAttached, sessionID != nil {
-            return warmPrompt(deltaPrompt!, memorySnapshot: memorySnapshot)
+        if sameIdentity, threadIsAttached, sessionID != nil, let deltaPrompt {
+            return deltaPrompt
         }
-        if sameIdentity, let durableID = sessionID {
+        if sameIdentity, let durableID = sessionID, let deltaPrompt {
             do {
                 try await attachThread(durableID)
-                return warmPrompt(deltaPrompt!, memorySnapshot: memorySnapshot)
+                return deltaPrompt
             } catch {
                 codexSessionLogger.warning(
                     "Could not resume Codex thread; cold-bootstrapping",
@@ -165,19 +161,8 @@ actor CodexAppServerSession {
         sessionIdentity = identity
         sessionID = nil
         threadIsAttached = false
-        lastMemorySnapshot = memorySnapshot
         try await startThread()
         return fullPrompt
-    }
-
-    private func warmPrompt(_ delta: String, memorySnapshot: String?) -> String {
-        var parts: [String] = []
-        if let memorySnapshot, memorySnapshot != lastMemorySnapshot {
-            parts.append(memorySnapshot)
-            lastMemorySnapshot = memorySnapshot
-        }
-        parts.append(delta)
-        return parts.joined(separator: "\n\n")
     }
 
     private func startThread() async throws {
@@ -426,7 +411,6 @@ actor CodexAppServerSession {
             sessionID = nil
             liveSessionID = nil
             sessionIdentity = nil
-            lastMemorySnapshot = nil
         }
     }
 

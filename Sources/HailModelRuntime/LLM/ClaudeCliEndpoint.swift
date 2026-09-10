@@ -22,7 +22,6 @@ private final class ClaudeSessionState: Sendable {
     struct State: Sendable {
         var sessionID: SessionID?
         var identity: SessionIdentity?
-        var memorySnapshot: String?
     }
 
     private let state = Mutex(State())
@@ -35,10 +34,6 @@ private final class ClaudeSessionState: Sendable {
         state.withLock { $0.sessionID = id }
     }
 
-    func setMemorySnapshot(_ memory: String?) {
-        state.withLock { $0.memorySnapshot = memory }
-    }
-
     /// Primes the box with a journaled session to resume on the first turn.
     func prime(id: SessionID, identity: SessionIdentity) {
         state.withLock {
@@ -47,13 +42,11 @@ private final class ClaudeSessionState: Sendable {
         }
     }
 
-    /// Drops the current session and re-arms identity/memory for the next
-    /// (cold) turn.
-    func reset(identity: SessionIdentity?, memorySnapshot: String?) {
+    /// Drops the current session and re-arms identity for the next cold turn.
+    func reset(identity: SessionIdentity?) {
         state.withLock {
             $0.sessionID = nil
             $0.identity = identity
-            $0.memorySnapshot = memorySnapshot
         }
     }
 }
@@ -105,7 +98,7 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     ) throws(ModelRouterError) {
         let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
-            throw .invalidRoute(.missingModel(AgentModelProvider.claude.rawValue))
+            throw .invalidModel(.missingID(AgentModelProvider.claude.rawValue))
         }
         self.model = model
         self.executionPolicy = executionPolicy
@@ -130,7 +123,7 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
 
     public func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?
+        tools: [ToolDefinition]?
     ) -> AsyncStream<ModelEvent<String>> {
         AsyncStream(ModelEvent<String>.self) { continuation in
             let task = Task {
@@ -168,7 +161,7 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
 
     public func stream<T: AgentOutput>(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         switch T.outputContract {
@@ -619,7 +612,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
         input: ModelInput,
         delta turnDelta: TurnDelta,
         authority: any Authority,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         let reportToolName: String?
@@ -658,25 +651,14 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
                     let messages = try input.textMessages(for: model)
                     continuation.yield(.status("Claude CLI is running."))
 
-                    let memorySnapshot =
-                        turnDelta.workingMemory.isEmpty
-                        ? nil
-                        : "Current working memory (supersedes any earlier memory in this session):\n"
-                            + turnDelta.workingMemory.map { "- \($0)" }.joined(separator: "\n")
-
                     let prompt: String
                     let resumeID: SessionID?
                     let snapshot = sessionState.snapshot
                     if let sessionID = snapshot.sessionID, snapshot.identity == turnDelta.sessionIdentity {
-                        var parts: [String] = []
-                        if let memorySnapshot, memorySnapshot != snapshot.memorySnapshot {
-                            parts.append(memorySnapshot)
-                            sessionState.setMemorySnapshot(memorySnapshot)
-                        }
-                        parts.append(
-                            Self.formatPrompt(messages: turnDelta.current.messages, reportToolName: reportToolName)
+                        prompt = Self.formatPrompt(
+                            messages: turnDelta.current.messages,
+                            reportToolName: reportToolName
                         )
-                        prompt = parts.joined(separator: "\n\n")
                         resumeID = sessionID
                         claudeLogger.info(
                             "Resuming claude session with warm delta",
@@ -688,8 +670,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
                         )
                     } else {
                         sessionState.reset(
-                            identity: turnDelta.sessionIdentity,
-                            memorySnapshot: memorySnapshot
+                            identity: turnDelta.sessionIdentity
                         )
                         prompt = Self.formatPrompt(messages: messages, reportToolName: reportToolName)
                         resumeID = nil

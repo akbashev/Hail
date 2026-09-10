@@ -45,7 +45,7 @@ struct AgentDirectoryTests {
     @Test("default snapshot policy translates into executable snapshotting")
     func defaultSnapshotPolicyIsTranslated() async throws {
         let runtime = try AgentRuntimePlugin(
-            defaultModel: try AgentModelReference("test/model"),
+            defaultModel: try AgentModel("test/model"),
             maxToolRounds: 25,
             routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
             workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") }
@@ -69,7 +69,7 @@ struct AgentDirectoryTests {
     @Test("an unavailable directory never looks empty or absent")
     func unavailableDirectoryThrows() async throws {
         let runtime = try AgentRuntimePlugin(
-            defaultModel: try AgentModelReference("test/model"),
+            defaultModel: try AgentModel("test/model"),
             maxToolRounds: 25,
             routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
             workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") }
@@ -93,7 +93,7 @@ struct AgentDirectoryTests {
     func invalidToolRoundLimitThrows() {
         #expect(throws: AgentRuntimeConfigurationError.invalidMaxToolRounds(0)) {
             try AgentRuntimePlugin(
-                defaultModel: try AgentModelReference("test/model"),
+                defaultModel: try AgentModel("test/model"),
                 maxToolRounds: 0,
                 routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
                 workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") }

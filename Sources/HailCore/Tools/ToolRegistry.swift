@@ -35,17 +35,17 @@ public actor ToolRegistry: Sendable {
         tools.values.sorted { $0.name < $1.name }
     }
 
-    public func schemas(forTools toolNames: [String]? = nil) -> [LLMToolSchema] {
+    public func schemas(forTools toolNames: [String]? = nil) -> [ToolDefinition] {
         if let toolNames {
             let allowed = Set(toolNames)
             return tools.values
                 .filter { allowed.contains($0.name) }
                 .map { $0.schema }
-                .sorted { $0.function.name < $1.function.name }
+                .sorted { $0.name < $1.name }
         }
         return tools.values
             .map { $0.schema }
-            .sorted { $0.function.name < $1.function.name }
+            .sorted { $0.name < $1.name }
     }
 
     public func execute(_ toolCalls: [LLMToolCall]) async throws(AgentRuntimeError) -> [ToolResult] {
@@ -65,6 +65,10 @@ public actor ToolRegistry: Sendable {
         }
     }
 
+    public func register(_ tools: any Tool...) {
+        register(tools: tools)
+    }
+
     public func execute(_ toolCalls: [ToolCall]) async throws(AgentRuntimeError) -> [ToolResult] {
         try await executeWithOutputs(toolCalls).map(\.result)
     }
@@ -80,7 +84,7 @@ public actor ToolRegistry: Sendable {
                     toolCallID: call.id,
                     name: call.name,
                     output: "Error: unknown tool: \(call.name)",
-                    isError: true
+                    failureKind: .rejected
                 )
                 executions.append(ToolExecution(result: result, output: .text(result.output)))
                 continue
@@ -92,7 +96,7 @@ public actor ToolRegistry: Sendable {
                     toolCallID: call.id,
                     name: call.name,
                     output: output.transcript,
-                    isError: false
+                    failureKind: nil
                 )
                 executions.append(ToolExecution(result: result, output: output))
             } catch let denial as EffectDenied {
@@ -100,7 +104,7 @@ public actor ToolRegistry: Sendable {
                     toolCallID: call.id,
                     name: call.name,
                     output: "Error: \(denial)",
-                    isError: true
+                    failureKind: .rejected
                 )
                 executions.append(ToolExecution(result: result, output: .text(result.output)))
             } catch let error as ToolError {
@@ -108,7 +112,7 @@ public actor ToolRegistry: Sendable {
                     toolCallID: call.id,
                     name: call.name,
                     output: Self.toolErrorMessage(error, toolName: call.name),
-                    isError: true
+                    failureKind: Self.failureKind(for: error)
                 )
                 executions.append(ToolExecution(result: result, output: .text(result.output)))
             } catch let error as DecodingError {
@@ -116,7 +120,7 @@ public actor ToolRegistry: Sendable {
                     toolCallID: call.id,
                     name: call.name,
                     output: "Error: tool \(call.name) received invalid arguments: \(Self.decodingMessage(error))",
-                    isError: true
+                    failureKind: .invalidArguments
                 )
                 executions.append(ToolExecution(result: result, output: .text(result.output)))
             } catch is CancellationError {
@@ -126,7 +130,7 @@ public actor ToolRegistry: Sendable {
                     toolCallID: call.id,
                     name: call.name,
                     output: "Error: \(error)",
-                    isError: true
+                    failureKind: .failed
                 )
                 executions.append(ToolExecution(result: result, output: .text(result.output)))
             }
@@ -148,16 +152,27 @@ public actor ToolRegistry: Sendable {
         }
     }
 
+    private static func failureKind(for error: ToolError) -> ToolFailureKind {
+        switch error {
+        case .missingArgument, .invalidArgument:
+            return .invalidArguments
+        case .unauthorized:
+            return .rejected
+        case .notConfigured:
+            return .unavailable
+        }
+    }
+
     private static func decodingMessage(_ error: DecodingError) -> String {
         switch error {
         case .keyNotFound(let key, let context):
-            return "missing key '\(key.stringValue)' at \(codingPath(context.codingPath))"
-        case .typeMismatch(_, let context):
-            return context.debugDescription
-        case .valueNotFound(_, let context):
-            return context.debugDescription
+            return "at \(codingPath(context.codingPath)): missing key '\(key.stringValue)'"
+        case .typeMismatch(let type, let context):
+            return "at \(codingPath(context.codingPath)): expected \(String(describing: type)); \(context.debugDescription)"
+        case .valueNotFound(let type, let context):
+            return "at \(codingPath(context.codingPath)): expected \(String(describing: type)); \(context.debugDescription)"
         case .dataCorrupted(let context):
-            return context.debugDescription
+            return "at \(codingPath(context.codingPath)): \(context.debugDescription)"
         @unknown default:
             return String(describing: error)
         }

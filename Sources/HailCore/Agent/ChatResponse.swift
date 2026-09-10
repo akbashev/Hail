@@ -44,23 +44,20 @@ public struct ChatResponse: Codable, Sendable, Hashable, AgentOutput {
         .plainText
     }
 
-    public static var reportToolSchema: LLMToolSchema {
-        LLMToolSchema(
-            type: "function",
-            function: LLMToolSchema.FunctionSchema(
-                name: reportToolName,
-                description: "Report the final content of a chat turn.",
-                parameters: LLMToolSchema.ParameterSchema(
-                    type: "object",
-                    properties: [
-                        "content": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "The chat response text.",
-                            enumValues: nil
-                        )
-                    ],
-                    required: ["content"]
-                )
+    public static var reportToolSchema: ToolDefinition {
+        ToolDefinition(
+            name: reportToolName,
+            description: "Report the final content of a chat turn.",
+            parameters: ToolSchema.object(
+                name: "ChatResponseArguments",
+                description: "Arguments for reporting the final chat response.",
+                properties: [
+                    .init(
+                        name: "content",
+                        description: "The chat response text.",
+                        schema: ToolSchema.string(name: "ResponseText")
+                    )
+                ]
             )
         )
     }

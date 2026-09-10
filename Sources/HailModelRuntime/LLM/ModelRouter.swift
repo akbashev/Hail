@@ -185,14 +185,14 @@ public actor ModelRouter {
     ) async throws(ModelRouterError) -> any ModelEndpoint {
         let effectiveModel = effectiveModelIdentifier(model)
         guard !effectiveModel.isEmpty else {
-            throw ModelRouterError.invalidRoute(.missingModel(""))
+            throw ModelRouterError.invalidModel(.empty)
         }
-        let route = try Self.parseRoute(effectiveModel)
+        let model = try Self.parseModel(effectiveModel)
         let reasoning = configuration.selection(
             for: reasoningEffort,
-            route: route
+            model: model
         )
-        try configuration.validate(reasoning: reasoning, for: route)
+        try configuration.validate(reasoning: reasoning, for: model)
         if let endpoint = modelEndpointProvider?(
             ModelEndpointRequest(
                 model: effectiveModel,
@@ -207,8 +207,8 @@ public actor ModelRouter {
         ) {
             return endpoint
         }
-        let provider = route.provider
-        let modelName = route.model
+        let provider = model.provider
+        let modelName = model.id.rawValue
         let providerContextLabel = contextID?.rawValue
 
         switch provider {
@@ -280,7 +280,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
-                effectiveContextWindow: configuration.configuredContextWindow(for: route),
+                effectiveContextWindow: configuration.configuredContextWindow(for: model),
                 generationOptions: try Self.generationOptions(
                     provider: provider,
                     model: modelName,
@@ -298,7 +298,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
-                effectiveContextWindow: configuration.configuredContextWindow(for: route),
+                effectiveContextWindow: configuration.configuredContextWindow(for: model),
                 generationOptions: try Self.generationOptions(
                     provider: provider,
                     model: modelName,
@@ -316,7 +316,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
-                effectiveContextWindow: configuration.configuredContextWindow(for: route),
+                effectiveContextWindow: configuration.configuredContextWindow(for: model),
                 generationOptions: try Self.generationOptions(
                     provider: provider,
                     model: modelName,
@@ -334,7 +334,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
-                effectiveContextWindow: configuration.configuredContextWindow(for: route),
+                effectiveContextWindow: configuration.configuredContextWindow(for: model),
                 generationOptions: try Self.geminiGenerationOptions(
                     model: modelName,
                     temperature: configuration.temperature,
@@ -347,12 +347,12 @@ public actor ModelRouter {
             let numContext: Int?
             do {
                 numContext = try await configuration.contextWindowResolver.resolve(
-                    for: route,
+                    for: model,
                     baseURL: baseURL
                 )
             } catch {
                 throw .contextWindowUnavailable(
-                    route.provider,
+                    model.provider,
                     modelName,
                     String(describing: error)
                 )
@@ -392,22 +392,22 @@ public actor ModelRouter {
                     languageModel: SystemLanguageModel.default,
                     modelIdentifier: modelName,
                     temperature: configuration.temperature,
-                    effectiveContextWindow: configuration.configuredContextWindow(for: route)
+                    effectiveContextWindow: configuration.configuredContextWindow(for: model)
                 )
             #else
                 throw ModelRouterError.unsupportedProvider(provider.rawValue)
             #endif
 
         default:
-            throw ModelRouterError.invalidRoute(.unknownProvider(provider.rawValue))
+            throw ModelRouterError.unsupportedProvider(provider.rawValue)
         }
     }
 
-    private static func parseRoute(_ identifier: String) throws(ModelRouterError) -> AgentModelRoute {
+    private static func parseModel(_ identifier: String) throws(ModelRouterError) -> AgentModel {
         do {
-            return try AgentModelRoute(identifier: identifier)
+            return try AgentModel(identifier)
         } catch {
-            throw ModelRouterError.invalidRoute(error)
+            throw ModelRouterError.invalidModel(error)
         }
     }
 

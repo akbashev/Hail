@@ -24,10 +24,9 @@ struct UsageAccountingTests {
             totalTokens: 14,
             source: .reported
         )
-        state.apply(.modelUsage(usage, at: Date()), maxMemoryFragments: 10)
+        state.apply(.modelUsage(usage, at: Date()))
         state.apply(
             .contextUsage(ContextUsage(usedTokens: 12, limitTokens: 100, source: .reported), at: Date()),
-            maxMemoryFragments: 10
         )
 
         #expect(state.conversationThread.isEmpty)
@@ -37,24 +36,6 @@ struct UsageAccountingTests {
         #expect(state.usageSummary.reasoningTokens == 2)
         #expect(state.usageSummary.totalTokens == 14)
         #expect(state.latestContextUsage?.usedTokens == 12)
-    }
-
-    @Test("usage fields are backward-compatible in state snapshots")
-    func oldSnapshotDecodes() throws {
-        let old = #"{"agentID":"scout-usage","conversationThread":[],"workingMemory":[]}"#
-        let state = try JSONDecoder().decode(AgentState.self, from: Data(old.utf8))
-        #expect(state.usageSummary.requestCount == 0)
-        #expect(state.latestContextUsage == nil)
-    }
-
-    @Test("old active-turn snapshots decode without new turn metadata")
-    func oldActiveTurnSnapshotDecodes() throws {
-        let old =
-            #"{"agentID":"scout-usage","conversationThread":[],"workingMemory":[],"activeTurn":{"responded":false}}"#
-        let state = try JSONDecoder().decode(AgentState.self, from: Data(old.utf8))
-        #expect(state.activeTurn?.id == nil)
-        #expect(state.activeTurn?.startedAt == nil)
-        #expect(state.activeTurn?.responded == false)
     }
 
     @Test("request lifecycle is replayable and queryable")
@@ -85,7 +66,7 @@ struct UsageAccountingTests {
 
         var state = AgentState(agentID: agentID)
         for event in events {
-            state.apply(event, maxMemoryFragments: 10)
+            state.apply(event)
         }
 
         #expect(state.activeTurn?.id == turnID)
@@ -118,7 +99,7 @@ struct UsageAccountingTests {
 
         var state = AgentState(agentID: agentID)
         for event in events {
-            state.apply(event, maxMemoryFragments: 10)
+            state.apply(event)
         }
         #expect(state.phase == .compacting)
 
@@ -147,7 +128,6 @@ struct UsageAccountingTests {
                         model: "qwen",
                         startedAt: Date(timeIntervalSince1970: TimeInterval(index))
                     )),
-                maxMemoryFragments: 10
             )
         }
 
@@ -468,6 +448,98 @@ struct UsageAccountingTests {
             input: ModelInput(messages: [LLMMessage(role: .user, content: "hi")]),
             tools: nil
         ) {}
+
+        let compaction = makeEndpoint(think: nil) { object in
+            #expect(object["think"] as? Bool == false)
+        }
+        for await _ in compaction.stream(
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "summarize")]),
+            tools: nil,
+            purpose: .compaction(maxOutputTokens: 64)
+        ) {}
+    }
+
+    @Test("Ollama rejects root union tool schemas instead of flattening them")
+    func ollamaRejectsRootUnionToolSchema() async throws {
+        let schema = ToolSchema.union(
+            name: "TimerInput",
+            description: "Timer input.",
+            choices: [
+                DynamicGenerationSchema(name: "CreateTimer", properties: [.init(name: "message", schema: ToolSchema.string(name: "Message"))]),
+                DynamicGenerationSchema(name: "CancelTimer", properties: [.init(name: "id", schema: ToolSchema.string(name: "ID"))]),
+            ]
+        )
+        let tool = ToolDefinition(name: "timer", description: "Manage timers.", parameters: schema)
+        let endpoint = OllamaEndpoint(
+            model: "qwen3:8b",
+            baseURL: URL(string: "http://ollama.test")!,
+            temperature: 0.7,
+            transport: { _ in
+                Issue.record("The transport must not be called for an unsupported root union")
+                return OllamaHTTPResponse(statusCode: 200, lines: Self.stubLines([]))
+            }
+        )
+
+        var events: [ModelEvent<String>] = []
+        for await event in endpoint.stream(
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "create a timer")]),
+            tools: [tool]
+        ) { events.append(event) }
+        #expect(events.contains { if case .failed(.invalidRequest(let message)) = $0 { message.contains("root union") } else { false } })
+    }
+
+    @Test("Ollama resolves references inside array items")
+    func ollamaResolvesArrayItemSchema() async throws {
+        let item = DynamicGenerationSchema(
+            name: "ReportItem",
+            properties: [
+                .init(name: "namespace", schema: DynamicGenerationSchema(type: String.self)),
+                .init(name: "value", schema: DynamicGenerationSchema(type: String.self)),
+            ]
+        )
+        let schema = try GenerationSchema(
+            root: DynamicGenerationSchema(
+                name: "Report",
+                properties: [
+                    .init(name: "items", schema: DynamicGenerationSchema(arrayOf: item))
+                ]
+            ),
+            dependencies: []
+        )
+        let tool = ToolDefinition(
+            name: "report",
+            description: "Report",
+            parameters: schema
+        )
+        let endpoint = OllamaEndpoint(
+            model: "qwen3:8b",
+            baseURL: URL(string: "http://ollama.test")!,
+            temperature: 0.7,
+            transport: { body in
+                let object = try #require(
+                    JSONSerialization.jsonObject(with: body) as? [String: Any]
+                )
+                let tools = try #require(object["tools"] as? [[String: Any]])
+                let function = try #require(tools.first?["function"] as? [String: Any])
+                let parameters = try #require(function["parameters"] as? [String: Any])
+                let properties = try #require(parameters["properties"] as? [String: Any])
+                let items = try #require(properties["items"] as? [String: Any])
+                let itemSchema = try #require(items["items"] as? [String: Any])
+                let itemProperties = try #require(itemSchema["properties"] as? [String: Any])
+                #expect(itemProperties["namespace"] != nil)
+                return OllamaHTTPResponse(
+                    statusCode: 200,
+                    lines: Self.stubLines([
+                        #"{"message":{"role":"assistant","content":"ok"},"done":true}"#
+                    ])
+                )
+            }
+        )
+
+        for await _ in endpoint.stream(
+            input: ModelInput(messages: [LLMMessage(role: .user, content: "report")]),
+            tools: [tool]
+        ) {}
     }
 
     private func ollamaEndpoint(
@@ -533,24 +605,11 @@ private struct TestReportOutput: AgentOutput, Codable, Sendable, Equatable {
         .reportTool(name: reportToolName, schema: reportToolSchema)
     }
 
-    static var reportToolSchema: LLMToolSchema {
-        LLMToolSchema(
-            type: "function",
-            function: LLMToolSchema.FunctionSchema(
-                name: reportToolName,
-                description: "Report the test output.",
-                parameters: LLMToolSchema.ParameterSchema(
-                    type: "object",
-                    properties: [
-                        "value": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "The output value.",
-                            enumValues: nil
-                        )
-                    ],
-                    required: ["value"]
-                )
-            )
+    static var reportToolSchema: ToolDefinition {
+        ToolDefinition(
+            name: reportToolName,
+            description: "Report the test output.",
+            parameters: generationSchema
         )
     }
 }

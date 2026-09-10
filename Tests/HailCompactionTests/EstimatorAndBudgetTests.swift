@@ -44,13 +44,9 @@ struct TokenEstimatorTests {
     @Test("request estimation includes serialized tool schemas")
     func requestIncludesTools() async throws {
         let message = LLMMessage(role: .user, content: "hello")
-        let tool = LLMToolSchema(
-            type: "function",
-            function: .init(
-                name: "search",
-                description: "Search the indexed workspace",
-                parameters: .init(type: "object", properties: nil, required: nil)
-            )
+        let tool = TestToolDefinition.empty(
+            name: "search",
+            description: "Search the indexed workspace"
         )
 
         let withoutTools = try await estimator.estimate(messages: [message], tools: [])
@@ -73,7 +69,7 @@ struct TokenEstimatorTests {
     @Test("a configured tokenizer failure propagates")
     func exactTokenizerFailurePropagates() async {
         let estimator = TokenEstimator(exactCount: {
-            (_: [LLMMessage], _: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int in
+            (_: [LLMMessage], _: [ToolDefinition]) async throws(AgentRuntimeError) -> Int in
             throw AgentRuntimeError.infrastructureFailure("tokenizer unavailable")
         })
 

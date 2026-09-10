@@ -46,7 +46,6 @@ struct ClaudeCliSessionRoutingTests {
             input: ModelInput(messages: messages),
             delta: TurnDelta(
                 currentMessages: delta,
-                workingMemory: memory,
                 sessionIdentity: SessionIdentity(identity)
             ),
             authority: FullAuthority(),
@@ -266,7 +265,6 @@ struct ClaudeCliSessionRoutingTests {
             input: ModelInput(messages: [LLMMessage(role: .user, content: "HELLO")]),
             delta: TurnDelta(
                 currentMessages: [LLMMessage(role: .user, content: "HELLO")],
-                workingMemory: [],
                 sessionIdentity: SessionIdentity("stall-ceiling")
             ),
             authority: FullAuthority(),

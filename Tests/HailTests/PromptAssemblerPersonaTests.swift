@@ -18,15 +18,13 @@ struct PromptAssemblyPersonaTests {
             role: Role("coder"),
             behavior: .init(
                 systemPrompt: "Code.",
-                model: try AgentModelReference("test/model")
+                model: try AgentModel("test/model")
             ),
-            limits: .init()
         )
         let payload = try JSONEncoder().encode(Response(answer: 42))
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: .chat),
             definition: definition,
-            workingMemory: [],
             conversationThread: [
                 .response(sender: "assistant", payload: payload, timestamp: Date())
             ],
@@ -44,15 +42,13 @@ struct PromptAssemblyPersonaTests {
             role: Role("conversation"),
             behavior: .init(
                 systemPrompt: "Chat.",
-                model: try AgentModelReference("test/model")
+                model: try AgentModel("test/model")
             ),
-            limits: .init()
         )
         let payload = Data(#"{"content":"hello","citations":["source-1"]}"#.utf8)
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
             definition: definition,
-            workingMemory: [],
             conversationThread: [
                 .response(sender: "conversation", payload: payload, timestamp: Date())
             ],
@@ -70,15 +66,13 @@ struct PromptAssemblyPersonaTests {
             role: Role("conversation"),
             behavior: .init(
                 systemPrompt: "Chat.",
-                model: try AgentModelReference("test/model")
+                model: try AgentModel("test/model")
             ),
-            limits: .init()
         )
         let payload = Data(#""hello""#.utf8)
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
             definition: definition,
-            workingMemory: [],
             conversationThread: [
                 .response(sender: "participant:telegram:42", payload: payload, timestamp: Date())
             ],
@@ -98,14 +92,12 @@ struct PromptAssemblyPersonaTests {
             role: Role("conversation"),
             behavior: .init(
                 systemPrompt: "Chat.",
-                model: try AgentModelReference("test/model")
+                model: try AgentModel("test/model")
             ),
-            limits: .init()
         )
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
             definition: definition,
-            workingMemory: [],
             conversationThread: [
                 .text(
                     sender: "participant:telegram:42",
@@ -129,15 +121,13 @@ struct PromptAssemblyPersonaTests {
             role: Role("conversation"),
             behavior: .init(
                 systemPrompt: "Chat.",
-                model: try AgentModelReference("test/model")
+                model: try AgentModel("test/model")
             ),
-            limits: .init()
         )
         let legacyResponse = ChatResponse(content: "{\"content\":\"hello\"}")
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
             definition: definition,
-            workingMemory: [],
             conversationThread: [
                 .response(
                     sender: "conversation",
@@ -159,9 +149,8 @@ struct PromptAssemblyPersonaTests {
             role: Role("coder"),
             behavior: .init(
                 systemPrompt: "Implement the assigned change.",
-                model: try AgentModelReference("test/model")
+                model: try AgentModel("test/model")
             ),
-            limits: .init(),
             persona: AgentPersona(
                 displayName: "Ripley",
                 instructions: "You are calm, direct, and deeply curious about alien life."
@@ -170,7 +159,6 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: .chat),
             definition: definition,
-            workingMemory: [],
             conversationThread: [],
             contextManifest: ContextManifest(items: [])
         )
@@ -207,14 +195,12 @@ struct PromptAssemblyPersonaTests {
             role: Role("coder"),
             behavior: .init(
                 systemPrompt: "Code.",
-                model: try AgentModelReference("test/model")
+                model: try AgentModel("test/model")
             ),
-            limits: .init()
         )
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: AgentContextID("build")),
             definition: definition,
-            workingMemory: [],
             conversationThread: [],
             contextManifest: ContextManifest(items: []),
             instructions: PromptAssemblyInstructions(

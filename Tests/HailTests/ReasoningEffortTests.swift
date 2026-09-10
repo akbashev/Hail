@@ -48,10 +48,9 @@ struct ReasoningEffortTests {
             role: Role("coder"),
             behavior: .init(
                 systemPrompt: "Code.",
-                model: try AgentModelReference("codex/gpt-5.6-luna"),
+                model: try AgentModel("codex/gpt-5.6-luna"),
                 reasoningEffort: .xhigh
             ),
-            limits: .init()
         )
 
         let data = try JSONEncoder().encode(definition)

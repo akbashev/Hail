@@ -371,7 +371,6 @@ public struct SlidingWindowCompactor: ContextCompactor {
         PromptContext(
             agentID: context.agentID,
             definition: context.definition,
-            workingMemory: context.workingMemory,
             contextSummary: summary,
             conversationThread: Array(context.conversationThread.dropFirst(archivedCount)),
             contextManifest: context.contextManifest,
@@ -476,7 +475,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
     private func measure(
         context: PromptContext,
         messages: [LLMMessage],
-        tools: [LLMToolSchema],
+        tools: [ToolDefinition],
         measure: RequestMeasurer?
     ) async throws(AgentRuntimeError) -> Int {
         try await self.measure(
@@ -512,7 +511,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
 
     private func measure(
         messages: [LLMMessage],
-        tools: [LLMToolSchema],
+        tools: [ToolDefinition],
         measure: RequestMeasurer?
     ) async throws(AgentRuntimeError) -> Int {
         try await self.measure(

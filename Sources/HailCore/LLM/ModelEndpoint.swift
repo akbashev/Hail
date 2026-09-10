@@ -113,13 +113,13 @@ public enum ModelRequestPurpose: Sendable, Equatable {
 public enum TokenCounting: Sendable {
     case unavailable
     case available(
-        @Sendable (_ messages: [LLMMessage], _ tools: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int
+        @Sendable (_ messages: [LLMMessage], _ tools: [ToolDefinition]) async throws(AgentRuntimeError) -> Int
     )
     /// Provider-specific counting that can inspect the rich input before it is
     /// projected onto the provider wire format. This is the capability used
     /// when a tool returns an image, audio file, document, or other artifact.
     case availableInput(
-        @Sendable (_ input: ModelInput, _ tools: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int
+        @Sendable (_ input: ModelInput, _ tools: [ToolDefinition]) async throws(AgentRuntimeError) -> Int
     )
 }
 
@@ -275,7 +275,7 @@ public protocol ModelEndpoint: Sendable {
     /// invokes `stream` again for the next turn.
     func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?
+        tools: [ToolDefinition]?
     ) -> AsyncStream<ModelEvent<String>>
 
     /// Streams a plain-text request with an explicit semantic purpose.
@@ -283,7 +283,7 @@ public protocol ModelEndpoint: Sendable {
     /// output without silently changing ordinary generation limits.
     func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         purpose: ModelRequestPurpose
     ) -> AsyncStream<ModelEvent<String>>
 
@@ -294,7 +294,7 @@ public protocol ModelEndpoint: Sendable {
     /// stream terminates with exactly one of `.generated(T)` or `.failed(...)`.
     func stream<T: AgentOutput>(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>>
 }
@@ -308,7 +308,7 @@ extension ModelEndpoint {
 
     public func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         purpose: ModelRequestPurpose
     ) -> AsyncStream<ModelEvent<String>> {
         stream(input: input, tools: tools)
@@ -319,7 +319,7 @@ extension ModelEndpoint {
     /// matching `T`.
     public func stream<T: AgentOutput>(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         AsyncStream(ModelEvent<T>.self) { continuation in

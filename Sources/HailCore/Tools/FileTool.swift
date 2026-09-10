@@ -6,7 +6,8 @@ import ScopedEffect
     import Foundation
 #endif
 
-public struct FileTool: Tool {
+@Tool
+public struct FileTool {
     public enum Action: String, Codable, Sendable {
         case read, write, replace, list, exists
 
@@ -38,43 +39,46 @@ public struct FileTool: Tool {
     public let description =
         "Read and write files in the project. Use this to read code, write new files, or edit existing ones."
 
-    public var schema: LLMToolSchema {
-        LLMToolSchema(
-            type: "function",
-            function: LLMToolSchema.FunctionSchema(
-                name: name,
-                description: description,
-                parameters: LLMToolSchema.ParameterSchema(
-                    type: "object",
-                    properties: [
-                        "action": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "The action: 'read', 'write', 'replace', 'list', or 'exists'",
-                            enumValues: ["read", "write", "replace", "list", "exists"]
-                        ),
-                        "path": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "Relative path to the file or directory",
-                            enumValues: nil
-                        ),
-                        "content": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "File content for write action",
-                            enumValues: nil
-                        ),
-                        "old_content": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "Exact existing text to replace for replace action",
-                            enumValues: nil
-                        ),
-                        "new_content": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "Replacement text for replace action",
-                            enumValues: nil
-                        ),
-                    ],
-                    required: ["action", "path"]
-                )
+    public var schema: ToolDefinition {
+        ToolDefinition(
+            name: name,
+            description: description,
+            parameters: ToolSchema.object(
+                name: "FileArguments",
+                description: "Arguments for a file operation.",
+                properties: [
+                    .init(
+                        name: "action",
+                        description: "The action: read, write, replace, list, or exists.",
+                        schema: ToolSchema.string(
+                            name: "FileAction",
+                            choices: ["read", "write", "replace", "list", "exists"]
+                        )
+                    ),
+                    .init(
+                        name: "path",
+                        description: "Relative path to the file or directory.",
+                        schema: ToolSchema.string(name: "FilePath")
+                    ),
+                    .init(
+                        name: "content",
+                        description: "File content for write action.",
+                        schema: ToolSchema.string(name: "FileContent"),
+                        isOptional: true
+                    ),
+                    .init(
+                        name: "old_content",
+                        description: "Exact existing text to replace for replace action.",
+                        schema: ToolSchema.string(name: "OldFileContent"),
+                        isOptional: true
+                    ),
+                    .init(
+                        name: "new_content",
+                        description: "Replacement text for replace action.",
+                        schema: ToolSchema.string(name: "NewFileContent"),
+                        isOptional: true
+                    )
+                ]
             )
         )
     }

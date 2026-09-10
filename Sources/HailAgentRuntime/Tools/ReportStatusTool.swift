@@ -13,7 +13,8 @@ import VirtualActors
 /// Allows an agent to report an ephemeral status update for the context it is
 /// running in. The status lands on the source agent's own activity feed,
 /// resolved through the virtual actors API per call.
-public struct ReportStatusTool: Tool {
+@Tool
+public struct ReportStatusTool {
     public struct Input: Codable, Sendable {
         public let contextID: AgentContextID
         public let message: String
@@ -30,28 +31,25 @@ public struct ReportStatusTool: Tool {
     public let description =
         "Report a short ephemeral status update for the current context (e.g., 'Reading files', 'Running tests')."
 
-    public var schema: LLMToolSchema {
-        LLMToolSchema(
-            type: "function",
-            function: LLMToolSchema.FunctionSchema(
-                name: name,
-                description: description,
-                parameters: LLMToolSchema.ParameterSchema(
-                    type: "object",
-                    properties: [
-                        "context_id": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "The agent context ID you are reporting status for.",
-                            enumValues: nil
-                        ),
-                        "message": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "A short status message.",
-                            enumValues: nil
-                        ),
-                    ],
-                    required: ["context_id", "message"]
-                )
+    public var schema: ToolDefinition {
+        ToolDefinition(
+            name: name,
+            description: description,
+            parameters: ToolSchema.object(
+                name: "ReportStatusArguments",
+                description: "Arguments for reporting a status update.",
+                properties: [
+                    .init(
+                        name: "context_id",
+                        description: "The agent context ID you are reporting status for.",
+                        schema: ToolSchema.string(name: "AgentContextID")
+                    ),
+                    .init(
+                        name: "message",
+                        description: "A short status message.",
+                        schema: ToolSchema.string(name: "StatusMessage")
+                    )
+                ]
             )
         )
     }

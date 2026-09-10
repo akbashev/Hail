@@ -37,7 +37,7 @@ public struct KimiCodeEndpoint: ModelEndpoint {
     ) throws(ModelRouterError) {
         let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
-            throw .invalidRoute(.missingModel(AgentModelProvider.kimiCode.rawValue))
+            throw .invalidModel(.missingID(AgentModelProvider.kimiCode.rawValue))
         }
         self.core = ACPModelEndpoint(
             harness: AgentModelProvider.kimiCode.rawValue,
@@ -67,14 +67,14 @@ public struct KimiCodeEndpoint: ModelEndpoint {
 
     public func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?
+        tools: [ToolDefinition]?
     ) -> AsyncStream<ModelEvent<String>> {
         core.stream(input: input, tools: tools)
     }
 
     public func stream<T: AgentOutput>(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         core.stream(input: input, tools: tools, responseType: T.self)
@@ -92,7 +92,7 @@ extension KimiCodeEndpoint: SessionOwningEndpoint {
         input: ModelInput,
         delta turnDelta: TurnDelta,
         authority: any Authority,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         core.stream(

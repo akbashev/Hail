@@ -15,7 +15,7 @@ struct ToolRegistryTests {
         await registry.register(NowTool())
         await registry.register(FileTool(projectRoot: URL(fileURLWithPath: "/tmp")))
 
-        let names = await registry.schemas().map(\.function.name)
+        let names = await registry.schemas().map(\.name)
 
         #expect(names == ["file", "now"])
     }

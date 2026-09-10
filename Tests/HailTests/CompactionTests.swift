@@ -23,7 +23,7 @@ struct CompactionFoldTests {
     private func state(threadCount: Int) -> AgentState {
         var state = AgentState(agentID: agentID)
         for i in 0..<threadCount {
-            state.apply(.messageReceived(message("m\(i)", TimeInterval(i))), maxMemoryFragments: 10)
+            state.apply(.messageReceived(message("m\(i)", TimeInterval(i))))
         }
         return state
     }
@@ -31,7 +31,7 @@ struct CompactionFoldTests {
     @Test("conversationCompacted installs the summary and trims the prefix")
     func foldTrimsPrefixAndInstallsSummary() {
         var state = state(threadCount: 5)
-        state.apply(.conversationCompacted(archivedCount: 3, summary: "first three messages"), maxMemoryFragments: 10)
+        state.apply(.conversationCompacted(archivedCount: 3, summary: "first three messages"))
         #expect(state.contextSummary == "first three messages")
         #expect(state.conversationThread.count == 2)
         #expect(
@@ -45,23 +45,27 @@ struct CompactionFoldTests {
     @Test("assistant narration accompanying a tool call survives replay")
     func assistantToolNarrationIsRetained() {
         var state = AgentState(agentID: agentID)
+        let call = ToolCall(id: "call-read", name: "read_file", arguments: .empty)
         state.apply(
-            .assistantText(content: "I will inspect the file first.", at: Date(timeIntervalSince1970: 1)),
-            maxMemoryFragments: 10
+            .assistantToolRound(
+                content: "I will inspect the file first.",
+                thinking: nil,
+                calls: [call],
+                at: Date(timeIntervalSince1970: 1)
+            )
         )
-        guard case .text(let sender, let content, _) = state.conversationThread.first else {
+        guard case .assistantToolCall(let content, _, _, _) = state.conversationThread.first else {
             Issue.record("Expected assistant narration in the replayed thread")
             return
         }
-        #expect(sender == agentID.rawValue)
         #expect(content == "I will inspect the file first.")
     }
 
     @Test("a second compaction replaces the summary — the fold is rolling")
     func secondCompactionReplacesSummary() {
         var state = state(threadCount: 5)
-        state.apply(.conversationCompacted(archivedCount: 3, summary: "v1"), maxMemoryFragments: 10)
-        state.apply(.conversationCompacted(archivedCount: 1, summary: "v2 folds v1"), maxMemoryFragments: 10)
+        state.apply(.conversationCompacted(archivedCount: 3, summary: "v1"))
+        state.apply(.conversationCompacted(archivedCount: 1, summary: "v2 folds v1"))
         #expect(state.contextSummary == "v2 folds v1")
         #expect(state.conversationThread.count == 1)
         #expect(
@@ -75,7 +79,7 @@ struct CompactionFoldTests {
     @Test("archivedCount beyond the thread length is ignored")
     func outOfBoundsArchiveCountIgnored() {
         var state = state(threadCount: 2)
-        state.apply(.conversationCompacted(archivedCount: 10, summary: "over"), maxMemoryFragments: 10)
+        state.apply(.conversationCompacted(archivedCount: 10, summary: "over"))
         #expect(state.contextSummary == "over")
         #expect(state.conversationThread.count == 2)
     }
@@ -111,11 +115,9 @@ struct PromptAssemblySummaryTests {
                 role: id.role,
                 behavior: .init(
                     systemPrompt: "sys",
-                    model: try AgentModelReference("test/fake")
+                    model: try AgentModel("test/fake")
                 ),
-                limits: .init()
             ),
-            workingMemory: [],
             contextSummary: summary,
             conversationThread: thread,
             contextManifest: ContextManifest(items: [])
@@ -228,7 +230,7 @@ struct ReasoningLoopCompactionTests {
 
         func stream(
             input: ModelInput,
-            tools: [LLMToolSchema]?
+            tools: [ToolDefinition]?
         ) -> AsyncStream<ModelEvent<String>> {
             let response = self.response
             return AsyncStream { continuation in
@@ -244,13 +246,13 @@ struct ReasoningLoopCompactionTests {
         let contextOwnership: ModelContextOwnership = .runtime
         let effectiveContextWindow: Int? = 4_096
         let tokenCounting: TokenCounting = .available {
-            (_: [LLMMessage], _: [LLMToolSchema]) async throws(AgentRuntimeError) -> Int in
+            (_: [LLMMessage], _: [ToolDefinition]) async throws(AgentRuntimeError) -> Int in
             throw AgentRuntimeError.infrastructureFailure("tokenizer unavailable")
         }
 
         func stream(
             input: ModelInput,
-            tools: [LLMToolSchema]?
+            tools: [ToolDefinition]?
         ) -> AsyncStream<ModelEvent<String>> {
             AsyncStream { $0.finish() }
         }
@@ -266,7 +268,7 @@ struct ReasoningLoopCompactionTests {
 
         func stream(
             input: ModelInput,
-            tools: [LLMToolSchema]?
+            tools: [ToolDefinition]?
         ) -> AsyncStream<ModelEvent<String>> {
             AsyncStream { $0.finish() }
         }
@@ -280,7 +282,7 @@ struct ReasoningLoopCompactionTests {
 
         func stream(
             input: ModelInput,
-            tools: [LLMToolSchema]?
+            tools: [ToolDefinition]?
         ) -> AsyncStream<ModelEvent<String>> {
             AsyncStream { $0.finish() }
         }
@@ -289,7 +291,7 @@ struct ReasoningLoopCompactionTests {
             input: ModelInput,
             delta: TurnDelta,
             authority: any Authority,
-            tools: [LLMToolSchema]?,
+            tools: [ToolDefinition]?,
             responseType: T.Type
         ) -> AsyncStream<ModelEvent<T>> {
             AsyncStream { $0.finish() }
@@ -302,7 +304,7 @@ struct ReasoningLoopCompactionTests {
 
         func stream(
             input: ModelInput,
-            tools: [LLMToolSchema]?
+            tools: [ToolDefinition]?
         ) -> AsyncStream<ModelEvent<String>> {
             AsyncStream { $0.finish() }
         }
@@ -359,7 +361,7 @@ struct ReasoningLoopCompactionTests {
             return contextCalls
         }
         func compacted() { compactorCalls += 1 }
-        func budgeted(messages: [LLMMessage], tools: [LLMToolSchema]) {
+        func budgeted(messages: [LLMMessage], tools: [ToolDefinition]) {
             budgetedMessageCount = messages.count
             budgetedToolCount = tools.count
         }
@@ -385,11 +387,9 @@ struct ReasoningLoopCompactionTests {
                 role: agentID.role,
                 behavior: .init(
                     systemPrompt: "sys",
-                    model: try AgentModelReference("test/fake")
+                    model: try AgentModel("test/fake")
                 ),
-                limits: .init()
             ),
-            workingMemory: [],
             conversationThread: thread,
             contextManifest: manifest,
             instructions: instructions
@@ -576,14 +576,7 @@ struct ReasoningLoopCompactionTests {
             conversation: []
         )
         let added = LLMMessage(role: .user, content: "current turn")
-        let tool = LLMToolSchema(
-            type: "function",
-            function: .init(
-                name: "search",
-                description: "Search",
-                parameters: .init(type: "object", properties: nil, required: nil)
-            )
-        )
+        let tool = TestToolDefinition.empty(name: "search", description: "Search")
         let compactor = FakeCompactor(body: { _, request, _, _ in
             await recorder.budgeted(messages: request.messages, tools: request.tools)
             return .unchanged

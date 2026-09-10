@@ -33,7 +33,7 @@ let scoutDefinition = AgentDefinition(
     role: scoutID.role,
     behavior: .init(
         systemPrompt: "You are a careful signal scout.",
-        model: try AgentModelReference("codex/gpt-5.6-sol")
+        model: try AgentModel("codex/gpt-5.6-sol")
     ),
     limits: .init()
 )
@@ -172,7 +172,7 @@ The host supplies definitions, tools, and policy as values. This keeps product d
 
 ```swift
 let runtime = try AgentRuntimePlugin(
-    defaultModel: try AgentModelReference("your-provider/your-model"),
+    defaultModel: try AgentModel("your-provider/your-model"),
     maxToolRounds: 25,
     routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
     workspaceProvider: { _ in
@@ -222,7 +222,7 @@ Session-owning harnesses (Kimi, Claude, Codex) manage context server-side. State
 import HailCompaction
 
 let runtime = try AgentRuntimePlugin(
-    defaultModel: try AgentModelReference("your-provider/your-model"),
+    defaultModel: try AgentModel("your-provider/your-model"),
     maxToolRounds: 25,
     routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
     // ... providers as above ...

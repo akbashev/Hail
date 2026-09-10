@@ -16,7 +16,7 @@ public enum RequestContentHash {
     /// One cumulative digest per element: the tool schemas first, then each
     /// message in request order.
     public static func chain(
-        tools: [LLMToolSchema],
+        tools: [ToolDefinition],
         messages: [LLMMessage]
     ) -> [String] {
         let encoder = JSONEncoder()

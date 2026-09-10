@@ -42,18 +42,7 @@ struct RequestContentHashTests {
     func toolsAreFirstElement() {
         let withTools = RequestContentHash.chain(
             tools: [
-                LLMToolSchema(
-                    type: "function",
-                    function: LLMToolSchema.FunctionSchema(
-                        name: "now",
-                        description: "clock",
-                        parameters: LLMToolSchema.ParameterSchema(
-                            type: "object",
-                            properties: [:],
-                            required: []
-                        )
-                    )
-                )
+                TestToolDefinition.empty(name: "now", description: "clock")
             ],
             messages: [message("a")]
         )

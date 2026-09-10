@@ -13,9 +13,9 @@ import HailCore
 /// makes the precedence rule part of the capability instead of making the
 /// router coordinate unrelated configuration values.
 public struct ModelContextWindowResolver: Sendable {
-    public typealias Configured = @Sendable (AgentModelRoute) -> Int?
+    public typealias Configured = @Sendable (AgentModel) -> Int?
     public typealias Discovered =
-        @Sendable (AgentModelRoute, URL) async throws -> Int?
+        @Sendable (AgentModel, URL) async throws -> Int?
 
     private let configured: Configured
     private let discovered: Discovered
@@ -28,18 +28,18 @@ public struct ModelContextWindowResolver: Sendable {
         self.discovered = discovered
     }
 
-    func configuredValue(for route: AgentModelRoute) -> Int? {
-        configured(route)
+    func configuredValue(for model: AgentModel) -> Int? {
+        configured(model)
     }
 
     public func resolve(
-        for route: AgentModelRoute,
+        for model: AgentModel,
         baseURL: URL
     ) async throws -> Int? {
-        if let value = configured(route) {
+        if let value = configured(model) {
             return value
         }
-        return try await discovered(route, baseURL)
+        return try await discovered(model, baseURL)
     }
 }
 
@@ -54,20 +54,20 @@ public struct ModelRouterConfiguration: Sendable {
     /// The host-owned effective context-window capability.
     public let contextWindowResolver: ModelContextWindowResolver
     /// Host-verified reasoning capabilities keyed by a complete model
-    /// reference. An absent entry means that capability is unknown, not that
+    /// identifier. An absent entry means that capability is unknown, not that
     /// the model supports no effort levels. A level's encoding can translate
     /// a generic effort into a provider-specific control (for example,
     /// Gemini's dynamic thinking mode).
-    public let reasoningCapabilities: [AgentModelReference: ModelReasoningCapabilities]
+    public let reasoningCapabilities: [AgentModel: ModelReasoningCapabilities]
 
     public init(
         temperature: Double,
         apiKeys: [AgentModelProvider: String] = [:],
         baseURLs: [AgentModelProvider: URL] = [:],
         contextWindows: [AgentModelProvider: Int] = [:],
-        modelContextWindows: [AgentModelReference: Int] = [:],
+        modelContextWindows: [AgentModel: Int] = [:],
         contextWindowResolver: ModelContextWindowResolver? = nil,
-        reasoningCapabilities: [AgentModelReference: ModelReasoningCapabilities] = [:]
+        reasoningCapabilities: [AgentModel: ModelReasoningCapabilities] = [:]
     ) throws(ModelRouterConfigurationError) {
         guard temperature.isFinite, temperature >= 0 else {
             throw .invalidTemperature(temperature)
@@ -111,9 +111,9 @@ public struct ModelRouterConfiguration: Sendable {
         self.contextWindowResolver =
             contextWindowResolver
             ?? ModelContextWindowResolver(
-                configured: { route in
-                    modelContextWindows[AgentModelReference(route: route)]
-                        ?? contextWindows[route.provider]
+                configured: { model in
+                    modelContextWindows[model]
+                        ?? contextWindows[model.provider]
                 }
             )
         self.reasoningCapabilities = reasoningCapabilities
@@ -133,23 +133,23 @@ public struct ModelRouterConfiguration: Sendable {
         return value
     }
 
-    func configuredContextWindow(for route: AgentModelRoute) -> Int? {
-        contextWindowResolver.configuredValue(for: route)
+    func configuredContextWindow(for model: AgentModel) -> Int? {
+        contextWindowResolver.configuredValue(for: model)
     }
 
     func validate(
         reasoning: ReasoningEffortSelection?,
-        for route: AgentModelRoute
+        for model: AgentModel
     ) throws(ModelRouterError) {
         guard let reasoning,
-            let capabilities = reasoningCapabilities[AgentModelReference(route: route)]
+            let capabilities = reasoningCapabilities[model]
         else {
             return
         }
         guard capabilities.supports(reasoning.effort) else {
             throw .unsupportedReasoningEffort(
-                provider: route.provider,
-                model: route.model,
+                provider: model.provider,
+                model: model.id.rawValue,
                 effort: reasoning.effort
             )
         }
@@ -157,10 +157,10 @@ public struct ModelRouterConfiguration: Sendable {
 
     func selection(
         for reasoningEffort: ReasoningEffort?,
-        route: AgentModelRoute
+        model: AgentModel
     ) -> ReasoningEffortSelection? {
         guard let reasoningEffort else { return nil }
-        guard let capabilities = reasoningCapabilities[AgentModelReference(route: route)] else {
+        guard let capabilities = reasoningCapabilities[model] else {
             return ReasoningEffortSelection(effort: reasoningEffort)
         }
         return ReasoningEffortSelection(
@@ -175,13 +175,13 @@ public enum ModelRouterConfigurationError: Error, Sendable, Equatable {
     case emptyAPIKey(AgentModelProvider)
     case invalidBaseURL(AgentModelProvider, String)
     case invalidContextWindow(AgentModelProvider, Int)
-    case invalidModelContextWindow(AgentModelReference, Int)
-    case duplicateReasoningEffort(AgentModelReference, ReasoningEffort)
-    case invalidReasoningTokenBudget(AgentModelReference, Int)
+    case invalidModelContextWindow(AgentModel, Int)
+    case duplicateReasoningEffort(AgentModel, ReasoningEffort)
+    case invalidReasoningTokenBudget(AgentModel, Int)
 }
 
 public enum ModelRouterError: Error, Sendable, Equatable {
-    case invalidRoute(AgentModelRouteError)
+    case invalidModel(AgentModelError)
     case unsupportedProvider(String)
     case missingAPIKey(AgentModelProvider)
     case missingProviderConfiguration(AgentModelProvider)

@@ -38,7 +38,7 @@ public distributed actor Agent: AsyncSequence {
     public typealias Dependency = AgentSpawnConfig
 
     // Event-sourced state. All mutations happen through `handleEvent`, which
-    // delegates to `AgentState.apply(_:maxMemoryFragments:)`. Public as an
+    // delegates to `AgentState.apply(_:)`. Public as an
     // `EventSourced` protocol witness — do not mutate directly.
     public var state: AgentState
 
@@ -52,7 +52,6 @@ public distributed actor Agent: AsyncSequence {
     var role: Role { state.agentID.role }
     var contextID: AgentContextID { state.agentID.contextID }
     var conversationThread: [ChatMessage] { state.conversationThread }
-    var workingMemory: [String] { state.workingMemory }
 
     /// The journaled harness session to resume, if one was recorded.
     private var modelSessionResume: ModelSessionResume? {
@@ -154,8 +153,6 @@ public distributed actor Agent: AsyncSequence {
                 ]
             )
         }
-
-        try await emit(event: .contextSet(contextID: dependency.agentID.contextID))
 
         // After replay, a turn that started but never completed was interrupted
         // by the crash. Interactive agents re-run it once; externally driven
@@ -561,7 +558,7 @@ public distributed actor Agent: AsyncSequence {
     }
 
     public func handleEvent(_ event: AgentEvent) {
-        state.apply(event, maxMemoryFragments: definition.limits.maxMemoryFragments)
+        state.apply(event)
     }
 
     /// Adapts the event-sourcing API to the typed event port consumed by
@@ -661,7 +658,6 @@ public distributed actor Agent: AsyncSequence {
         let assemblePrompt = runtime.assemblePrompt
         let agentID: AgentID
         let definition: AgentDefinition
-        let workingMemory: [String]
         let contextManifest: ContextManifest
         let instructions: PromptAssemblyInstructions
         let sessionIdentity: SessionIdentity
@@ -672,7 +668,6 @@ public distributed actor Agent: AsyncSequence {
             // journal-derived conversation and summary below are refreshed.
             agentID = snapshot.promptContext.agentID
             definition = snapshot.promptContext.definition
-            workingMemory = snapshot.workingMemory
             contextManifest = snapshot.promptContext.contextManifest
             instructions = snapshot.promptContext.instructions
             sessionIdentity = snapshot.sessionIdentity
@@ -690,7 +685,6 @@ public distributed actor Agent: AsyncSequence {
             }
             agentID = state.agentID
             definition = self.definition
-            workingMemory = self.workingMemory
             instructions = runtime.promptInstructions
             sessionIdentity = AgentSessionIdentity.fingerprint(
                 model: definition.behavior.model.rawValue,
@@ -702,7 +696,6 @@ public distributed actor Agent: AsyncSequence {
         let promptContext = PromptContext(
             agentID: agentID,
             definition: definition,
-            workingMemory: workingMemory,
             contextSummary: state.contextSummary,
             conversationThread: conversationThread,
             contextManifest: contextManifest,

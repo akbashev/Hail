@@ -53,10 +53,9 @@ Tools are model-facing workflows dispatched by `ToolRegistry` under the turn's a
 - ``ModelReasoningLevel``
 - ``ModelReasoningCapabilities``
 - ``ModelCatalog``
-- ``AgentModelReference``
+- ``AgentModel``
 - ``AgentModelProvider``
 - ``LLMMessage``
-- ``LLMResponse``
 - ``LLMToolCall``
 - ``ModelUsage``
 - ``ContextUsage``

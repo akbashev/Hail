@@ -10,8 +10,8 @@ import Testing
 
 /// Warm/cold routing in ``ACPSession/executeTurnPrompt``: a live session with
 /// a matching identity receives only the turn delta; a cold start or an
-/// identity change bootstraps with the full transcript; memory re-sends only
-/// when it changes. The stub is a Python JSON-RPC process that logs every
+/// identity change bootstraps with the full transcript. The stub is a Python
+/// JSON-RPC process that logs every
 /// `session/prompt` text to a file.
 @Suite("ACPSession turn routing")
 struct ACPSessionTurnRoutingTests {
@@ -58,13 +58,11 @@ struct ACPSessionTurnRoutingTests {
         session: ACPSession,
         bootstrap: String,
         delta: String,
-        memory: String?,
         identity: String
     ) async throws {
         let (stream, response) = try await session.executeTurnPrompt(
             bootstrap: bootstrap,
             delta: delta,
-            memorySnapshot: memory,
             identity: SessionIdentity(identity)
         )
         for try await _ in stream {}
@@ -91,20 +89,20 @@ struct ACPSessionTurnRoutingTests {
         // Turn 1: no session yet — cold bootstrap with the full transcript.
         try await runTurn(
             session: session, bootstrap: "BOOTSTRAP-1 turn-clock-cold", delta: "DELTA-1 turn-clock-cold",
-            memory: "MEM-A", identity: "id-A")
+            identity: "id-A")
 
         // Turn 2: warm, same identity and memory — only the delta is sent.
         try await runTurn(
             session: session, bootstrap: "BOOTSTRAP-2 turn-clock-warm", delta: "DELTA-2 turn-clock-warm",
-            memory: "MEM-A", identity: "id-A")
+            identity: "id-A")
 
-        // Turn 3: warm, changed memory — memory snapshot rides the delta.
+        // Turn 3: warm, changed host state still sends only the delta.
         try await runTurn(
-            session: session, bootstrap: "BOOTSTRAP-3", delta: "DELTA-3", memory: "MEM-B", identity: "id-A")
+            session: session, bootstrap: "BOOTSTRAP-3", delta: "DELTA-3", identity: "id-A")
 
         // Turn 4: identity changed (config edit) — full bootstrap again.
         try await runTurn(
-            session: session, bootstrap: "BOOTSTRAP-4", delta: "DELTA-4", memory: "MEM-B", identity: "id-B")
+            session: session, bootstrap: "BOOTSTRAP-4", delta: "DELTA-4", identity: "id-B")
 
         let log = try String(contentsOf: logURL, encoding: .utf8)
         let entries = log.components(separatedBy: "<<<END>>>").map {
@@ -118,7 +116,6 @@ struct ACPSessionTurnRoutingTests {
         #expect(entries[1].contains("turn-clock-warm"))
         #expect(!entries[1].contains("BOOTSTRAP-2"))
         #expect(!entries[1].contains("MEM-A"))
-        #expect(entries[2].contains("MEM-B"))
         #expect(entries[2].contains("DELTA-3"))
         #expect(entries[3].contains("BOOTSTRAP-4"))
         #expect(!entries[3].contains("DELTA-4"))

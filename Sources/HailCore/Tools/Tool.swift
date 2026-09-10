@@ -84,7 +84,7 @@ public protocol Tool<Input>: Sendable {
 
     var name: String { get }
     var description: String { get }
-    var schema: LLMToolSchema { get }
+    var schema: ToolDefinition { get }
     /// Pure: decoded model input to the concrete effect being requested.
     func effect(for input: Input) throws -> Effect
 
@@ -129,7 +129,7 @@ extension Tool {
 public struct AnyTool: Sendable {
     public let name: String
     public let description: String
-    public let schema: LLMToolSchema
+    public let schema: ToolDefinition
     /// Type erasure closes over the concrete effect type, so only this path
     /// can manufacture the matching token and invoke the tool.
     private let _runWithAuthority: @Sendable (ToolArguments, any Authority) async throws -> ToolOutput

@@ -40,7 +40,7 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
     ) throws(ModelRouterError) {
         let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
-            throw .invalidRoute(.missingModel(AgentModelProvider.codex.rawValue))
+            throw .invalidModel(.missingID(AgentModelProvider.codex.rawValue))
         }
         self.model = model
         self.executionPolicy = executionPolicy
@@ -62,14 +62,13 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
 
     public func stream(
         input: ModelInput,
-        tools: [LLMToolSchema]?
+        tools: [ToolDefinition]?
     ) -> AsyncStream<ModelEvent<String>> {
         _ = tools
         return makeStream(
             input: input,
             delta: nil,
             sessionIdentity: nil,
-            workingMemory: [],
             authority: nil,
             responseType: String.self
         )
@@ -77,7 +76,7 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
 
     public func stream<T: AgentOutput>(
         input: ModelInput,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         _ = tools
@@ -85,7 +84,6 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
             input: input,
             delta: nil,
             sessionIdentity: nil,
-            workingMemory: [],
             authority: nil,
             responseType: responseType
         )
@@ -95,7 +93,6 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         input: ModelInput,
         delta: [LLMMessage]?,
         sessionIdentity: SessionIdentity?,
-        workingMemory: [String],
         authority: (any Authority)?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
@@ -117,7 +114,6 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
                         fullPrompt: Self.formatPrompt(messages: messages, structured: structured),
                         deltaPrompt: delta.map { Self.formatPrompt(messages: $0, structured: structured) },
                         identity: sessionIdentity,
-                        memorySnapshot: Self.memorySnapshot(workingMemory),
                         outputSchema: schema,
                         turnAuthority: authority,
                         onNarration: { narration in
@@ -160,12 +156,6 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         }
     }
 
-    private static func memorySnapshot(_ memory: [String]) -> String? {
-        guard !memory.isEmpty else { return nil }
-        return "Current working memory (supersedes any earlier memory in this session):\n"
-            + memory.map { "- \($0)" }.joined(separator: "\n")
-    }
-
     private static func formatPrompt(messages: [LLMMessage], structured: Bool) -> String {
         let system = messages.filter { $0.role == .system }.map(\.content).joined(separator: "\n\n")
         let transcript = messages.filter { $0.role != .system }.map { message -> String in
@@ -198,7 +188,7 @@ extension CodexAppServerEndpoint: SessionOwningEndpoint {
         input: ModelInput,
         delta turnDelta: TurnDelta,
         authority: any Authority,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>> {
         _ = tools
@@ -206,7 +196,6 @@ extension CodexAppServerEndpoint: SessionOwningEndpoint {
             input: input,
             delta: turnDelta.current.messages,
             sessionIdentity: turnDelta.sessionIdentity,
-            workingMemory: turnDelta.workingMemory,
             authority: authority,
             responseType: responseType
         )

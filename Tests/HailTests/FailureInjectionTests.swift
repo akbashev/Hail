@@ -276,7 +276,6 @@ struct CodexHarnessKillTests {
                 fullPrompt: full,
                 deltaPrompt: delta,
                 identity: SessionIdentity("id-A"),
-                memorySnapshot: nil,
                 outputSchema: nil,
                 turnAuthority: nil,
                 onNarration: { _ in }
@@ -506,7 +505,7 @@ struct ProtocolViolatingHarnessTests {
 @Suite("AgentState repeated crash dedup")
 struct RepeatedCrashDedupTests {
     private func makeToolResult(id: String, output: String) throws -> ToolResult {
-        let json = #"{"tool_call_id":"\#(id)","name":"read_file","output":"\#(output)","is_error":false}"#
+        let json = #"{"tool_call_id":"\#(id)","name":"read_file","output":"\#(output)","failure_kind":null}"#
         return try JSONDecoder().decode(ToolResult.self, from: Data(json.utf8))
     }
 
@@ -520,43 +519,43 @@ struct RepeatedCrashDedupTests {
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
 
         // Original turn: crash after tool events.
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 1_999)), maxMemoryFragments: 10)
-        state.apply(.messageReceived(message), maxMemoryFragments: 10)
+        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 1_999)))
+        state.apply(.messageReceived(message))
         state.apply(
-            .toolInvoked(
-                ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}")),
+            .assistantToolRound(
+                content: "",
+                thinking: nil,
+                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
                 at: Date(timeIntervalSince1970: 2_001)
-            ),
-            maxMemoryFragments: 10
+            )
         )
         state.apply(
-            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: Date(timeIntervalSince1970: 2_002)),
-            maxMemoryFragments: 10
+            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: Date(timeIntervalSince1970: 2_002))
         )
         state.normalizeAfterReplay()
         #expect(state.pendingTurnRerun == message)
 
         // First re-run: the opening collapses, then the process crashes
         // again after tool events — the marker is armed a second time.
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 3_000)), maxMemoryFragments: 10)
-        state.apply(.messageReceived(message), maxMemoryFragments: 10)
+        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 3_000)))
+        state.apply(.messageReceived(message))
         state.apply(
-            .toolInvoked(
-                ToolCall(id: "call-2", name: "read_file", arguments: ToolArguments(json: "{}")),
+            .assistantToolRound(
+                content: "",
+                thinking: nil,
+                calls: [ToolCall(id: "call-2", name: "read_file", arguments: ToolArguments(json: "{}"))],
                 at: Date(timeIntervalSince1970: 3_001)
-            ),
-            maxMemoryFragments: 10
+            )
         )
         state.apply(
-            .toolResult(try makeToolResult(id: "call-2", output: "ok again"), at: Date(timeIntervalSince1970: 3_002)),
-            maxMemoryFragments: 10
+            .toolResult(try makeToolResult(id: "call-2", output: "ok again"), at: Date(timeIntervalSince1970: 3_002))
         )
         state.normalizeAfterReplay()
         #expect(state.pendingTurnRerun == message)
 
         // Second re-run: collapses again — no compounding duplication.
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 4_000)), maxMemoryFragments: 10)
-        state.apply(.messageReceived(message), maxMemoryFragments: 10)
+        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 4_000)))
+        state.apply(.messageReceived(message))
 
         #expect(state.conversationThread.filter { $0 == message }.count == 1)
         #expect(state.activeTurn?.opening == message)
@@ -565,9 +564,8 @@ struct RepeatedCrashDedupTests {
         // The recovered turn then completes cleanly.
         state.apply(
             .responseReceived(sender: "coder", payload: Data("done".utf8), at: Date(timeIntervalSince1970: 4_100)),
-            maxMemoryFragments: 10
         )
-        state.apply(.turnCompleted(at: Date(timeIntervalSince1970: 4_100)), maxMemoryFragments: 10)
+        state.apply(.turnCompleted(at: Date(timeIntervalSince1970: 4_100)))
         #expect(state.activeTurn == nil)
         #expect(state.conversationThread.filter { $0 == message }.count == 1)
     }
@@ -592,7 +590,7 @@ struct CorruptedJournalTests {
     }
 
     private func makeToolResult(id: String, output: String) throws -> ToolResult {
-        let json = #"{"tool_call_id":"\#(id)","name":"read_file","output":"\#(output)","is_error":false}"#
+        let json = #"{"tool_call_id":"\#(id)","name":"read_file","output":"\#(output)","failure_kind":null}"#
         return try JSONDecoder().decode(ToolResult.self, from: Data(json.utf8))
     }
 
@@ -609,15 +607,17 @@ struct CorruptedJournalTests {
             try encode(.turnStarted(at: Date(timeIntervalSince1970: 1_999))),
             try encode(.messageReceived(message)),
             try encode(
-                .toolInvoked(
-                    ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}")),
+                .assistantToolRound(
+                    content: "",
+                    thinking: nil,
+                    calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
                     at: Date(timeIntervalSince1970: 2_001)
                 )
             ),
         ]
         for line in validLines {
             let event = try JSONDecoder().decode(AgentEvent.self, from: Data(line.utf8))
-            state.apply(event, maxMemoryFragments: 10)
+            state.apply(event)
         }
         #expect(state.conversationThread.count == 2)
         #expect(state.activeTurn != nil)
@@ -659,7 +659,7 @@ struct CorruptedJournalTests {
         ]
         for line in validLines {
             let event = try JSONDecoder().decode(AgentEvent.self, from: Data(line.utf8))
-            state.apply(event, maxMemoryFragments: 10)
+            state.apply(event)
         }
         #expect(state.modelSession?.id == SessionID("session-1"))
 

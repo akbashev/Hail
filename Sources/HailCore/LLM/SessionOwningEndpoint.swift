@@ -69,10 +69,6 @@ public struct TurnDelta: Sendable {
 
     public let current: Current
 
-    /// The agent's current working memory. The session re-sends it only when
-    /// it changed since the last send, framed as superseding earlier memory.
-    public let workingMemory: [String]
-
     /// Fingerprint of the agent's stable identity (role prompt + model). A
     /// mismatch against the live session's fingerprint invalidates the session
     /// and forces a full bootstrap.
@@ -80,11 +76,9 @@ public struct TurnDelta: Sendable {
 
     public init(
         currentMessages: [LLMMessage],
-        workingMemory: [String],
         sessionIdentity: SessionIdentity
     ) {
         self.current = Current(messages: currentMessages)
-        self.workingMemory = workingMemory
         self.sessionIdentity = sessionIdentity
     }
 }
@@ -126,7 +120,7 @@ public protocol SessionOwningEndpoint: ModelEndpoint {
         input: ModelInput,
         delta: TurnDelta,
         authority: any Authority,
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseType: T.Type
     ) -> AsyncStream<ModelEvent<T>>
 

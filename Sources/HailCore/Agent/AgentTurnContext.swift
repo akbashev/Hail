@@ -6,7 +6,6 @@
 /// host's domain semantics.
 public struct AgentTurnContext: Sendable {
     public let agentID: AgentID
-    public let sourceAgentID: AgentID
     public let turnID: TurnID
     public let message: ChatMessage
     /// Host-supplied identity of the input that started this turn.
@@ -15,13 +14,11 @@ public struct AgentTurnContext: Sendable {
 
     public init(
         agentID: AgentID,
-        sourceAgentID: AgentID,
         turnID: TurnID,
         message: ChatMessage,
         inputID: String? = nil
     ) {
         self.agentID = agentID
-        self.sourceAgentID = sourceAgentID
         self.turnID = turnID
         self.message = message
         self.inputID = inputID

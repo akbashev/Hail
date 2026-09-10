@@ -26,11 +26,9 @@ struct PrefixStabilityTests {
                     role: agentID.role,
                     behavior: .init(
                         systemPrompt: "sys",
-                        model: try AgentModelReference("test/fake")
+                        model: try AgentModel("test/fake")
                     ),
-                    limits: .init()
                 ),
-                workingMemory: [],
                 contextSummary: state.contextSummary,
                 conversationThread: state.conversationThread,
                 contextManifest: ContextManifest(items: [])
@@ -61,7 +59,7 @@ struct PrefixStabilityTests {
         // the journaled user message; the tool round is then appended in
         // memory as one assistant message plus the tool result.
         var state = AgentState(agentID: agentID)
-        state.apply(.messageReceived(userMessage), maxMemoryFragments: 10)
+        state.apply(.messageReceived(userMessage))
         let turnOnePrefix = try assemble(state)
 
         let turnContext = LLMMessage(
@@ -89,25 +87,22 @@ struct PrefixStabilityTests {
         // Turn 2: the same turn rebuilt from its journaled events.
         state.apply(
             .assistantToolRound(content: narration, thinking: thinking, calls: [call], at: at),
-            maxMemoryFragments: 10
         )
         // ToolResult's memberwise init is module-internal; decoding exercises
         // the same journaled shape.
         let toolResult = try JSONDecoder().decode(
             ToolResult.self,
             from: Data(
-                #"{"tool_call_id":"call-1","name":"now","output":"2023-11-14T22:13:20Z","is_error":false}"#
+                #"{"tool_call_id":"call-1","name":"now","output":"2023-11-14T22:13:20Z","failure_kind":null}"#
                     .utf8
             )
         )
         state.apply(
             .toolResult(toolResult, at: at),
-            maxMemoryFragments: 10
         )
         let payload = try JSONEncoder().encode("It is 10:13 PM.")
         state.apply(
             .responseReceived(sender: agentID.rawValue, payload: payload, at: at),
-            maxMemoryFragments: 10
         )
         let rebuilt = try assemble(state)
 
@@ -156,7 +151,6 @@ struct PrefixStabilityTests {
             .messageReceived(
                 .text(sender: "user", content: "hi", timestamp: Date(timeIntervalSince1970: 1))
             ),
-            maxMemoryFragments: 10
         )
         let durable = try assemble(state)
 

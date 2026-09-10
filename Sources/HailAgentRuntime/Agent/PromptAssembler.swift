@@ -24,7 +24,6 @@ public struct PromptAssemblyInstructions: Sendable, Hashable {
 public struct PromptContext: Sendable {
     public let agentID: AgentID
     public let definition: AgentDefinition
-    public let workingMemory: [String]
     /// The rolling summary of compacted-away history, if any compaction ran.
     /// Compactors read it to fold the old summary into the new one.
     public let contextSummary: String?
@@ -37,7 +36,6 @@ public struct PromptContext: Sendable {
     public init(
         agentID: AgentID,
         definition: AgentDefinition,
-        workingMemory: [String],
         contextSummary: String? = nil,
         conversationThread: [ChatMessage],
         contextManifest: ContextManifest,
@@ -45,7 +43,6 @@ public struct PromptContext: Sendable {
     ) {
         self.agentID = agentID
         self.definition = definition
-        self.workingMemory = workingMemory
         self.contextSummary = contextSummary
         self.conversationThread = conversationThread
         self.contextManifest = contextManifest
@@ -91,10 +88,6 @@ private func buildChatPrefix(
     appendPersona(context.definition.persona, to: &messages)
     appendContextSummary(from: context, to: &messages)
     appendInstructions(context.instructions.interactive, to: &messages)
-
-    for memory in context.workingMemory {
-        messages.append(LLMMessage(role: .system, content: "Memory: \(memory)"))
-    }
 
     return messages
 }

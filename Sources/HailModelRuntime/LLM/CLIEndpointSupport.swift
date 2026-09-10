@@ -30,7 +30,7 @@ enum CLIEndpointSupport {
     static func makePrompt(
         harness: String,
         messages: [LLMMessage],
-        tools: [LLMToolSchema]?,
+        tools: [ToolDefinition]?,
         responseMode: CLIResponseMode
     ) -> String {
         let finalResponseInstructions: String =
@@ -77,7 +77,7 @@ enum CLIEndpointSupport {
             {
                 parts.append("Available Hail tool schemas:\n\(json)")
             } else {
-                let toolNames = tools.map(\.function.name).sorted().joined(separator: ", ")
+                let toolNames = tools.map(\.name).sorted().joined(separator: ", ")
                 parts.append("Available Hail tools: \(toolNames)")
             }
         }
@@ -228,7 +228,7 @@ enum CLIEndpointSupport {
         case .plainText:
             outputSchema = ["type": "string"]
         case .reportTool(_, let schema):
-            outputSchema = jsonSchema(from: schema.function.parameters)
+            outputSchema = jsonSchema(from: schema.parameters)
         }
 
         let toolCallSchema: [String: Any] = [
@@ -281,42 +281,18 @@ enum CLIEndpointSupport {
         case .plainText:
             schema = ["type": "string"]
         case .reportTool(_, let reportSchema):
-            schema = jsonSchema(from: reportSchema.function.parameters)
+            schema = jsonSchema(from: reportSchema.parameters)
         }
         return try JSONSerialization.data(withJSONObject: schema, options: [.prettyPrinted, .sortedKeys])
     }
 
-    private static func jsonSchema(from schema: LLMToolSchema.ParameterSchema) -> [String: Any] {
-        var result: [String: Any] = [
-            "type": schema.type,
-            "additionalProperties": false,
-        ]
-        if let required = schema.required {
-            result["required"] = required
-        }
-        if let properties = schema.properties {
-            result["properties"] = properties.mapValues(jsonSchema(from:))
-            result["required"] = properties.keys.sorted()
-        }
-        return result
-    }
-
-    private static func jsonSchema(from schema: LLMToolSchema.PropertySchema) -> [String: Any] {
-        var result: [String: Any] = [
-            "type": schema.type,
-            "description": schema.description,
-        ]
-        if let enumValues = schema.enumValues {
-            result["enum"] = enumValues
-        }
-        if let items = schema.items {
-            result["items"] = jsonSchema(from: items)
-        }
-        if let properties = schema.properties {
-            result["properties"] = properties.mapValues(jsonSchema(from:))
-        }
-        if let required = schema.required {
-            result["required"] = required
+    private static func jsonSchema(from schema: GenerationSchema) -> [String: Any] {
+        guard
+            let data = try? JSONEncoder().encode(schema),
+            let value = try? JSONSerialization.jsonObject(with: data),
+            let result = value as? [String: Any]
+        else {
+            return [:]
         }
         return result
     }

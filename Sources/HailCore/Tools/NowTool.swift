@@ -13,7 +13,8 @@ import ScopedEffect
 /// for wall-clock operations such as reminders and schedules. A `Date` has no
 /// timezone of its own, so the two representations must not be collapsed into
 /// one model-facing string.
-public struct NowTool: Tool {
+@Tool
+public struct NowTool {
     public struct Input: Codable, Sendable {
         /// The IANA timezone in which the wall-clock reading is required.
         /// There is deliberately no default: a host must not silently use
@@ -53,23 +54,20 @@ public struct NowTool: Tool {
 
     public init() {}
 
-    public var schema: LLMToolSchema {
-        LLMToolSchema(
-            type: "function",
-            function: LLMToolSchema.FunctionSchema(
-                name: name,
-                description: description,
-                parameters: LLMToolSchema.ParameterSchema(
-                    type: "object",
-                    properties: [
-                        "time_zone": LLMToolSchema.PropertySchema(
-                            type: "string",
-                            description: "Required IANA timezone, for example Europe/Berlin.",
-                            enumValues: nil
-                        )
-                    ],
-                    required: ["time_zone"]
-                )
+    public var schema: ToolDefinition {
+        ToolDefinition(
+            name: name,
+            description: description,
+            parameters: ToolSchema.object(
+                name: "NowArguments",
+                description: "Arguments for reading the current time.",
+                properties: [
+                    .init(
+                        name: "time_zone",
+                        description: "Required IANA timezone, for example Europe/Berlin.",
+                        schema: ToolSchema.string(name: "TimeZone")
+                    )
+                ]
             )
         )
     }

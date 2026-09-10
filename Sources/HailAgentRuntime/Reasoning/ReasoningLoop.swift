@@ -30,6 +30,69 @@ private enum ModelRoundOutcome<Output> {
     case requiresTools(thinking: String, narration: String, calls: [ToolCall])
 }
 
+/// A compact description of deterministic failures produced by one tool
+/// round. Unavailable and execution failures are deliberately excluded: the
+/// model may be able to recover from those without changing its arguments.
+/// Tool call IDs are intentionally excluded because providers generate a new
+/// ID for each retry.
+struct ToolFailureSignature: Equatable, Sendable {
+    struct Entry: Equatable, Sendable {
+        let name: String
+        let output: String
+        let failureKind: ToolFailureKind
+    }
+
+    let entries: [Entry]
+
+    init(results: [ToolResult]) {
+        self.entries = results
+            .compactMap { result -> Entry? in
+                guard let failureKind = result.failureKind,
+                      failureKind == .invalidArguments || failureKind == .rejected
+                else { return nil }
+                return Entry(
+                    name: result.name,
+                    output: result.output,
+                    failureKind: failureKind
+                )
+            }
+    }
+
+    var isEmpty: Bool { entries.isEmpty }
+}
+
+/// Stops a reasoning turn when the model repeats the same failed tool round.
+/// One repeat is allowed so the model can correct an ordinary malformed call;
+/// a second identical failure is a loop, not useful recovery.
+struct ToolFailureTracker: Sendable, Equatable {
+    static let maximumRepetitions = 2
+
+    private(set) var lastFailure: ToolFailureSignature?
+    private(set) var repetitions = 0
+
+    mutating func record(results: [ToolResult]) -> Bool {
+        let failure = ToolFailureSignature(results: results)
+        guard !failure.isEmpty else {
+            lastFailure = nil
+            repetitions = 0
+            return false
+        }
+
+        if failure == lastFailure {
+            repetitions += 1
+        } else {
+            lastFailure = failure
+            repetitions = 1
+        }
+        return repetitions >= Self.maximumRepetitions
+    }
+}
+
+private struct ToolRoundResult {
+    let input: TurnPrompt
+    let results: [ToolResult]
+}
+
 /// The only failures a reasoning loop can return to its host. Keeping the
 /// lifecycle distinction in the type prevents the host from accidentally
 /// closing a turn whose terminal failure was never emitted.
@@ -98,9 +161,8 @@ enum TurnReducer {
 // MARK: - ReasoningLoop
 
 /// The assembled context for one turn, plus the session metadata the
-/// session-owning endpoint path needs: the working-memory snapshot (rides the
-/// warm delta) and the stable identity fingerprint (invalidates stale
-/// sessions).
+/// session-owning endpoint path needs and the stable identity fingerprint
+/// (invalidates stale sessions).
 struct TurnContext: Sendable {
     /// The policy-owned request. Messages are always derived from this value,
     /// so prompt assembly and compaction cannot drift apart.
@@ -109,7 +171,6 @@ struct TurnContext: Sendable {
     /// The derived turn context from which the request was assembled; handed
     /// to the compactor independently from request accounting.
     let promptContext: PromptContext
-    var workingMemory: [String] { promptContext.workingMemory }
     let sessionIdentity: SessionIdentity
     /// The journaled harness session (id + identity) from previous runs, used
     /// to resume after a restart and to detect when the id changes.
@@ -514,7 +575,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         turnContext: TurnContext,
         endpoint: any ModelEndpoint,
         additionalMessages: [LLMMessage] = [],
-        tools: [LLMToolSchema] = [],
+        tools: [ToolDefinition] = [],
         requestInput: ModelInput? = nil,
         trigger: ContextCompactionTrigger = .threshold
     ) async throws(AgentRuntimeError) -> TurnContext {
@@ -705,7 +766,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let registry = try await tools(
             AgentTurnContext(
                 agentID: agentID,
-                sourceAgentID: agentID,
                 turnID: turnID,
                 message: message,
                 inputID: input.inputID
@@ -789,7 +849,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
 
         let delta = TurnDelta(
             currentMessages: prompt.current.messages,
-            workingMemory: turnContext.workingMemory,
             sessionIdentity: turnContext.sessionIdentity
         )
 
@@ -844,12 +903,13 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         input: TurnPrompt,
         delta: TurnDelta,
         turnContextMessages: [LLMMessage],
-        schemas: [LLMToolSchema],
+        schemas: [ToolDefinition],
         turnSnapshot: TurnContext,
         registry: ToolRegistry,
         endpoint: ModelEndpoint,
         completedToolRounds: Int = 0,
         contextRecoveryAttempts: Int = 0,
+        toolFailureTracker: ToolFailureTracker = .init(),
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) -> Output {
         try Self.checkCancellation()
@@ -884,6 +944,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 endpoint: endpoint,
                 completedToolRounds: completedToolRounds,
                 contextRecoveryAttempts: contextRecoveryAttempts + 1,
+                toolFailureTracker: toolFailureTracker,
                 through: connection
             )
         }
@@ -911,8 +972,19 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 endpoint: endpoint,
                 through: connection
             )
+            var updatedFailureTracker = toolFailureTracker
+            if updatedFailureTracker.record(results: next.results) {
+                let failure = next.results.first { result in
+                    result.failureKind == .invalidArguments
+                        || result.failureKind == .rejected
+                }
+                throw AgentRuntimeError.toolFailed(
+                    name: failure?.name ?? calls.first?.name ?? "unknown",
+                    reason: "The model repeated the same failed tool call twice. \(failure?.output ?? "Tool execution failed.")"
+                )
+            }
             return try await runTurn(
-                input: next,
+                input: next.input,
                 delta: delta,
                 turnContextMessages: turnContextMessages,
                 schemas: schemas,
@@ -921,6 +993,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 endpoint: endpoint,
                 completedToolRounds: completedToolRounds + 1,
                 contextRecoveryAttempts: contextRecoveryAttempts,
+                toolFailureTracker: updatedFailureTracker,
                 through: connection
             )
         }
@@ -933,7 +1006,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     private func recoverFromContextOverflow(
         input: TurnPrompt,
         turnContextMessages: [LLMMessage],
-        schemas: [LLMToolSchema],
+        schemas: [ToolDefinition],
         turnSnapshot: TurnContext,
         endpoint: ModelEndpoint
     ) async throws(AgentRuntimeError) -> TurnPrompt {
@@ -966,7 +1039,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     private func requestModelRound<Output: AgentOutput>(
         input: TurnPrompt,
         delta: TurnDelta,
-        schemas: [LLMToolSchema],
+        schemas: [ToolDefinition],
         endpoint: ModelEndpoint,
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) -> ModelRoundOutcome<Output> {
@@ -1072,14 +1145,14 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         thinking: String,
         narration: String,
         calls: [ToolCall],
-        schemas: [LLMToolSchema],
+        schemas: [ToolDefinition],
         input: TurnPrompt,
         turnContextMessages: [LLMMessage],
         turnSnapshot: TurnContext,
         registry: ToolRegistry,
         endpoint: ModelEndpoint,
         through connection: AgentConnection<Output>
-    ) async throws(AgentRuntimeError) -> TurnPrompt {
+    ) async throws(AgentRuntimeError) -> ToolRoundResult {
         var nextInput = input.appending(
             LLMMessage(
                 role: .assistant,
@@ -1124,7 +1197,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         }
 
         guard endpoint.contextOwnership == .runtime, compactor != nil else {
-            return nextInput
+            return ToolRoundResult(
+                input: nextInput,
+                results: executions.map(\.result)
+            )
         }
 
         let rebuilt = try await rebuildContext(turnSnapshot)
@@ -1140,9 +1216,15 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             || prepared.promptContext.conversationThread.count
                 != rebuilt.promptContext.conversationThread.count
         guard wasCompacted else {
-            return nextInput
+            return ToolRoundResult(
+                input: nextInput,
+                results: executions.map(\.result)
+            )
         }
-        return nextInput.rebased(on: prepared.preparedRequest)
+        return ToolRoundResult(
+            input: nextInput.rebased(on: prepared.preparedRequest),
+            results: executions.map(\.result)
+        )
     }
 
     // MARK: - Updates

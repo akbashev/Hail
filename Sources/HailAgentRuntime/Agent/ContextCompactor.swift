@@ -111,7 +111,7 @@ public struct PreparedRequest: Sendable {
     public let prefix: [LLMMessage]
     public let conversation: [ConversationEntry]
     public let suffix: [LLMMessage]
-    public let tools: [LLMToolSchema]
+    public let tools: [ToolDefinition]
     /// Rich request input for provider-aware token counting. Ordinary prompt
     /// assembly leaves this nil; the reasoning loop supplies it after a tool
     /// round so artifact bodies are included in the budget.
@@ -121,7 +121,7 @@ public struct PreparedRequest: Sendable {
         prefix: [LLMMessage],
         conversation: [ConversationEntry],
         suffix: [LLMMessage] = [],
-        tools: [LLMToolSchema] = [],
+        tools: [ToolDefinition] = [],
         input: ModelInput? = nil
     ) {
         self.prefix = prefix
@@ -152,7 +152,7 @@ public struct PreparedRequest: Sendable {
     /// policy-owned prefix or conversation mapping.
     public func appending(
         suffix additionalMessages: [LLMMessage],
-        tools additionalTools: [LLMToolSchema]
+        tools additionalTools: [ToolDefinition]
     ) -> PreparedRequest {
         PreparedRequest(
             prefix: prefix,

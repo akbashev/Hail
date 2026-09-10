@@ -39,11 +39,9 @@ struct SlidingWindowCompactorTests {
                 role: agentID.role,
                 behavior: .init(
                     systemPrompt: "sys",
-                    model: try AgentModelReference("test/fake")
+                    model: try AgentModel("test/fake")
                 ),
-                limits: .init()
             ),
-            workingMemory: memory,
             contextSummary: summary,
             conversationThread: thread,
             contextManifest: ContextManifest(items: []),

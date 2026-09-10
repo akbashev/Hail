@@ -4,7 +4,7 @@
     import Foundation
 #endif
 
-/// Provider identifier used by a model route.
+/// Provider identifier used by a model.
 ///
 /// This is a value type rather than an enum so hosts can introduce a provider
 /// without changing Hail's source or waiting for a new release. The static
@@ -41,90 +41,64 @@ public struct AgentModelProvider: RawRepresentable, Codable, Sendable, Hashable,
     }
 }
 
-public enum AgentModelRouteError: Error, Sendable, Equatable {
-    case unknownProvider(String)
-    case missingModel(String)
-}
-
-/// A model selection as stored in an agent definition. Construction validates
-/// the serialized `provider/model` identifier, so an invalid reference cannot
-/// enter the domain model.
-public struct AgentModelReference: Codable, Sendable, Hashable, CustomStringConvertible {
-    public let rawValue: String
-
-    /// Creates a reference from an already validated route.
-    public init(route: AgentModelRoute) {
-        self.rawValue = route.identifier
-    }
-
-    public init(_ rawValue: String) throws(AgentModelReferenceError) {
-        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { throw .empty }
-        do {
-            _ = try AgentModelRoute(identifier: normalized)
-        } catch {
-            throw .invalidRoute(error)
-        }
-        self.rawValue = normalized
-    }
-
-    public var description: String { rawValue }
-
-    public func route() throws(AgentModelRouteError) -> AgentModelRoute {
-        try AgentModelRoute(identifier: rawValue)
-    }
-
-    public init(from decoder: Decoder) throws {
-        try self.init(try decoder.singleValueContainer().decode(String.self))
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
-    }
-}
-
-public enum AgentModelReferenceError: Error, Sendable, Equatable {
+public enum AgentModelError: Error, Sendable, Equatable {
     case empty
-    case invalidRoute(AgentModelRouteError)
+    case missingProvider(String)
+    case missingID(String)
 }
 
-/// A fully specified provider/model pair. Model names remain free-form so new
-/// provider releases do not require a Hail update, but absence is invalid.
-public struct AgentModelRoute: Sendable, Hashable {
+/// A fully specified provider/model pair.
+///
+/// The serialized form is the familiar `provider/model` string, while the
+/// domain value keeps both parts typed at every call site.
+public struct AgentModel: Codable, Sendable, Hashable, CustomStringConvertible {
     public let provider: AgentModelProvider
-    public let model: String
+    public let id: AgentModelID
 
     public init(
         provider: AgentModelProvider,
-        model: String
-    ) throws(AgentModelRouteError) {
+        id: AgentModelID
+    ) throws(AgentModelError) {
         guard !provider.rawValue.isEmpty else {
-            throw .unknownProvider(provider.rawValue)
+            throw .missingProvider(provider.rawValue)
         }
-        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !model.isEmpty else {
-            throw .missingModel(provider.rawValue)
+        let rawID = id.rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawID.isEmpty else {
+            throw .missingID(provider.rawValue)
         }
         self.provider = provider
-        self.model = model
+        self.id = AgentModelID(rawValue: rawID)
     }
 
-    public init(identifier: String) throws(AgentModelRouteError) {
+    public init(_ identifier: String) throws(AgentModelError) {
+        let identifier = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !identifier.isEmpty else { throw .empty }
         let parts = identifier.split(
             separator: "/",
             maxSplits: 1,
             omittingEmptySubsequences: false
         )
         guard parts.count == 2 else {
-            throw .missingModel(identifier)
+            throw .missingID(identifier)
         }
-        let providerName = String(parts[0])
-        let provider = AgentModelProvider(rawValue: providerName)
-        try self.init(provider: provider, model: String(parts[1]))
+        try self.init(
+            provider: AgentModelProvider(rawValue: String(parts[0])),
+            id: AgentModelID(rawValue: String(parts[1]))
+        )
     }
 
-    public var identifier: String { "\(provider.rawValue)/\(model)" }
+    public var rawValue: String { identifier }
+    public var identifier: String { "\(provider.rawValue)/\(id.rawValue)" }
+    public var description: String { identifier }
+
+    public init(from decoder: Decoder) throws {
+        try self.init(decoder.singleValueContainer().decode(String.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(identifier)
+    }
 }
 
 public let availableAgentModelProviders: [String] =
@@ -190,24 +164,21 @@ public struct AgentPersona: Codable, Sendable, Hashable {
 public struct AgentDefinition: Codable, Sendable {
     public let role: Role
     public let behavior: Behavior
-    public let limits: Limits
     public let persona: AgentPersona?
 
     public init(
         role: Role,
         behavior: Behavior,
-        limits: Limits,
         persona: AgentPersona? = nil
     ) {
         self.role = role
         self.behavior = behavior
-        self.limits = limits
         self.persona = persona
     }
 
     public struct Behavior: Codable, Sendable {
         public let systemPrompt: String
-        public let model: AgentModelReference
+        public let model: AgentModel
         /// Optional host-selected reasoning effort. When absent, the model
         /// provider chooses its own default for the selected model.
         public let reasoningEffort: ReasoningEffort?
@@ -215,7 +186,7 @@ public struct AgentDefinition: Codable, Sendable {
 
         public init(
             systemPrompt: String,
-            model: AgentModelReference,
+            model: AgentModel,
             execution: AgentExecutionPolicy = .autonomousWorkspace,
             reasoningEffort: ReasoningEffort? = nil
         ) {
@@ -230,10 +201,10 @@ public struct AgentDefinition: Codable, Sendable {
             model: String,
             execution: AgentExecutionPolicy = .autonomousWorkspace,
             reasoningEffort: ReasoningEffort? = nil
-        ) throws(AgentModelReferenceError) {
+        ) throws(AgentModelError) {
             self.init(
                 systemPrompt: systemPrompt,
-                model: try AgentModelReference(model),
+                model: try AgentModel(model),
                 execution: execution,
                 reasoningEffort: reasoningEffort
             )
@@ -243,7 +214,7 @@ public struct AgentDefinition: Codable, Sendable {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.systemPrompt = try container.decode(String.self, forKey: .systemPrompt)
 
-            self.model = try container.decode(AgentModelReference.self, forKey: .model)
+            self.model = try container.decode(AgentModel.self, forKey: .model)
             self.reasoningEffort = try container.decodeIfPresent(
                 ReasoningEffort.self,
                 forKey: .reasoningEffort
@@ -261,33 +232,9 @@ public struct AgentDefinition: Codable, Sendable {
         }
     }
 
-    public struct Limits: Codable, Sendable {
-        public let maxMemoryFragments: Int
-
-        public init(
-            maxMemoryFragments: Int = 10
-        ) {
-            self.maxMemoryFragments = maxMemoryFragments
-        }
-
-        public init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            self.maxMemoryFragments =
-                try container.decodeIfPresent(
-                    Int.self,
-                    forKey: .maxMemoryFragments
-                ) ?? 10
-        }
-
-        enum CodingKeys: String, CodingKey {
-            case maxMemoryFragments = "max_memory_fragments"
-        }
-    }
-
     enum CodingKeys: String, CodingKey {
         case role = "agent_type_id"
         case behavior
-        case limits
         case persona
     }
 }
@@ -308,7 +255,7 @@ extension AgentDefinition {
     /// model on its behalf.
     public static func defaultDefinition(
         for role: Role,
-        model: AgentModelReference,
+        model: AgentModel,
         reasoningEffort: ReasoningEffort? = nil
     ) -> AgentDefinition {
         return AgentDefinition(
@@ -317,8 +264,7 @@ extension AgentDefinition {
                 systemPrompt: "You are the \(role) agent.",
                 model: model,
                 reasoningEffort: reasoningEffort
-            ),
-            limits: .init()
+            )
         )
     }
 }

@@ -10,7 +10,7 @@ import Testing
 @Suite("AgentStateTurnTiming")
 struct AgentStateTurnTimingTests {
     private func makeToolResult(id: String, output: String) throws -> ToolResult {
-        let json = #"{"tool_call_id":"\#(id)","name":"read_file","output":"\#(output)","is_error":false}"#
+        let json = #"{"tool_call_id":"\#(id)","name":"read_file","output":"\#(output)","failure_kind":null}"#
         return try JSONDecoder().decode(ToolResult.self, from: Data(json.utf8))
     }
 
@@ -21,15 +21,15 @@ struct AgentStateTurnTimingTests {
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
 
         state.apply(
-            .toolInvoked(
-                ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}")),
+            .assistantToolRound(
+                content: "",
+                thinking: nil,
+                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
                 at: invokedAt
-            ),
-            maxMemoryFragments: 10
+            )
         )
         state.apply(
-            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: resultAt),
-            maxMemoryFragments: 10
+            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: resultAt)
         )
 
         #expect(state.conversationThread.count == 2)
@@ -37,19 +37,20 @@ struct AgentStateTurnTimingTests {
         #expect(state.conversationThread[1].timestamp == resultAt)
     }
 
-    @Test("pre-timing events (nil timestamps) still fold")
+    @Test("a turn without a turn timestamp still folds tool events")
     func preTimingEventsStillFold() throws {
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
 
-        state.apply(.turnStarted(at: nil), maxMemoryFragments: 10)
+        state.apply(.turnStarted(at: nil))
         state.apply(
-            .toolInvoked(
-                ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}")),
-                at: nil
-            ),
-            maxMemoryFragments: 10
+            .assistantToolRound(
+                content: "",
+                thinking: nil,
+                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
+                at: Date(timeIntervalSince1970: 1)
+            )
         )
-        state.apply(.turnCompleted(at: nil), maxMemoryFragments: 10)
+        state.apply(.turnCompleted(at: nil))
 
         #expect(state.conversationThread.count == 1)
         #expect(state.activeTurn == nil)
@@ -62,14 +63,12 @@ struct AgentStateTurnTimingTests {
 
         state.apply(
             .modelSessionIdentified(id: SessionID("session-1"), identity: SessionIdentity("fp-A")),
-            maxMemoryFragments: 10
         )
         #expect(state.modelSession?.id == SessionID("session-1"))
         #expect(state.modelSession?.identity == SessionIdentity("fp-A"))
 
         state.apply(
             .modelSessionIdentified(id: SessionID("session-2"), identity: SessionIdentity("fp-B")),
-            maxMemoryFragments: 10
         )
         #expect(state.modelSession?.id == SessionID("session-2"))
         #expect(state.modelSession?.identity == SessionIdentity("fp-B"))
@@ -88,25 +87,25 @@ struct AgentStateTurnTimingTests {
         )
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
 
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 1_999)), maxMemoryFragments: 10)
-        state.apply(.messageReceived(message), maxMemoryFragments: 10)
+        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 1_999)))
+        state.apply(.messageReceived(message))
         state.apply(
-            .toolInvoked(
-                ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}")),
+            .assistantToolRound(
+                content: "",
+                thinking: nil,
+                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
                 at: Date(timeIntervalSince1970: 2_001)
-            ),
-            maxMemoryFragments: 10
+            )
         )
         state.apply(
-            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: Date(timeIntervalSince1970: 2_002)),
-            maxMemoryFragments: 10
+            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: Date(timeIntervalSince1970: 2_002))
         )
         state.normalizeAfterReplay()
 
         // The re-run after activation starts a fresh turn and re-journals the
         // exact same opening message (same timestamp).
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 3_000)), maxMemoryFragments: 10)
-        state.apply(.messageReceived(message), maxMemoryFragments: 10)
+        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 3_000)))
+        state.apply(.messageReceived(message))
 
         #expect(state.conversationThread.filter { $0 == message }.count == 1)
         #expect(state.activeTurn?.opening == message)
@@ -124,18 +123,18 @@ struct AgentStateTurnTimingTests {
             timestamp: Date(timeIntervalSince1970: 2_000)
         )
 
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 1_999)), maxMemoryFragments: 10)
-        state.apply(.messageReceived(original), maxMemoryFragments: 10)
+        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 1_999)))
+        state.apply(.messageReceived(original))
         state.apply(
-            .toolInvoked(
-                ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}")),
+            .assistantToolRound(
+                content: "",
+                thinking: nil,
+                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
                 at: Date(timeIntervalSince1970: 2_001)
-            ),
-            maxMemoryFragments: 10
+            )
         )
         state.apply(
-            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: Date(timeIntervalSince1970: 2_002)),
-            maxMemoryFragments: 10
+            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: Date(timeIntervalSince1970: 2_002))
         )
         state.normalizeAfterReplay()
 
@@ -145,8 +144,8 @@ struct AgentStateTurnTimingTests {
             content: "hello",
             timestamp: Date(timeIntervalSince1970: 3_000)
         )
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 2_999)), maxMemoryFragments: 10)
-        state.apply(.messageReceived(repeated), maxMemoryFragments: 10)
+        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 2_999)))
+        state.apply(.messageReceived(repeated))
 
         let textMessages = state.conversationThread.filter {
             if case .text(let sender, let content, _) = $0 {
@@ -165,15 +164,15 @@ struct AgentStateTurnTimingTests {
     func legacyJournalEntriesDecode() throws {
         let legacyLines = [
             #"{"turnStarted":{}}"#,
-            #"{"toolInvoked":{"_0":{"id":"c1","name":"read_file","arguments":{"json":"{}"}}}}"#,
-            #"{"toolResult":{"_0":{"tool_call_id":"c1","name":"read_file","output":"ok","is_error":false}}}"#,
+            #"{"assistantToolRound":{"content":"","calls":[{"id":"c1","name":"read_file","arguments":{"json":"{}"}}],"at":-978307199.0}}"#,
+            #"{"toolResult":{"_0":{"tool_call_id":"c1","name":"read_file","output":"ok","failure_kind":null}}}"#,
             #"{"turnCompleted":{}}"#,
         ]
 
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
         for line in legacyLines {
             let event = try JSONDecoder().decode(AgentEvent.self, from: Data(line.utf8))
-            state.apply(event, maxMemoryFragments: 10)
+            state.apply(event)
         }
 
         #expect(state.conversationThread.count == 2)
@@ -197,17 +196,18 @@ struct AgentStateTurnTimingTests {
         )
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
 
-        state.apply(.turnStarted(at: startedAt), maxMemoryFragments: 10)
-        state.apply(.turnIdentified(id: turnID), maxMemoryFragments: 10)
-        state.apply(.messageReceived(opening), maxMemoryFragments: 10)
+        state.apply(.turnStarted(at: startedAt))
+        state.apply(.turnIdentified(id: turnID))
+        state.apply(.messageReceived(opening))
         state.apply(
-            .toolInvoked(
-                ToolCall(id: "call-crashed", name: "read_file", arguments: ToolArguments(json: "{}")),
+            .assistantToolRound(
+                content: "",
+                thinking: nil,
+                calls: [ToolCall(id: "call-crashed", name: "read_file", arguments: ToolArguments(json: "{}"))],
                 at: startedAt
-            ),
-            maxMemoryFragments: 10
+            )
         )
-        state.apply(.modelRequestStarted(record), maxMemoryFragments: 10)
+        state.apply(.modelRequestStarted(record))
 
         state.normalizeAfterReplay()
 

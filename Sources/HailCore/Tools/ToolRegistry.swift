@@ -65,10 +65,6 @@ public actor ToolRegistry: Sendable {
         }
     }
 
-    public func register(_ tools: any Tool...) {
-        register(tools: tools)
-    }
-
     public func execute(_ toolCalls: [ToolCall]) async throws(AgentRuntimeError) -> [ToolResult] {
         try await executeWithOutputs(toolCalls).map(\.result)
     }

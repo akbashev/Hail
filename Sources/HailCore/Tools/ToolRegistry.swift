@@ -65,6 +65,13 @@ public actor ToolRegistry: Sendable {
         }
     }
 
+    /// Registers several tools while preserving the convenient variadic API.
+    /// The labeled array call is intentional: calling `register(tool)` here
+    /// would select this overload again for an existential tool.
+    public func register(_ tools: any Tool...) {
+        register(tools: tools)
+    }
+
     public func execute(_ toolCalls: [ToolCall]) async throws(AgentRuntimeError) -> [ToolResult] {
         try await executeWithOutputs(toolCalls).map(\.result)
     }

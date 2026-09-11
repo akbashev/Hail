@@ -104,11 +104,14 @@ public struct SlidingWindowCompactor: ContextCompactor {
         }
 
         let output = try await summarize(
-            CompactionSummaryRequest(entries: selected.entries, maxOutputTokens: outputBudget)
+            CompactionSummaryRequest(
+                entries: selected.entries,
+                maxOutputTokens: max(1, selectedSummaryBudget)
+            )
         )
         let projectionBudget = ContextProjectionBudget(
             availableTokens: selectedSummaryBudget,
-            outputReserve: outputBudget
+            outputReserve: selectedSummaryBudget
         )
         let contextValue = try contextProjection(output, projectionBudget)
         let candidate = Self.compactedContext(
@@ -124,7 +127,14 @@ public struct SlidingWindowCompactor: ContextCompactor {
             measure: measure
         )
         guard candidateCost <= retainedBudget else {
-            throw AgentRuntimeError.contextLengthExceeded
+            // The rebuilt request still does not fit the retained budget. A
+            // threshold decision may stay with the current context; a
+            // provider-reported overflow has nothing left to retry and must
+            // propagate the typed failure.
+            if trigger == .contextLengthExceeded {
+                throw AgentRuntimeError.contextLengthExceeded
+            }
+            return .unchanged
         }
 
         return .compacted(

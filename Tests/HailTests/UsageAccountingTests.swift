@@ -200,6 +200,92 @@ struct UsageAccountingTests {
         )
     }
 
+    @Test("Ollama reports context exhaustion when a length finish fills the window")
+    func ollamaLengthFinishWithFullWindow() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://overflow.test",
+            numContext: 100,
+            lines: [
+                #"{"message":{"role":"assistant","content":"Partial answer."},"done":true,"done_reason":"length","prompt_eval_count":97,"eval_count":3}"#
+            ]
+        )
+
+        var events: [ModelEvent<String>] = []
+        for await event in endpoint.stream(
+            request: ModelRequest(input: "hello", entries: [prompt("hello")]),
+            tools: [],
+            authority: FullAuthority(),
+            generating: String.self,
+            purpose: .generation
+        ) {
+            events.append(event)
+        }
+
+        #expect(!events.contains { if case .generated = $0 { true } else { false } })
+        #expect(
+            events.contains {
+                if case .failed(.contextLengthExceeded) = $0 { true } else { false }
+            })
+    }
+
+    @Test("Ollama keeps a capped generation with window headroom a plain failure")
+    func ollamaLengthFinishWithHeadroom() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://capped.test",
+            numContext: 100_000,
+            lines: [
+                #"{"message":{"role":"assistant","content":"Partial answer."},"done":true,"done_reason":"length","prompt_eval_count":900,"eval_count":4096}"#
+            ]
+        )
+
+        var events: [ModelEvent<String>] = []
+        for await event in endpoint.stream(
+            request: ModelRequest(input: "hello", entries: [prompt("hello")]),
+            tools: [],
+            authority: FullAuthority(),
+            generating: String.self,
+            purpose: .generation
+        ) {
+            events.append(event)
+        }
+
+        #expect(
+            events.contains {
+                if case .failed(.requestFailed(let message)) = $0 {
+                    message.contains("done_reason: length")
+                } else {
+                    false
+                }
+            })
+    }
+
+    @Test("Ollama treats an unaccounted length finish as context exhaustion")
+    func ollamaLengthFinishWithoutCounts() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://legacy.test",
+            numContext: 100,
+            lines: [
+                #"{"message":{"role":"assistant","content":"Partial answer."},"done":true,"done_reason":"length"}"#
+            ]
+        )
+
+        var events: [ModelEvent<String>] = []
+        for await event in endpoint.stream(
+            request: ModelRequest(input: "hello", entries: [prompt("hello")]),
+            tools: [],
+            authority: FullAuthority(),
+            generating: String.self,
+            purpose: .generation
+        ) {
+            events.append(event)
+        }
+
+        #expect(
+            events.contains {
+                if case .failed(.contextLengthExceeded) = $0 { true } else { false }
+            })
+    }
+
     @Test("Ollama keeps an assistant tool round in one provider message")
     func ollamaCombinesAssistantToolRound() async throws {
         let capture = RequestCapture()

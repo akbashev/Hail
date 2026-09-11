@@ -519,6 +519,93 @@ struct SlidingWindowCompactorTests {
             )
         }
     }
+
+    @Test("a post-generation overrun on a threshold decision keeps the context unchanged")
+    func thresholdOverrunKeepsContextUnchanged() async throws {
+        let compactor = makeCompactor(keepRecent: 1, outputReserve: 400)
+        let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
+        let ctx = try context(thread: thread)
+
+        let decision = try await compactor.compact(
+            context: ctx,
+            request: preparedRequest(for: ctx),
+            budget: try budget(),
+            measurement: RequestMeasurement(tokenCount: 500, source: .reported),
+            measure: { candidate in
+                // The kept tail fits the retained budget; the rebuilt request
+                // with its projected summary does not.
+                let includesSummary = candidate.entries.contains {
+                    text(in: $0).contains("Earlier conversation, summarized:")
+                }
+                return RequestMeasurement(
+                    tokenCount: includesSummary ? 900 : 500,
+                    source: .reported
+                )
+            },
+            summarize: { _ in "rolled" },
+            trigger: .threshold
+        )
+
+        #expect(decision == .unchanged)
+    }
+
+    @Test("a post-generation overrun on a forced recovery propagates the typed overflow")
+    func forcedRecoveryOverrunThrows() async throws {
+        let compactor = makeCompactor(keepRecent: 1, outputReserve: 400)
+        let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
+        let ctx = try context(thread: thread)
+
+        await #expect(throws: AgentRuntimeError.contextLengthExceeded) {
+            try await compactor.compact(
+                context: ctx,
+                request: preparedRequest(for: ctx),
+                budget: try budget(),
+                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
+                measure: { candidate in
+                    let includesSummary = candidate.entries.contains {
+                        text(in: $0).contains("Earlier conversation, summarized:")
+                    }
+                    return RequestMeasurement(
+                        tokenCount: includesSummary ? 900 : 500,
+                        source: .reported
+                    )
+                },
+                summarize: { _ in "rolled" },
+                trigger: .contextLengthExceeded
+            )
+        }
+    }
+
+    @Test("the summarizer is capped by the budget left after the kept tail")
+    func summarizeIsCappedByRemainingBudget() async throws {
+        let compactor = makeCompactor(keepRecent: 1, outputReserve: 400)
+        let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
+        let ctx = try context(thread: thread)
+        let budgets = Box<[Int]>()
+
+        let result = try requireCompaction(
+            await compactor.compact(
+                context: ctx,
+                request: preparedRequest(for: ctx),
+                budget: try budget(),
+                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
+                measure: { _ in
+                    // Both the kept tail and the rebuilt request fit the
+                    // retained budget of 600, so the only limit left for the
+                    // summary is 600 − 500 = 100 tokens.
+                    RequestMeasurement(tokenCount: 500, source: .reported)
+                },
+                summarize: { request in
+                    budgets.value = (budgets.value ?? []) + [request.maxOutputTokens]
+                    return "rolled"
+                },
+                trigger: .threshold
+            )
+        )
+
+        #expect(result.archivedCount == 4)
+        #expect(budgets.value == [100])
+    }
 }
 
 /// A tiny sendable box to capture closure outputs from the summarize hook.

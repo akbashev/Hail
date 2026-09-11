@@ -36,6 +36,8 @@ private struct OllamaStreamState: Sendable {
     let reasoning: [Transcript.Segment]
     let sawDone: Bool
     let doneReason: String?
+    let promptEvalCount: Int?
+    let evalCount: Int?
 
     init(
         text: String = "",
@@ -44,7 +46,9 @@ private struct OllamaStreamState: Sendable {
         narration: [Transcript.Segment] = [],
         reasoning: [Transcript.Segment] = [],
         sawDone: Bool = false,
-        doneReason: String? = nil
+        doneReason: String? = nil,
+        promptEvalCount: Int? = nil,
+        evalCount: Int? = nil
     ) {
         self.text = text
         self.toolCalls = toolCalls
@@ -53,6 +57,8 @@ private struct OllamaStreamState: Sendable {
         self.reasoning = reasoning
         self.sawDone = sawDone
         self.doneReason = doneReason
+        self.promptEvalCount = promptEvalCount
+        self.evalCount = evalCount
     }
 
     func applying(
@@ -76,7 +82,9 @@ private struct OllamaStreamState: Sendable {
                 narration: next.narration,
                 reasoning: next.reasoning + [.text(.init(content: thought))],
                 sawDone: next.sawDone,
-                doneReason: next.doneReason
+                doneReason: next.doneReason,
+                promptEvalCount: next.promptEvalCount,
+                evalCount: next.evalCount
             )
             events.append(.activity(.reasoningDelta(GeneratedContent(thought))))
         }
@@ -88,7 +96,9 @@ private struct OllamaStreamState: Sendable {
                 narration: next.narration + [.text(.init(content: fragment))],
                 reasoning: next.reasoning,
                 sawDone: next.sawDone,
-                doneReason: next.doneReason
+                doneReason: next.doneReason,
+                promptEvalCount: next.promptEvalCount,
+                evalCount: next.evalCount
             )
             events.append(.activity(.narrationDelta(GeneratedContent(fragment))))
         }
@@ -110,7 +120,9 @@ private struct OllamaStreamState: Sendable {
                     narration: next.narration,
                     reasoning: next.reasoning,
                     sawDone: next.sawDone,
-                    doneReason: next.doneReason
+                    doneReason: next.doneReason,
+                    promptEvalCount: next.promptEvalCount,
+                    evalCount: next.evalCount
                 )
             }
         }
@@ -122,7 +134,9 @@ private struct OllamaStreamState: Sendable {
                 narration: next.narration,
                 reasoning: next.reasoning,
                 sawDone: true,
-                doneReason: chunk.doneReason
+                doneReason: chunk.doneReason,
+                promptEvalCount: chunk.promptEvalCount ?? next.promptEvalCount,
+                evalCount: chunk.evalCount ?? next.evalCount
             )
             if let usage = chunk.usage {
                 events.append(.usage(usage))
@@ -144,7 +158,21 @@ private struct OllamaStreamState: Sendable {
         return (next, events)
     }
 
-    func finishing(format: AnyCodableValue?) throws -> [OllamaEvent] {
+    func finishing(format: AnyCodableValue?, contextWindow: Int?) throws -> [OllamaEvent] {
+        if let doneReason, doneReason == "length",
+            Self.consumedContextFillsWindow(
+                promptTokens: promptEvalCount,
+                generatedTokens: evalCount,
+                contextWindow: contextWindow
+            )
+        {
+            // Ollama reports a context-exhausted generation as done_reason
+            // "length": it silently truncates input that exceeds num_ctx and
+            // stops as soon as the prompt leaves no generation room. Surface
+            // the typed overflow so the runtime's context recovery runs
+            // instead of failing the turn as generic model misbehavior.
+            return [.failed(.contextLengthExceeded)]
+        }
         if !toolCalls.isEmpty {
             let narration =
                 narration.isEmpty
@@ -180,6 +208,20 @@ private struct OllamaStreamState: Sendable {
             ? GeneratedContent(text)
             : try GeneratedContent(json: text)
         return [.generated(generated)]
+    }
+
+    /// A "length" finish means context exhaustion only when the prompt and
+    /// generation together consumed the window. An output cap with headroom
+    /// left (for example a Modelfile `num_predict`, or Hail's own compaction
+    /// summarizer cap) is a plain failed request, not an overflow.
+    private static func consumedContextFillsWindow(
+        promptTokens: Int?,
+        generatedTokens: Int?,
+        contextWindow: Int?
+    ) -> Bool {
+        guard let contextWindow else { return true }
+        guard promptTokens != nil || generatedTokens != nil else { return true }
+        return (promptTokens ?? 0) + (generatedTokens ?? 0) >= contextWindow
     }
 }
 
@@ -410,7 +452,10 @@ public struct OllamaEndpoint: ModelEndpoint {
                             break
                         }
                     }
-                    for event in try state.finishing(format: format) {
+                    for event in try state.finishing(
+                        format: format,
+                        contextWindow: effectiveContextWindow
+                    ) {
                         continuation.yield(event)
                     }
                     continuation.finish()

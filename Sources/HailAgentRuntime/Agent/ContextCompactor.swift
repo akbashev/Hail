@@ -221,6 +221,9 @@ public protocol ContextCompactor: Sendable {
     /// the conversation section carrying source indices back to
     /// `PromptContext.conversationThread`. A compactor must preserve the
     /// prefix and suffix while replacing only that conversation section.
+    ///
+    /// The summarizer's task text is derived from the report type itself
+    /// (see ``CompactionTask``); hosts document their ``Generable`` report.
     func compact<Output: Codable & Sendable & Generable>(
         context: PromptContext,
         request: PreparedRequest,

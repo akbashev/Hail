@@ -606,6 +606,94 @@ struct SlidingWindowCompactorTests {
         #expect(result.archivedCount == 4)
         #expect(budgets.value == [100])
     }
+
+    @Generable(description: "The test report task, authored on the type itself.")
+    struct DescribedReport: Codable, Sendable {
+        let note: String
+    }
+
+    @Test("the report type's own description drives the task instruction")
+    func reportDescriptionDrivesTaskInstruction() async throws {
+        let compactor = makeCompactor(keepRecent: 1)
+        let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
+        let ctx = try context(thread: thread)
+        let captured = Box<[[Transcript.Entry]]>()
+
+        _ = try await compactor.compact(
+            context: ctx,
+            request: preparedRequest(for: ctx),
+            budget: try budget(),
+            summarize: { request in
+                captured.value = (captured.value ?? []) + [request.entries]
+                return DescribedReport(note: "rolled")
+            }
+        )
+
+        let entries = try #require(captured.value?.first)
+        let instruction = entries.first.map(text(in:)) ?? ""
+        #expect(instruction.contains("The test report task, authored on the type itself."))
+        #expect(instruction.contains("compacting an agent's conversation history"))
+    }
+
+    @Test("report types without a description keep the plain-text summary task")
+    func undescribedReportUsesPlainTextTask() async throws {
+        let compactor = makeCompactor(keepRecent: 1)
+        let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
+        let ctx = try context(thread: thread)
+        let captured = Box<[[Transcript.Entry]]>()
+
+        _ = try await compactor.compact(
+            context: ctx,
+            request: preparedRequest(for: ctx),
+            budget: try budget(),
+            summarize: { request in
+                captured.value = (captured.value ?? []) + [request.entries]
+                return "rolled"
+            }
+        )
+
+        let entries = try #require(captured.value?.first)
+        let instruction = entries.first.map(text(in:)) ?? ""
+        #expect(instruction.contains("Update the running summary"))
+        #expect(!instruction.contains("described below"))
+    }
+
+    @Test("oversized tool results are excerpted in the archive transcript")
+    func oversizedToolResultIsExcerpted() async throws {
+        let compactor = makeCompactor(keepRecent: 1)
+        let tail = "END-OF-TOOL-OUTPUT-MARKER"
+        let toolOutput = String(repeating: "x", count: 12_000) + tail
+        let thread: [ChatMessage] = [
+            text(String(repeating: "a", count: 40), 0),
+            .toolResult(
+                id: "1",
+                name: "read_file",
+                output: .text(toolOutput),
+                timestamp: Date(timeIntervalSince1970: 1)
+            ),
+            text(String(repeating: "b", count: 40), 2),
+            text(String(repeating: "c", count: 40), 3),
+            text(String(repeating: "d", count: 40), 4),
+            text(String(repeating: "e", count: 40), 5),
+        ]
+        let ctx = try context(thread: thread)
+        let captured = Box<[[Transcript.Entry]]>()
+
+        _ = try await compactor.compact(
+            context: ctx,
+            request: preparedRequest(for: ctx),
+            budget: try budget()
+        ) { request in
+            captured.value = (captured.value ?? []) + [request.entries]
+            return "rolled"
+        }
+
+        let entries = try #require(captured.value?.first)
+        let transcript = entries.map(text(in:)).joined(separator: "\n")
+        #expect(transcript.contains("read_file result:"))
+        #expect(transcript.contains("…[truncated]"))
+        #expect(!transcript.contains(tail))
+    }
 }
 
 /// A tiny sendable box to capture closure outputs from the summarize hook.

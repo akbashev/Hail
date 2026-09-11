@@ -89,7 +89,8 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 let entries = SummaryPrompt.entries(
                     priorSummary: context.contextSummary,
                     archived: Array(context.conversationThread.prefix(count)),
-                    agentID: context.agentID
+                    agentID: context.agentID,
+                    task: CompactionTask.instructions(for: Output.self)
                 )
                 selected = (count, entries)
                 break

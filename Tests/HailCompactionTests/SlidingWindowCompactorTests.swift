@@ -163,11 +163,20 @@ struct SlidingWindowCompactorTests {
             await compactor.compact(
                 context: ctx,
                 request: preparedRequest(for: ctx),
-                budget: try budget()
-            ) { _ in
-                calls.value = (calls.value ?? 0) + 1
-                return "rolled"
-            }
+                budget: try budget(),
+                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
+                measure: { candidate in
+                    RequestMeasurement(
+                        tokenCount: candidate.entries.count * 10,
+                        source: .reported
+                    )
+                },
+                summarize: { _ in
+                    calls.value = (calls.value ?? 0) + 1
+                    return "rolled"
+                },
+                trigger: .threshold
+            )
         )
 
         #expect(result.archivedCount == 1)
@@ -293,8 +302,17 @@ struct SlidingWindowCompactorTests {
             await compactor.compact(
                 context: ctx,
                 request: preparedRequest(for: ctx),
-                budget: try budget()
-            ) { _ in "rolled" }
+                budget: try budget(),
+                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
+                measure: { candidate in
+                    RequestMeasurement(
+                        tokenCount: candidate.entries.count * 40,
+                        source: .reported
+                    )
+                },
+                summarize: { _ in "rolled" },
+                trigger: .threshold
+            )
         )
 
         // The preferred suffix contains the complete parallel interaction,
@@ -693,6 +711,108 @@ struct SlidingWindowCompactorTests {
         #expect(transcript.contains("read_file result:"))
         #expect(transcript.contains("…[truncated]"))
         #expect(!transcript.contains(tail))
+    }
+
+    @Test("estimator fitting margins the retained budget and escalates the cut")
+    func estimatorMarginEscalatesTheCut() async throws {
+        // Window 8000, output reserve 400 -> retained 7600, margined 5700.
+        // Keeping the preferred two recent messages costs between 5700 and
+        // 7600 estimated: it would fit an exact counter but not the estimator
+        // margin, so the policy archives deeper.
+        let compactor = makeCompactor(keepRecent: 2, outputReserve: 400)
+        let thread = [
+            text(String(repeating: "a", count: 500), 0),
+            text(String(repeating: "b", count: 40), 1),
+            text(String(repeating: "c", count: 13_500), 2),
+            text(String(repeating: "d", count: 13_500), 3),
+        ]
+        let ctx = try context(thread: thread)
+        let budgets = Box<[Int]>()
+
+        let result = try requireCompaction(
+            await compactor.compact(
+                context: ctx,
+                request: preparedRequest(for: ctx),
+                budget: try CompactionBudget(contextWindow: 8_000),
+                measurement: RequestMeasurement(tokenCount: 6_000, source: .reported),
+                summarize: { request in
+                    budgets.value = (budgets.value ?? []) + [request.maxOutputTokens]
+                    return "rolled"
+                },
+                trigger: .threshold
+            )
+        )
+
+        #expect(result.archivedCount == 3)
+        #expect(budgets.value?.first ?? 0 >= 256)
+    }
+
+    @Test("a cut without summary room is skipped for a deeper archive")
+    func cutWithoutSummaryRoomIsSkipped() async throws {
+        // Same budget shape, but the preferred tail fits the margined budget
+        // while leaving less than this policy's (deliberately huge) minimum
+        // summary room: the shallow cut is skipped and the deeper archive
+        // with real room wins.
+        let compactor = SlidingWindowCompactor(
+            threshold: 0.15,
+            keepRecent: 2,
+            outputReserve: 400,
+            toolResultReserve: 0,
+            fittingMargin: 0.75,
+            minimumSummaryBudget: 5_000
+        )
+        let thread = [
+            text(String(repeating: "a", count: 2_500), 0),
+            text(String(repeating: "b", count: 2_500), 1),
+            text(String(repeating: "c", count: 2_500), 2),
+            text(String(repeating: "d", count: 40), 3),
+        ]
+        let ctx = try context(thread: thread)
+        let budgets = Box<[Int]>()
+
+        let result = try requireCompaction(
+            await compactor.compact(
+                context: ctx,
+                request: preparedRequest(for: ctx),
+                budget: try CompactionBudget(contextWindow: 8_000),
+                measurement: RequestMeasurement(tokenCount: 6_000, source: .reported),
+                summarize: { request in
+                    budgets.value = (budgets.value ?? []) + [request.maxOutputTokens]
+                    return "rolled"
+                },
+                trigger: .threshold
+            )
+        )
+
+        #expect(result.archivedCount == 3)
+        #expect(budgets.value?.first ?? 0 >= 256)
+    }
+
+    @Test("a thread no larger than keepRecent still compacts when it must")
+    func recoveryEscalatesBelowKeepRecent() async throws {
+        // Three messages with keepRecent 3 used to dead-end at the guard and
+        // return .unchanged even during forced recovery. Recovery bypasses
+        // the preferred-tail floor and the fallback cuts archive.
+        let compactor = makeCompactor(keepRecent: 3, outputReserve: 400)
+        let thread = [
+            text(String(repeating: "a", count: 11_600), 0),
+            text(String(repeating: "b", count: 11_600), 1),
+            text(String(repeating: "c", count: 11_600), 2),
+        ]
+        let ctx = try context(thread: thread)
+
+        let result = try requireCompaction(
+            await compactor.compact(
+                context: ctx,
+                request: preparedRequest(for: ctx),
+                budget: try CompactionBudget(contextWindow: 8_000),
+                measurement: RequestMeasurement(tokenCount: 7_000, source: .reported),
+                summarize: { _ in "rolled" },
+                trigger: .contextLengthExceeded
+            )
+        )
+
+        #expect(result.archivedCount == 2)
     }
 }
 

@@ -11,19 +11,32 @@ public struct SlidingWindowCompactor: ContextCompactor {
     public var keepRecent: Int
     public var outputReserve: Int
     public var toolResultReserve: Int
+    /// Multiplier applied to the retained budget when candidate fitting runs
+    /// on the fallback estimator instead of an exact provider counter. The
+    /// estimator undercounts rendered chat templates, so an unmargined
+    /// "fitting" cut can still overflow the real window.
+    public var fittingMargin: Double
+    /// Minimum tokens a cut must leave for the projected summary. Cuts that
+    /// squeeze the summary to nothing are skipped in favor of deeper
+    /// archives; an empty rolling summary would silently drop history.
+    public var minimumSummaryBudget: Int
 
     public init(
         estimator: TokenEstimator = .init(),
         threshold: Double = 0.7,
         keepRecent: Int = 10,
         outputReserve: Int = 512,
-        toolResultReserve: Int = 512
+        toolResultReserve: Int = 512,
+        fittingMargin: Double = 0.75,
+        minimumSummaryBudget: Int = 256
     ) {
         self.estimator = estimator
         self.threshold = threshold
         self.keepRecent = keepRecent
         self.outputReserve = max(0, outputReserve)
         self.toolResultReserve = max(0, toolResultReserve)
+        self.fittingMargin = min(1, max(0.1, fittingMargin))
+        self.minimumSummaryBudget = max(0, minimumSummaryBudget)
     }
 
     public func compact<Output: Codable & Sendable & Generable>(
@@ -49,14 +62,29 @@ public struct SlidingWindowCompactor: ContextCompactor {
         guard trigger == .contextLengthExceeded || used >= thresholdTrigger else {
             return .unchanged
         }
-        guard context.conversationThread.count > max(keepRecent, 1),
+        // Recovery from a real overflow may always archive down to the
+        // in-flight exchange; a threshold trigger leaves threads no larger
+        // than the preferred tail alone.
+        guard context.conversationThread.count > 1,
             !request.conversation.isEmpty
         else {
+            return .unchanged
+        }
+        if trigger == .threshold && context.conversationThread.count <= max(keepRecent, 1) {
             return .unchanged
         }
 
         let outputBudget = budget.outputReserve(maximum: outputReserve)
         let retainedBudget = max(1, window - outputBudget - toolResultReserve)
+        // Fitting decisions trust the measurement source. A provider counter
+        // is exact; the fallback estimator counts Hail's serialization, which
+        // provider chat templates render larger (observed ~30% on
+        // tool-result-heavy contexts). Margin the budget for estimator
+        // fitting so a "fitting" cut also fits in reality.
+        let effectiveRetainedBudget =
+            measure == nil
+            ? max(minimumSummaryBudget + 1, Int(Double(retainedBudget) * fittingMargin))
+            : retainedBudget
         let preferred = Self.validCuts(
             in: context.conversationThread,
             maximum: context.conversationThread.count - max(keepRecent, 1),
@@ -72,10 +100,12 @@ public struct SlidingWindowCompactor: ContextCompactor {
         // Boundary selection is deliberately completed before generation. It
         // ensures the following call is the only compaction model request.
         // We iterate smallest-archive-first so the maximal keepRecent tail is
-        // kept verbatim; we escalate to larger cuts only when the non-summary
-        // parts of the rebuilt request would not fit.
-        var selected: (count: Int, entries: [Transcript.Entry])?
-        var selectedSummaryBudget = outputBudget
+        // kept verbatim; we escalate to larger cuts when a candidate leaves
+        // too little summary room or would not fit. A cut that keeps every
+        // recent message is a preference, never a wall: recovery from a real
+        // overflow must always be able to archive deeper.
+        var selected: (count: Int, entries: [Transcript.Entry], summaryBudget: Int)?
+        var lastResort: (count: Int, entries: [Transcript.Entry], summaryBudget: Int)?
         for count in cuts {
             let keptRequest = Self.keptRequest(
                 context: context,
@@ -84,20 +114,28 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 originalRequest: request
             )
             let keptCost = try await measured(keptRequest, provided: nil, measure: measure)
-            if keptCost <= retainedBudget {
-                selectedSummaryBudget = max(0, min(outputBudget, retainedBudget - keptCost))
-                let entries = SummaryPrompt.entries(
-                    priorSummary: context.contextSummary,
-                    archived: Array(context.conversationThread.prefix(count)),
-                    agentID: context.agentID,
-                    task: CompactionTask.instructions(for: Output.self)
-                )
-                selected = (count, entries)
+            guard keptCost <= effectiveRetainedBudget else { continue }
+            let summaryRoom = effectiveRetainedBudget - keptCost
+            let summaryBudget = min(outputBudget, summaryRoom)
+            let entries = SummaryPrompt.entries(
+                priorSummary: context.contextSummary,
+                archived: Array(context.conversationThread.prefix(count)),
+                agentID: context.agentID,
+                task: CompactionTask.instructions(for: Output.self)
+            )
+            // The summary room is a preference among fitting cuts, never a
+            // dead end: a deeper cut with real room always wins, but the
+            // shallowest fitting cut remains the last resort.
+            if summaryRoom >= minimumSummaryBudget {
+                selected = (count, entries, summaryBudget)
                 break
+            }
+            if lastResort == nil {
+                lastResort = (count, entries, summaryBudget)
             }
         }
 
-        guard let selected else {
+        guard let choice = selected ?? lastResort else {
             if trigger == .contextLengthExceeded {
                 throw AgentRuntimeError.contextLengthExceeded
             }
@@ -106,19 +144,19 @@ public struct SlidingWindowCompactor: ContextCompactor {
 
         let output = try await summarize(
             CompactionSummaryRequest(
-                entries: selected.entries,
-                maxOutputTokens: max(1, selectedSummaryBudget)
+                entries: choice.entries,
+                maxOutputTokens: max(1, choice.summaryBudget)
             )
         )
         let projectionBudget = ContextProjectionBudget(
-            availableTokens: selectedSummaryBudget,
-            outputReserve: selectedSummaryBudget
+            availableTokens: choice.summaryBudget,
+            outputReserve: choice.summaryBudget
         )
         let contextValue = try contextProjection(output, projectionBudget)
         let candidate = Self.compactedContext(
             context,
             summary: contextValue,
-            archivedCount: selected.count
+            archivedCount: choice.count
         )
         let candidateRequest = assemble(candidate)
             .appending(suffix: request.suffix, tools: request.tools)
@@ -127,7 +165,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
             provided: nil,
             measure: measure
         )
-        guard candidateCost <= retainedBudget else {
+        guard candidateCost <= effectiveRetainedBudget else {
             // The rebuilt request still does not fit the retained budget. A
             // threshold decision may stay with the current context; a
             // provider-reported overflow has nothing left to retry and must
@@ -142,7 +180,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
             CompactionResult(
                 output: output,
                 context: contextValue,
-                archivedCount: selected.count
+                archivedCount: choice.count
             )
         )
     }

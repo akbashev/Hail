@@ -64,6 +64,55 @@ public struct CompactionSummaryRequest: Sendable {
     }
 }
 
+/// The model-facing part of one compaction operation.
+///
+/// A host may generate any concrete `Generable` report. That report is erased
+/// only at this Hail boundary, after the provider has received its concrete
+/// schema. Hail still owns request accounting, compaction policy, persistence,
+/// and replay.
+public struct CompactionOperation: Sendable {
+    public typealias Stream =
+        @Sendable (
+            _ endpoint: any ModelEndpoint,
+            _ request: CompactionSummaryRequest,
+            _ authority: any Authority
+        ) -> AsyncStream<ModelEvent<GeneratedContent>>
+
+    /// Budget passed to the host so it can fit the projected context summary
+    /// deterministically instead of forcing a second model request.
+    public typealias ContextProjection =
+        @Sendable (
+            _ generated: GeneratedContent,
+            _ budget: ContextProjectionBudget
+        ) throws(AgentRuntimeError) -> GeneratedContent
+
+    public let stream: Stream
+    public let contextProjection: ContextProjection
+
+    public init(
+        stream: @escaping Stream,
+        contextProjection: @escaping ContextProjection
+    ) {
+        self.stream = stream
+        self.contextProjection = contextProjection
+    }
+}
+
+/// Token budget available for the context-projected part of a compaction
+/// report. The host may degrade gracefully (drop sections, truncate) instead
+/// of letting the runtime throw.
+public struct ContextProjectionBudget: Sendable {
+    /// Tokens the projected summary may consume inside the rebuilt request.
+    public let availableTokens: Int
+    /// Maximum tokens the summarizer was allowed to emit.
+    public let outputReserve: Int
+
+    public init(availableTokens: Int, outputReserve: Int) {
+        self.availableTokens = max(0, availableTokens)
+        self.outputReserve = max(0, outputReserve)
+    }
+}
+
 /// The size of one assembled request as observed by the runtime or estimated
 /// by a compactor. This is request data, not agent context.
 public struct RequestMeasurement: Sendable, Equatable {
@@ -180,6 +229,7 @@ public protocol ContextCompactor: Sendable {
         measure: RequestMeasurer?,
         assemble: PromptAssembler,
         summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
+        contextProjection: @Sendable (Output, ContextProjectionBudget) throws(AgentRuntimeError) -> GeneratedContent,
         trigger: ContextCompactionTrigger
     ) async throws(AgentRuntimeError) -> CompactionDecision<Output>
 }
@@ -203,6 +253,7 @@ extension ContextCompactor {
             measure: nil,
             assemble: assembleStandardPrompt,
             summarize: summarize,
+            contextProjection: { value, _ in value.generatedContent },
             trigger: .threshold
         )
     }

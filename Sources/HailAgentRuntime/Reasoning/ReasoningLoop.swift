@@ -439,6 +439,11 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// non-session-owning endpoints. See ``ContextCompactor``.
     let compactor: (any ContextCompactor)?
 
+    /// The host may provide one typed report operation whose context projection
+    /// is persisted by Hail. This keeps auxiliary product data in the same
+    /// compaction request instead of launching a second model request.
+    let compactionOperation: CompactionOperation?
+
     /// The host's pure prompt assembler. Compaction uses it to validate a
     /// candidate summary against the request that would actually be sent.
     let assemblePrompt: PromptAssembler
@@ -556,6 +561,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         emit: @escaping @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void,
         recordActivity: @escaping @Sendable (AgentActivity) async -> Void,
         compactor: (any ContextCompactor)? = nil,
+        compactionOperation: CompactionOperation? = nil,
         assemblePrompt: @escaping PromptAssembler = assembleStandardPrompt,
         clock: ClockType,
         maxToolRounds: Int
@@ -571,6 +577,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         self.emit = emit
         self.recordActivity = recordActivity
         self.compactor = compactor
+        self.compactionOperation = compactionOperation
         self.assemblePrompt = assemblePrompt
         self.clock = clock
         self.maxToolRounds = maxToolRounds
@@ -738,14 +745,29 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 }
             }
         }
+        let operation = compactionOperation
         let summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> GeneratedContent = {
             request in
-            try await self.summarize(
+            if let operation {
+                return try await self.summarize(
+                    request: request,
+                    endpoint: endpoint,
+                    operation: operation
+                )
+            }
+            return try await self.summarize(
                 entries: request.entries,
                 maxOutputTokens: request.maxOutputTokens,
                 endpoint: endpoint
             )
         }
+        let contextProjection:
+            @Sendable (GeneratedContent, ContextProjectionBudget) throws(AgentRuntimeError) -> GeneratedContent =
+                if let operation {
+                    operation.contextProjection
+                } else {
+                    { @Sendable value, _ in value.generatedContent }
+                }
         let decision = try await compactor.compact(
             context: turnContext.promptContext,
             request: request,
@@ -754,15 +776,28 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             measure: measure,
             assemble: assemblePrompt,
             summarize: summarize,
+            contextProjection: contextProjection,
             trigger: trigger
         )
         guard case .compacted(let result) = decision else { return turnContext }
         await recordActivity(
             .turn(.progress(.status(GeneratedContent("Compacting conversation context."))), at: Date()))
+        await recordActivity(
+            .turn(
+                .progress(
+                    .compaction(
+                        output: result.output.generatedContent,
+                        context: result.context
+                    )
+                ),
+                at: Date()
+            )
+        )
         try await emit(
             .conversationCompacted(
                 archivedCount: result.archivedCount,
-                content: result.output.generatedContent
+                content: result.context,
+                output: result.output.generatedContent
             )
         )
         return try await rebuildContext(turnContext)
@@ -815,6 +850,41 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         )
         guard let generated else {
             throw AgentRuntimeError.modelMisbehavior("Compaction produced an empty summary")
+        }
+        return generated
+    }
+
+    private func summarize(
+        request: CompactionSummaryRequest,
+        endpoint: any ModelEndpoint,
+        operation: CompactionOperation
+    ) async throws(AgentRuntimeError) -> GeneratedContent {
+        var generated: GeneratedContent?
+        let runner = ModelRequestRunner(
+            turnID: turnID,
+            emit: emit,
+            recordActivity: recordActivity,
+            clock: clock
+        )
+        let handle: (ModelEvent<GeneratedContent>) async throws(AgentRuntimeError) -> Void = { event in
+            switch event {
+            case .generated(let value):
+                generated = value
+            case .failed(let error):
+                throw Self.map(modelError: error)
+            default:
+                break
+            }
+        }
+        _ = try await runner.run(
+            model: endpoint.model,
+            kind: .compaction,
+            contentHashes: RequestContentHash.chain(tools: [], messages: request.entries),
+            stream: operation.stream(endpoint, request, authority),
+            handle: handle
+        )
+        guard let generated else {
+            throw AgentRuntimeError.modelMisbehavior("Compaction produced an empty report")
         }
         return generated
     }

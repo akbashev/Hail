@@ -7,10 +7,19 @@ import AnyLanguageModel
 /// policy and is replayed against the event-sourced conversation state.
 public struct CompactionResult<Output: Codable & Sendable & Generable>: Codable, Sendable {
     public let output: Output
+    /// The structured value inserted into the next model context. It may be
+    /// a projection of `output`; Hail does not assume that every generated
+    /// field belongs in conversation history.
+    public let context: GeneratedContent
     public let archivedCount: Int
 
-    public init(output: Output, archivedCount: Int) {
+    public init(
+        output: Output,
+        context: GeneratedContent,
+        archivedCount: Int
+    ) {
         self.output = output
+        self.context = context
         self.archivedCount = archivedCount
     }
 }

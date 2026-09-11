@@ -154,6 +154,9 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// own context and are never offered compaction.
     public let contextCompactor: (any ContextCompactor)?
 
+    /// Optional host-defined typed report generation for compaction.
+    public let compactionOperation: CompactionOperation?
+
     /// Host-selected executable snapshot policy. The default interprets the
     /// serializable policy in ``AgentSpawnConfig``; hosts may inject a custom
     /// provider for rules that cannot be represented by that value.
@@ -175,6 +178,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         definitionProvider: DefinitionProvider? = nil,
         contextProvider: AgentContextProvider? = nil,
         contextCompactor: (any ContextCompactor)? = nil,
+        compactionOperation: CompactionOperation? = nil,
         snapshottingProvider: @escaping SnapshottingProvider = { spawnConfig in
             AgentRuntimePlugin.defaultSnapshotting(for: spawnConfig.snapshotPolicy)
         },
@@ -200,6 +204,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         self.definitionProvider = definitionProvider
         self.contextProvider = contextProvider
         self.contextCompactor = contextCompactor
+        self.compactionOperation = compactionOperation
         self.snapshottingProvider = snapshottingProvider
         self.promptInstructions = promptInstructions
         self.assemblePrompt = assemblePrompt

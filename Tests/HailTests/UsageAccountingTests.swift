@@ -140,8 +140,7 @@ struct UsageAccountingTests {
 
         var events: [ModelEvent<String>] = []
         for await event in endpoint.stream(
-            input: "hello",
-            entries: [prompt("hello")],
+            request: ModelRequest(input: "hello", entries: [prompt("hello")]),
             tools: [],
             authority: FullAuthority(),
             generating: String.self,
@@ -180,8 +179,7 @@ struct UsageAccountingTests {
 
         var events: [ModelEvent<String>] = []
         for await event in endpoint.stream(
-            input: "hello",
-            entries: [prompt("hello")],
+            request: ModelRequest(input: "hello", entries: [prompt("hello")]),
             tools: [],
             authority: FullAuthority(),
             generating: String.self,
@@ -231,12 +229,14 @@ struct UsageAccountingTests {
             segments: [.text(.init(content: "I will check the time."))]
         )
         for await _ in endpoint.stream(
-            input: "What time is it?",
-            entries: [
-                prompt("What time is it?"),
-                .response(response),
-                .toolCalls(calls),
-            ],
+            request: ModelRequest(
+                input: "What time is it?",
+                entries: [
+                    prompt("What time is it?"),
+                    .response(response),
+                    .toolCalls(calls),
+                ]
+            ),
             tools: [],
             authority: FullAuthority(),
             generating: String.self,

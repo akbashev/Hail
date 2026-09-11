@@ -28,7 +28,13 @@ struct CompactionTests {
         )
 
         let content = GeneratedContent(properties: ["facts": ["one", "two"]])
-        state.apply(.conversationCompacted(archivedCount: 2, content: content))
+        state.apply(
+            .conversationCompacted(
+                archivedCount: 2,
+                content: content,
+                output: content
+            )
+        )
 
         #expect(state.contextSummary == content)
         #expect(state.conversationThread == [message("three", at: 3)])
@@ -36,7 +42,11 @@ struct CompactionTests {
 
     @Test("generic compaction results retain their concrete generated output")
     func resultRetainsOutputType() {
-        let result = CompactionResult(output: GeneratedContent("summary"), archivedCount: 4)
+        let result = CompactionResult(
+            output: GeneratedContent("summary"),
+            context: GeneratedContent("summary"),
+            archivedCount: 4
+        )
 
         #expect(result.output == GeneratedContent("summary"))
         #expect(result.archivedCount == 4)

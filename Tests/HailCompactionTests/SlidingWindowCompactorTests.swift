@@ -147,8 +147,8 @@ struct SlidingWindowCompactorTests {
         #expect(result.archivedCount == 3)
     }
 
-    @Test("an oversized archived message is chunked for summarization")
-    func oversizedArchivedMessageIsChunked() async throws {
+    @Test("an oversized archived message still uses one summarization request")
+    func oversizedArchivedMessageUsesOneRequest() async throws {
         let compactor = makeCompactor(keepRecent: 2)
         let thread = [
             text(String(repeating: "a", count: 12_000), 0),
@@ -171,7 +171,7 @@ struct SlidingWindowCompactorTests {
         )
 
         #expect(result.archivedCount == 1)
-        #expect(calls.value ?? 0 > 1)
+        #expect(calls.value == 1)
     }
 
     @Test("the existing rolling summary is folded into the summarize prompt")
@@ -319,6 +319,31 @@ struct SlidingWindowCompactorTests {
         // The newest message is protected. The rebuilt request fits only
         // after the older five-message prefix has been summarized.
         #expect(result.archivedCount == 5)
+    }
+
+    @Test("context projection is separate from the generated compaction output")
+    func contextProjectionIsPersistedSeparately() async throws {
+        let compactor = makeCompactor(keepRecent: 1)
+        let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
+        let ctx = try context(thread: thread)
+
+        let decision: CompactionDecision<GeneratedContent> = try await compactor.compact(
+            context: ctx,
+            request: preparedRequest(for: ctx),
+            budget: try budget(),
+            summarize: { _ in GeneratedContent("complete report") },
+            contextProjection: { _, _ in GeneratedContent("conversation context") },
+            trigger: .threshold
+        )
+        let result: CompactionResult<GeneratedContent>
+        guard case .compacted(let compacted) = decision else {
+            Issue.record("Expected a compaction decision")
+            throw TestFailure()
+        }
+        result = compacted
+
+        #expect(result.output == GeneratedContent("complete report"))
+        #expect(result.context == GeneratedContent("conversation context"))
     }
 
     @Test("nothing to archive when the whole thread fits the kept tail")

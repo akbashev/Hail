@@ -17,12 +17,32 @@ public protocol ScopedEffect: Sendable {
 
 /// An effect whose authority is determined by its component effects.
 ///
-/// Composite effects are useful when one operation needs several capabilities
-/// at once. The component values remain ordinary ``ScopedEffect`` values, so
+/// The component values remain ordinary ``ScopedEffect`` values, so
 /// existing per-domain authority policies continue to apply. A composite
 /// effect does not introduce a new authority domain of its own.
 public protocol CompositeScopedEffect: ScopedEffect {
+    /// The static child effects this operation is built from. Declaring the
+    /// list is the composition: the default ``decision(using:)`` derives
+    /// from it, and readers can see the dependency graph before anything
+    /// runs. Children spawned dynamically inside ``run`` are not listed;
+    /// they are checked against the same authority at spawn time.
+    var childEffects: [any ScopedEffect] { get }
+
     func decision(using authority: any Authority) -> EffectDecision
+}
+
+extension CompositeScopedEffect {
+    /// Grants only when every declared child effect is granted; denials name
+    /// the refusing children.
+    public func decision(using authority: any Authority) -> EffectDecision {
+        let denials = childEffects.compactMap { child -> String? in
+            guard case .denied(let reason) = authority.decision(on: child) else { return nil }
+            return "\(child.name): \(reason)"
+        }
+        return denials.isEmpty
+            ? .granted
+            : .denied(denials.joined(separator: "; "))
+    }
 }
 
 /// The result of running a binary effect composition in sequence.
@@ -59,6 +79,10 @@ public struct CombinedEffect<Left: ScopedEffect, Right: ScopedEffect>:
 
     public var name: String {
         "\(left.name)+\(right.name)"
+    }
+
+    public var childEffects: [any ScopedEffect] {
+        [left, right]
     }
 
     public init(left: Left, right: Right) {

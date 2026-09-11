@@ -25,7 +25,11 @@ public enum AgentEvent: Codable, Sendable {
     /// summary). One atomic event: the summary is a non-deterministic fold
     /// of the archived prefix, so it must be journaled with the boundary —
     /// a snapshot-less replay cannot reproduce it otherwise.
-    case conversationCompacted(archivedCount: Int, content: GeneratedContent)
+    case conversationCompacted(
+        archivedCount: Int,
+        content: GeneratedContent,
+        output: GeneratedContent
+    )
     case responseReceived(sender: String, content: GeneratedContent, at: Date)
     case turnFailed(error: AgentRuntimeError, at: Date)
     case turnCompleted(at: Date?)

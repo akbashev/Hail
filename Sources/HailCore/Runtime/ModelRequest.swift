@@ -191,6 +191,7 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
     public let recentModelRequestCount: Int
     public let conversationMessageCount: Int
     public let hasContextSummary: Bool
+    public let latestCompactionOutput: GeneratedContent?
 
     public init(
         agentID: AgentID,
@@ -203,7 +204,8 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
         usageSummary: AgentUsageSummary = .init(),
         recentModelRequestCount: Int = 0,
         conversationMessageCount: Int = 0,
-        hasContextSummary: Bool = false
+        hasContextSummary: Bool = false,
+        latestCompactionOutput: GeneratedContent? = nil
     ) {
         self.agentID = agentID
         self.phase = phase
@@ -216,6 +218,7 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
         self.recentModelRequestCount = recentModelRequestCount
         self.conversationMessageCount = conversationMessageCount
         self.hasContextSummary = hasContextSummary
+        self.latestCompactionOutput = latestCompactionOutput
     }
 }
 
@@ -339,7 +342,7 @@ public struct AgentHistoryReader: Sendable, Equatable {
             guard let index = tools.lastIndex(where: { $0.call.id == result.toolCallID }) else { return }
             tools[index].result = result
             tools[index].completedAt = at
-        case .conversationCompacted(let archivedCount, let summary):
+        case .conversationCompacted(let archivedCount, let summary, _):
             compactions.append(
                 CompactionHistoryRecord(archivedCount: archivedCount, summary: summary)
             )

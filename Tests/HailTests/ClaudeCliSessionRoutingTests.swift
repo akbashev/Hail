@@ -55,8 +55,7 @@ struct ClaudeCliSessionRoutingTests {
     ) async -> String? {
         var generated: String?
         for await event in endpoint.stream(
-            input: "",
-            entries: messages,
+            request: ModelRequest(input: "", entries: messages),
             delta: TurnDelta(
                 currentEntries: delta,
                 sessionIdentity: SessionIdentity(identity)
@@ -276,8 +275,7 @@ struct ClaudeCliSessionRoutingTests {
         let start = Date()
         var failure: ModelEndpointError?
         for await event in endpoint.stream(
-            input: "",
-            entries: [prompt("HELLO")],
+            request: ModelRequest(input: "", entries: [prompt("HELLO")]),
             delta: TurnDelta(
                 currentEntries: [prompt("HELLO")],
                 sessionIdentity: SessionIdentity("stall-ceiling")

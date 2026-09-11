@@ -44,6 +44,10 @@ public enum AgentActivity: Codable, Sendable, Equatable {
         case usage(ModelUsage)
         /// Current context occupancy reported by a session-owning endpoint.
         case contextUsage(ContextUsage)
+        /// The full generated compaction value and the projection inserted
+        /// into conversation context. The latter may intentionally omit
+        /// product-specific fields from the former.
+        case compaction(output: GeneratedContent, context: GeneratedContent)
     }
 
     /// A turn unfolding (see ``Turn``).

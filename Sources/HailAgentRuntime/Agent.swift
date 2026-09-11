@@ -338,7 +338,8 @@ public distributed actor Agent: AsyncSequence {
             usageSummary: state.usageSummary,
             recentModelRequestCount: state.modelRequests.count,
             conversationMessageCount: state.conversationThread.count,
-            hasContextSummary: state.contextSummary != nil
+            hasContextSummary: state.contextSummary != nil,
+            latestCompactionOutput: state.latestCompactionOutput
         )
     }
 
@@ -669,6 +670,7 @@ public distributed actor Agent: AsyncSequence {
             },
             recordActivity: { await self.recordActivity($0) },
             compactor: actorSystem.agentRuntime.contextCompactor,
+            compactionOperation: actorSystem.agentRuntime.compactionOperation,
             assemblePrompt: actorSystem.agentRuntime.assemblePrompt,
             clock: ContinuousClock(),
             maxToolRounds: actorSystem.agentRuntime.maxToolRounds

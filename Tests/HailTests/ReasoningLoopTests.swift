@@ -17,16 +17,11 @@ struct ReasoningLoopTests {
         let partial = "hel"
         let timestamp = Date(timeIntervalSince1970: 1)
 
-        let (state, updates) = TurnReducer.reduce(
-            state: .idle,
+        let updates = TurnReducer.reduce(
             event: ModelEvent<String>.partialUpdated(partial),
             at: timestamp
         )
 
-        guard case .idle = state else {
-            Issue.record("A partial update must not change the turn state")
-            return
-        }
         guard updates.count == 1,
             case .modelOutputPartialUpdated(let value, let at) = updates[0]
         else {
@@ -54,8 +49,7 @@ struct ReasoningLoopTests {
                 )
             ]
         )
-        let (_, updates) = TurnReducer.reduce(
-            state: .idle,
+        let updates = TurnReducer.reduce(
             event: ModelEvent<String>.toolsRequested(round),
             at: Date(timeIntervalSince1970: 1)
         )

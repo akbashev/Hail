@@ -25,6 +25,164 @@ private enum OllamaEvent: Sendable {
     case failed(ModelEndpointError)
 }
 
+/// Pure state machine for Ollama's NDJSON response. HTTP reading stays in
+/// `streamRaw`; this value owns all provider-response decisions and is easy to
+/// exercise with decoded chunks without starting a server.
+private struct OllamaStreamState: Sendable {
+    let text: String
+    let toolCalls: [ToolCall]
+    let emittedToolCallIDs: Set<String>
+    let narration: [Transcript.Segment]
+    let reasoning: [Transcript.Segment]
+    let sawDone: Bool
+    let doneReason: String?
+
+    init(
+        text: String = "",
+        toolCalls: [ToolCall] = [],
+        emittedToolCallIDs: Set<String> = [],
+        narration: [Transcript.Segment] = [],
+        reasoning: [Transcript.Segment] = [],
+        sawDone: Bool = false,
+        doneReason: String? = nil
+    ) {
+        self.text = text
+        self.toolCalls = toolCalls
+        self.emittedToolCallIDs = emittedToolCallIDs
+        self.narration = narration
+        self.reasoning = reasoning
+        self.sawDone = sawDone
+        self.doneReason = doneReason
+    }
+
+    func applying(
+        _ chunk: ChatChunk,
+        contextWindow: Int?
+    ) throws -> (state: Self, events: [OllamaEvent]) {
+        if let error = chunk.error {
+            if OllamaEndpoint.isContextLengthError(error) {
+                throw ModelEndpointError.contextLengthExceeded
+            }
+            throw ModelEndpointError.requestFailed("Ollama: \(error)")
+        }
+
+        var next = self
+        var events: [OllamaEvent] = []
+        if let thought = chunk.message?.thinking, !thought.isEmpty {
+            next = Self(
+                text: next.text,
+                toolCalls: next.toolCalls,
+                emittedToolCallIDs: next.emittedToolCallIDs,
+                narration: next.narration,
+                reasoning: next.reasoning + [.text(.init(content: thought))],
+                sawDone: next.sawDone,
+                doneReason: next.doneReason
+            )
+            events.append(.activity(.reasoningDelta(GeneratedContent(thought))))
+        }
+        if let fragment = chunk.message?.content, !fragment.isEmpty {
+            next = Self(
+                text: next.text + fragment,
+                toolCalls: next.toolCalls,
+                emittedToolCallIDs: next.emittedToolCallIDs,
+                narration: next.narration + [.text(.init(content: fragment))],
+                reasoning: next.reasoning,
+                sawDone: next.sawDone,
+                doneReason: next.doneReason
+            )
+            events.append(.activity(.narrationDelta(GeneratedContent(fragment))))
+        }
+        if let calls = chunk.message?.toolCalls {
+            for (index, call) in calls.enumerated() {
+                let id = call.id ?? "\(call.function.name)-\(index)"
+                guard !next.emittedToolCallIDs.contains(id) else { continue }
+                let toolCall = ToolCall(
+                    id: id,
+                    name: call.function.name,
+                    arguments: try GeneratedContent(
+                        json: OllamaEndpoint.argumentsJSON(call.function.arguments)
+                    )
+                )
+                next = Self(
+                    text: next.text,
+                    toolCalls: next.toolCalls + [toolCall],
+                    emittedToolCallIDs: next.emittedToolCallIDs.union([id]),
+                    narration: next.narration,
+                    reasoning: next.reasoning,
+                    sawDone: next.sawDone,
+                    doneReason: next.doneReason
+                )
+            }
+        }
+        if chunk.done == true {
+            next = Self(
+                text: next.text,
+                toolCalls: next.toolCalls,
+                emittedToolCallIDs: next.emittedToolCallIDs,
+                narration: next.narration,
+                reasoning: next.reasoning,
+                sawDone: true,
+                doneReason: chunk.doneReason
+            )
+            if let usage = chunk.usage {
+                events.append(.usage(usage))
+                if let limit = contextWindow,
+                    let used = usage.inputTokens
+                {
+                    events.append(
+                        .contextUsage(
+                            ContextUsage(
+                                usedTokens: used,
+                                limitTokens: limit,
+                                source: .reported
+                            )
+                        )
+                    )
+                }
+            }
+        }
+        return (next, events)
+    }
+
+    func finishing(format: AnyCodableValue?) throws -> [OllamaEvent] {
+        if !toolCalls.isEmpty {
+            let narration =
+                narration.isEmpty
+                ? nil
+                : Transcript.Response(assetIDs: [], segments: narration)
+            return [
+                .toolsRequested(
+                    ModelToolRound(
+                        narration: narration,
+                        reasoning: reasoning,
+                        calls: toolCalls
+                    )
+                )
+            ]
+        }
+        guard sawDone else {
+            return [.failed(.requestFailed("Ollama stream ended before reporting completion"))]
+        }
+        if let doneReason, doneReason != "stop" {
+            return [
+                .failed(
+                    .requestFailed(
+                        "Ollama stopped before finishing (done_reason: \(doneReason))"
+                    )
+                )
+            ]
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return [.failed(.invalidResponse("Ollama completed without visible output or tool calls"))]
+        }
+        let generated =
+            format == nil
+            ? GeneratedContent(text)
+            : try GeneratedContent(json: text)
+        return [.generated(generated)]
+    }
+}
+
 /// A small native Ollama `/api/chat` endpoint.
 ///
 /// AnyLanguageModel remains the default abstraction for providers whose
@@ -101,9 +259,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
     {
         stream(
-            input: input,
-            entries: entries,
-            reasoningRounds: [],
+            request: ModelRequest(input: input, entries: entries),
             tools: tools,
             authority: authority,
             generating: outputType,
@@ -112,9 +268,7 @@ public struct OllamaEndpoint: ModelEndpoint {
     }
 
     public func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
-        reasoningRounds: [[Transcript.Segment]],
+        request: ModelRequest<Input>,
         tools: [AnyTool],
         authority: any Authority,
         generating outputType: Output.Type,
@@ -125,8 +279,8 @@ public struct OllamaEndpoint: ModelEndpoint {
         Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
     {
         streamContract(
-            entries: entries,
-            reasoningRounds: reasoningRounds,
+            entries: request.entries,
+            reasoningRounds: request.reasoningRounds,
             tools: tools.map(\.schema),
             generating: outputType,
             purpose: purpose
@@ -238,130 +392,26 @@ public struct OllamaEndpoint: ModelEndpoint {
                         )
                     }
 
-                    var text = ""
-                    var emittedToolCalls = Set<String>()
-                    var toolCalls: [ToolCall] = []
-                    var narrationSegments: [Transcript.Segment] = []
-                    var reasoningSegments: [Transcript.Segment] = []
-                    var sawDone = false
-                    var doneReason: String?
+                    var state = OllamaStreamState()
                     for try await line in response.lines {
                         try Task.checkCancellation()
                         guard !line.isEmpty, let data = line.data(using: .utf8) else { continue }
                         let chunk = try JSONDecoder().decode(ChatChunk.self, from: data)
 
-                        if let error = chunk.error {
-                            if Self.isContextLengthError(error) {
-                                throw ModelEndpointError.contextLengthExceeded
-                            }
-                            throw ModelEndpointError.requestFailed("Ollama: \(error)")
+                        let reduction = try state.applying(
+                            chunk,
+                            contextWindow: effectiveContextWindow
+                        )
+                        state = reduction.state
+                        for event in reduction.events {
+                            continuation.yield(event)
                         }
-
-                        if let thought = chunk.message?.thinking, !thought.isEmpty {
-                            reasoningSegments.append(.text(.init(content: thought)))
-                            continuation.yield(.activity(.reasoningDelta(GeneratedContent(thought))))
-                        }
-
-                        if let fragment = chunk.message?.content, !fragment.isEmpty {
-                            text += fragment
-                            narrationSegments.append(.text(.init(content: fragment)))
-                            continuation.yield(.activity(.narrationDelta(GeneratedContent(fragment))))
-                        }
-
-                        if let calls = chunk.message?.toolCalls {
-                            for (index, call) in calls.enumerated() {
-                                let id = call.id ?? "\(call.function.name)-\(index)"
-                                guard emittedToolCalls.insert(id).inserted else { continue }
-                                toolCalls.append(
-                                    ToolCall(
-                                        id: id,
-                                        name: call.function.name,
-                                        arguments: try GeneratedContent(
-                                            json: Self.argumentsJSON(call.function.arguments)
-                                        )
-                                    )
-                                )
-                            }
-                        }
-
-                        if chunk.done == true, let usage = chunk.usage {
-                            continuation.yield(.usage(usage))
-                            if let limit = effectiveContextWindow, let used = usage.inputTokens {
-                                continuation.yield(
-                                    .contextUsage(
-                                        ContextUsage(
-                                            usedTokens: used,
-                                            limitTokens: limit,
-                                            source: .reported
-                                        )))
-                            }
-                        }
-
                         if chunk.done == true {
-                            sawDone = true
-                            doneReason = chunk.doneReason
                             break
                         }
                     }
-
-                    // A tool-call response is continued by Hail's tool loop;
-                    // only plain responses terminate the turn with output.
-                    if !toolCalls.isEmpty {
-                        let narration =
-                            narrationSegments.isEmpty
-                            ? nil
-                            : Transcript.Response(
-                                assetIDs: [],
-                                segments: narrationSegments
-                            )
-                        continuation.yield(
-                            .toolsRequested(
-                                ModelToolRound(
-                                    narration: narration,
-                                    reasoning: reasoningSegments,
-                                    calls: toolCalls
-                                )))
-                    } else {
-                        if !sawDone {
-                            // The HTTP body ended without Ollama's terminal
-                            // chunk: the connection died mid-generation and
-                            // the accumulated text is a partial response.
-                            continuation.yield(
-                                .failed(
-                                    .requestFailed(
-                                        "Ollama stream ended before reporting completion"
-                                    )))
-                        } else if let doneReason, doneReason != "stop" {
-                            // Ollama reports abnormal endings (for example
-                            // "length") with a clean done chunk; delivering
-                            // the partial text as a final answer would hide
-                            // the truncation.
-                            continuation.yield(
-                                .failed(
-                                    .requestFailed(
-                                        "Ollama stopped before finishing (done_reason: \(doneReason))"
-                                    )))
-                        } else {
-                            // A thinking-only completion is not a successful
-                            // plain-text response. Do not turn it into
-                            // GeneratedContent(""): that would make the
-                            // reasoning loop journal an empty response and
-                            // leave the channel to reject it much later.
-                            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                                continuation.yield(
-                                    .failed(
-                                        .invalidResponse(
-                                            "Ollama completed without visible output or tool calls"
-                                        )))
-                                continuation.finish()
-                                return
-                            }
-                            let generated =
-                                format == nil
-                                ? GeneratedContent(text)
-                                : try GeneratedContent(json: text)
-                            continuation.yield(.generated(generated))
-                        }
+                    for event in try state.finishing(format: format) {
+                        continuation.yield(event)
                     }
                     continuation.finish()
                 } catch is CancellationError {
@@ -520,7 +570,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         return try JSONDecoder().decode(AnyCodableValue.self, from: data)
     }
 
-    private static func isContextLengthError(_ message: String) -> Bool {
+    static func isContextLengthError(_ message: String) -> Bool {
         let normalized = message.lowercased()
         return normalized.contains("context length")
             || normalized.contains("context window")
@@ -529,7 +579,7 @@ public struct OllamaEndpoint: ModelEndpoint {
             || normalized.contains("maximum context")
     }
 
-    private static func argumentsJSON(_ value: AnyCodableValue?) throws -> String {
+    fileprivate static func argumentsJSON(_ value: AnyCodableValue?) throws -> String {
         guard let value else {
             throw ModelEndpointError.invalidResponse("Ollama returned a tool call without arguments")
         }

@@ -66,8 +66,7 @@ public struct KimiCodeEndpoint: ModelEndpoint {
     }
 
     public func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         tools: [AnyTool],
         authority: any Authority,
         generating outputType: Output.Type,
@@ -78,7 +77,7 @@ public struct KimiCodeEndpoint: ModelEndpoint {
         Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
     {
         core.stream(
-            input: input, entries: entries, tools: tools, authority: authority,
+            request: request, tools: tools, authority: authority,
             generating: outputType, purpose: purpose
         )
     }
@@ -92,8 +91,7 @@ extension KimiCodeEndpoint: SessionOwningEndpoint {
     }
 
     public func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         delta turnDelta: TurnDelta,
         authority: any Authority,
         tools: [AnyTool],
@@ -105,7 +103,7 @@ extension KimiCodeEndpoint: SessionOwningEndpoint {
         Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
     {
         core.stream(
-            input: input, entries: entries, delta: turnDelta, authority: authority, tools: tools,
+            request: request, delta: turnDelta, authority: authority, tools: tools,
             generating: outputType, purpose: purpose)
     }
 

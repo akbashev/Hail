@@ -122,8 +122,7 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     // MARK: - ModelEndpoint
 
     public func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         tools: [AnyTool],
         authority turnAuthority: any Authority,
         generating outputType: Output.Type,
@@ -131,7 +130,7 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     ) -> AsyncStream<ModelEvent<Output>>
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
         streamPlainText(
-            entries: entries,
+            entries: request.entries,
             authority: turnAuthority,
             responseType: outputType,
             purpose: purpose
@@ -598,8 +597,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
     /// reach Hail through the MCP tools, not through a delegate), and the
     /// process spawn is infrastructure scoped against the creation authority.
     public func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         delta turnDelta: TurnDelta,
         authority: any Authority,
         tools: [AnyTool],
@@ -608,7 +606,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
     ) -> AsyncStream<ModelEvent<Output>>
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
         return sessionStream(
-            entries: entries,
+            entries: request.entries,
             delta: turnDelta,
             reportToolName: nil,
             generating: outputType,

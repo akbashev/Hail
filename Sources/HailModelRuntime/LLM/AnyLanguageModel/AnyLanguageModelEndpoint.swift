@@ -28,8 +28,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     }
 
     public func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         tools: [AnyTool],
         authority: any Authority,
         generating outputType: Output.Type,
@@ -42,7 +41,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
                 do {
-                    let mapped = try TranscriptMapping.transcriptAndPrompt(from: entries)
+                    let mapped = try TranscriptMapping.transcriptAndPrompt(from: request.entries)
 
                     continuation.yield(.activity(.status(GeneratedContent("Generating..."))))
 

@@ -10,15 +10,7 @@ import ScopedEffect
     import Foundation
 #endif
 
-// MARK: - Turn state machine
-
-/// Pure state machine that turns a stream of ``ModelEvent`` values into a
-/// stream of ``AgentUpdate`` values. It exists so the reasoning loop can stay
-/// declarative: one transition function decides what to emit, and the caller
-/// only handles side effects.
-enum TurnState {
-    case idle
-}
+// MARK: - Turn event projection
 
 /// The only two valid outcomes of one successful model request. Tool calls
 /// are work for the next transition; a generated value completes the turn.
@@ -69,27 +61,93 @@ struct ToolFailureTracker: Sendable, Equatable {
     private(set) var lastFailure: ToolFailureSignature?
     private(set) var repetitions = 0
 
-    mutating func record(results: [ToolResult]) -> Bool {
+    func recording(results: [ToolResult]) -> (tracker: Self, repeated: Bool) {
         let failure = ToolFailureSignature(results: results)
         guard !failure.isEmpty else {
-            lastFailure = nil
-            repetitions = 0
-            return false
+            return (Self(), false)
         }
 
+        let nextRepetitions: Int
         if failure == lastFailure {
-            repetitions += 1
+            nextRepetitions = repetitions + 1
         } else {
-            lastFailure = failure
-            repetitions = 1
+            nextRepetitions = 1
         }
-        return repetitions >= Self.maximumRepetitions
+        return (
+            Self(lastFailure: failure, repetitions: nextRepetitions),
+            nextRepetitions >= Self.maximumRepetitions
+        )
+    }
+}
+
+/// Pure accumulation for one provider request. Provider activity is handled
+/// separately; this value contains only the information needed to decide the
+/// request's terminal domain outcome.
+private struct ModelRoundAccumulator<Output>: Sendable
+where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
+    let requestedTools: ModelToolRound?
+    let generated: Output?
+
+    init(
+        requestedTools: ModelToolRound? = nil,
+        generated: Output? = nil
+    ) {
+        self.requestedTools = requestedTools
+        self.generated = generated
+    }
+
+    func applying(_ event: ModelEvent<Output>) -> Self {
+        switch event {
+        case .toolsRequested(let round):
+            return Self(requestedTools: round, generated: generated)
+        case .generated(let value):
+            return Self(requestedTools: requestedTools, generated: value)
+        default:
+            return self
+        }
+    }
+
+    var outcome: ModelRoundOutcome<Output>? {
+        if let requestedTools { return .requiresTools(requestedTools) }
+        if let generated { return .completed(generated) }
+        return nil
     }
 }
 
 private struct ToolRoundResult<Input: Sendable> {
     let input: TurnPrompt<Input>
     let results: [ToolResult]
+}
+
+/// Pure transcript transition for one model-requested tool round. Journaling,
+/// authorization, execution, and compaction happen after this value is built.
+private struct ToolRoundPlan<Input: Sendable> {
+    let input: TurnPrompt<Input>
+    let calls: [ToolCall]
+}
+
+private enum ReasoningLoopPlanning {
+    static func toolRound<Input: Sendable>(
+        input: TurnPrompt<Input>,
+        round: ModelToolRound
+    ) -> ToolRoundPlan<Input> {
+        var nextInput = input.appendingReasoning(round)
+        let responseSegments = round.narration?.segments ?? []
+        if !responseSegments.isEmpty {
+            nextInput = nextInput.appending(
+                .response(
+                    .init(
+                        assetIDs: round.narration?.assetIDs ?? [],
+                        segments: responseSegments
+                    )
+                )
+            )
+        }
+        if !round.calls.isEmpty {
+            nextInput = nextInput.appending(.toolCalls(.init(round.calls.map(transcriptToolCall))))
+        }
+        return ToolRoundPlan(input: nextInput, calls: round.calls)
+    }
 }
 
 /// The only failures a reasoning loop can return to its host. Keeping the
@@ -106,37 +164,28 @@ enum ReasoningLoopError: Error, Sendable, Equatable {
 /// snapshots, and the typed outcome are emitted here.
 enum TurnReducer {
     static func reduce<Output>(
-        state: TurnState,
         event: ModelEvent<Output>,
         at timestamp: Date
-    ) -> (TurnState, [AgentRunEvent<Output>])
+    ) -> [AgentRunEvent<Output>]
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
-        switch (state, event) {
-        case (_, .activity):
-            return (state, [])
+        switch event {
+        case .activity:
+            return []
 
-        case (_, .toolsRequested(let round)):
-            return (
-                .idle,
-                round.calls.map { .toolRequested(toolCall: $0, at: timestamp) }
-            )
+        case .toolsRequested(let round):
+            return round.calls.map { .toolRequested(toolCall: $0, at: timestamp) }
 
-        case (_, .generated(let value)):
-            return (.idle, [.modelOutputGenerated(content: value, at: timestamp)])
+        case .generated(let value):
+            return [.modelOutputGenerated(content: value, at: timestamp)]
 
-        case (_, .partialUpdated(let partial)):
-            return (
-                state,
-                [
-                    .modelOutputPartialUpdated(content: partial, at: timestamp)
-                ]
-            )
+        case .partialUpdated(let partial):
+            return [.modelOutputPartialUpdated(content: partial, at: timestamp)]
 
-        case (_, .usage), (_, .contextUsage):
-            return (state, [])
+        case .usage, .contextUsage:
+            return []
 
-        case (_, .failed):
-            return (.idle, [])
+        case .failed:
+            return []
         }
     }
 }
@@ -750,11 +799,13 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             kind: .compaction,
             contentHashes: RequestContentHash.chain(tools: [], messages: entries),
             stream: endpoint.stream(
-                input: CompactionSummaryRequest(
-                    entries: entries,
-                    maxOutputTokens: maxOutputTokens
+                request: ModelRequest(
+                    input: CompactionSummaryRequest(
+                        entries: entries,
+                        maxOutputTokens: maxOutputTokens
+                    ),
+                    entries: entries
                 ),
-                entries: entries,
                 tools: [],
                 authority: authority,
                 generating: GeneratedContent.self,
@@ -979,8 +1030,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 endpoint: endpoint,
                 through: connection
             )
-            var updatedFailureTracker = toolFailureTracker
-            if updatedFailureTracker.record(results: next.results) {
+            let failureTracking = toolFailureTracker.recording(results: next.results)
+            if failureTracking.repeated {
                 let failure = next.results.first { result in
                     result.failureKind == .invalidArguments
                         || result.failureKind == .rejected
@@ -1002,7 +1053,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 endpoint: endpoint,
                 completedToolRounds: completedToolRounds + 1,
                 contextRecoveryAttempts: contextRecoveryAttempts,
-                toolFailureTracker: updatedFailureTracker,
+                toolFailureTracker: failureTracking.tracker,
                 through: connection
             )
         }
@@ -1054,30 +1105,23 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     ) async throws(AgentRuntimeError) -> ModelRoundOutcome<Output>
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         let stream: AsyncStream<ModelEvent<Output>>
+        let request = ModelRequest(
+            input: input.current.value,
+            entries: input.entries,
+            reasoningRounds: input.reasoningRounds
+        )
         if let sessionEndpoint = endpoint as? SessionOwningEndpoint {
             stream = sessionEndpoint.stream(
-                input: input.current.value,
-                entries: input.entries,
+                request: request,
                 delta: delta,
                 authority: authority,
                 tools: modelTools,
                 generating: Output.self,
                 purpose: .generation
             )
-        } else if let ollamaEndpoint = endpoint as? OllamaEndpoint {
-            stream = ollamaEndpoint.stream(
-                input: input.current.value,
-                entries: input.entries,
-                reasoningRounds: input.reasoningRounds,
-                tools: modelTools,
-                authority: authority,
-                generating: Output.self,
-                purpose: .generation
-            )
         } else {
             stream = endpoint.stream(
-                input: input.current.value,
-                entries: input.entries,
+                request: request,
                 tools: modelTools,
                 authority: authority,
                 generating: Output.self,
@@ -1085,9 +1129,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
         }
 
-        var turnState = TurnState.idle
-        var requestedTools: ModelToolRound?
-        var generated: Output?
+        var accumulator = ModelRoundAccumulator<Output>()
         let runner = ModelRequestRunner(
             turnID: turnID,
             emit: emit,
@@ -1095,12 +1137,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             clock: clock
         )
         let handle: (ModelEvent<Output>) async throws(AgentRuntimeError) -> Void = { event in
-            let (nextState, updates) = TurnReducer.reduce(
-                state: turnState,
+            let updates = TurnReducer.reduce(
                 event: event,
                 at: Date()
             )
-            turnState = nextState
             for update in updates {
                 await broadcast(update, to: connection)
             }
@@ -1113,12 +1153,12 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             case .activity(.status(let message)):
                 await recordActivity(.turn(.progress(.status(message)), at: Date()))
             case .toolsRequested(let round):
-                requestedTools = round
+                accumulator = accumulator.applying(event)
                 for call in round.calls {
                     await recordActivity(.turn(.progress(.tool(name: call.name)), at: Date()))
                 }
-            case .generated(let value):
-                generated = value
+            case .generated:
+                accumulator = accumulator.applying(event)
             case .partialUpdated, .usage, .contextUsage:
                 break
             case .failed(let modelError):
@@ -1136,11 +1176,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             handle: handle
         )
 
-        if let requestedTools {
-            return .requiresTools(requestedTools)
-        }
-        if let generated {
-            return .completed(generated)
+        if let outcome = accumulator.outcome {
+            return outcome
         }
         throw AgentRuntimeError.modelMisbehavior(
             "Model request ended without a generated output or tool calls"
@@ -1161,25 +1198,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) -> ToolRoundResult<Input>
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
-        var nextInput = input
-        // AnyLanguageModel's Transcript has no reasoning segment. Keep
-        // reasoning out of assistant-visible content; the prompt sidecar
-        // carries it to providers that require it for tool continuation.
-        let responseSegments = round.narration?.segments ?? []
-        nextInput = nextInput.appendingReasoning(round)
-        if !responseSegments.isEmpty {
-            nextInput = nextInput.appending(
-                .response(
-                    .init(
-                        assetIDs: round.narration?.assetIDs ?? [],
-                        segments: responseSegments
-                    )
-                )
-            )
-        }
-        if !round.calls.isEmpty {
-            nextInput = nextInput.appending(.toolCalls(.init(round.calls.map(transcriptToolCall))))
-        }
+        let plan = ReasoningLoopPlanning.toolRound(input: input, round: round)
+        var nextInput = plan.input
 
         try await emit(
             .assistantToolRound(
@@ -1189,7 +1209,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         )
 
         let startedAt = clock.now
-        let executions = try await registry.executeWithOutputs(round.calls)
+        let executions = try await registry.executeWithOutputs(plan.calls)
         try Self.checkCancellation()
         logger.info(
             "Tool round finished",

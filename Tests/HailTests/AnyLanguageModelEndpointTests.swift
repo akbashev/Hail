@@ -55,8 +55,7 @@ struct AnyLanguageModelEndpointTests {
         ]
         var events: [ModelEvent<String>] = []
         for await event in endpoint.stream(
-            input: "hello",
-            entries: entries,
+            request: ModelRequest(input: "hello", entries: entries),
             tools: [],
             authority: FullAuthority(),
             generating: String.self,

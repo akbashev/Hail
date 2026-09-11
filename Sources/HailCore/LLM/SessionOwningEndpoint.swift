@@ -57,8 +57,8 @@ public struct SessionIdentity: RawRepresentable, Codable, Sendable, Hashable,
 /// would corrupt session context and this design must be revisited.
 public struct TurnDelta: Sendable {
     /// The messages that are new to this turn. The transcript history is
-    /// supplied separately as ``ModelEndpoint/stream(input:delta:authority:tools:responseType:)``'s
-    /// `input` and can never be stored in this value by accident.
+    /// supplied separately as ``SessionOwningEndpoint/stream(request:delta:authority:tools:generating:purpose:)``'s
+    /// request and can never be stored in this value by accident.
     public struct Current: Sendable {
         public let entries: [Transcript.Entry]
 
@@ -118,8 +118,7 @@ public protocol SessionOwningEndpoint: ModelEndpoint {
     /// endpoint applies it at prompt start and needs no restore — the next
     /// turn simply carries its own.
     func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         delta: TurnDelta,
         authority: any Authority,
         tools: [AnyTool],

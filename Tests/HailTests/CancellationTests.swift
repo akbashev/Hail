@@ -209,19 +209,19 @@ struct ReasoningLoopCancellationTests {
             id: "call-1",
             output: "Error: tool timer received invalid arguments at trigger: expected object; found string"
         )
-        var tracker = ToolFailureTracker()
+        let tracker = ToolFailureTracker()
 
-        let first = tracker.record(results: [failure])
-        let second = tracker.record(results: [failure])
-        let changed = tracker.record(results: [
+        let first = tracker.recording(results: [failure])
+        let second = first.tracker.recording(results: [failure])
+        let changed = second.tracker.recording(results: [
             try result(
                 id: "call-3",
                 output: "Error: tool timer received invalid arguments at trigger: expected object; found array"
             )
         ])
-        #expect(!first)
-        #expect(second)
-        #expect(!changed)
+        #expect(!first.repeated)
+        #expect(second.repeated)
+        #expect(!changed.repeated)
     }
 
     @Test("transient tool failures do not trigger the deterministic failure guard")
@@ -232,14 +232,14 @@ struct ReasoningLoopCancellationTests {
             output: .text("Error: service unavailable"),
             failureKind: .unavailable
         )
-        var tracker = ToolFailureTracker()
+        let tracker = ToolFailureTracker()
 
-        let first = tracker.record(results: [failure])
-        let second = tracker.record(results: [failure])
-        let third = tracker.record(results: [failure])
-        #expect(!first)
-        #expect(!second)
-        #expect(!third)
+        let first = tracker.recording(results: [failure])
+        let second = first.tracker.recording(results: [failure])
+        let third = second.tracker.recording(results: [failure])
+        #expect(!first.repeated)
+        #expect(!second.repeated)
+        #expect(!third.repeated)
     }
 }
 

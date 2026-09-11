@@ -61,8 +61,7 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
     }
 
     public func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         tools: [AnyTool],
         authority: any Authority,
         generating outputType: Output.Type,
@@ -70,7 +69,7 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
     ) -> AsyncStream<ModelEvent<Output>>
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
         return makeStream(
-            entries: entries,
+            entries: request.entries,
             delta: nil,
             sessionIdentity: nil,
             authority: authority,
@@ -194,8 +193,7 @@ extension CodexAppServerEndpoint: SessionOwningEndpoint {
     }
 
     public func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         delta turnDelta: TurnDelta,
         authority: any Authority,
         tools: [AnyTool],
@@ -204,7 +202,7 @@ extension CodexAppServerEndpoint: SessionOwningEndpoint {
     ) -> AsyncStream<ModelEvent<Output>>
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
         return makeStream(
-            entries: entries,
+            entries: request.entries,
             delta: turnDelta.current.entries,
             sessionIdentity: turnDelta.sessionIdentity,
             authority: authority,

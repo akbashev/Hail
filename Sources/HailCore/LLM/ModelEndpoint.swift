@@ -146,6 +146,26 @@ public enum TokenCounting: Sendable {
     )
 }
 
+/// Complete input for one model request. The typed value remains available to
+/// adapters that need it, while the transcript is the canonical model-facing
+/// context. Provider-specific side data stays in this request value instead
+/// of becoming another endpoint protocol.
+public struct ModelRequest<Input: Sendable>: Sendable {
+    public let input: Input
+    public let entries: [Transcript.Entry]
+    public let reasoningRounds: [[Transcript.Segment]]
+
+    public init(
+        input: Input,
+        entries: [Transcript.Entry],
+        reasoningRounds: [[Transcript.Segment]] = []
+    ) {
+        self.input = input
+        self.entries = entries
+        self.reasoningRounds = reasoningRounds
+    }
+}
+
 public protocol ModelEndpoint: Sendable {
     var model: String { get }
     var contextOwnership: ModelContextOwnership { get }
@@ -162,8 +182,7 @@ public protocol ModelEndpoint: Sendable {
     /// The provider owns the transport and decoding details; Hail only sees
     /// typed partials, tool calls, usage, and the completed value.
     func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         tools: [AnyTool],
         authority: any Authority,
         generating: Output.Type,

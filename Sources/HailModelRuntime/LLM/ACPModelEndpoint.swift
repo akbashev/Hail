@@ -53,8 +53,7 @@ struct ACPModelEndpoint: ModelEndpoint {
     }
 
     func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         tools: [AnyTool],
         authority: any Authority,
         generating outputType: Output.Type,
@@ -65,7 +64,7 @@ struct ACPModelEndpoint: ModelEndpoint {
         Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
     {
         stream(
-            entries: entries, turnDelta: nil, authority: authority, tools: tools.map(\.schema),
+            entries: request.entries, turnDelta: nil, authority: authority, tools: tools.map(\.schema),
             generating: outputType, purpose: purpose)
     }
 
@@ -353,8 +352,7 @@ extension ACPModelEndpoint: SessionOwningEndpoint {
     }
 
     func stream<Input, Output>(
-        input: Input,
-        entries: [Transcript.Entry],
+        request: ModelRequest<Input>,
         delta turnDelta: TurnDelta,
         authority: any Authority,
         tools: [AnyTool],
@@ -366,7 +364,7 @@ extension ACPModelEndpoint: SessionOwningEndpoint {
         Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
     {
         stream(
-            entries: entries, turnDelta: turnDelta, authority: authority, tools: tools.map(\.schema),
+            entries: request.entries, turnDelta: turnDelta, authority: authority, tools: tools.map(\.schema),
             generating: outputType, purpose: purpose)
     }
 

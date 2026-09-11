@@ -65,19 +65,22 @@ public struct KimiCodeEndpoint: ModelEndpoint {
         return ["kimi", "-y", "--auto", "acp"]
     }
 
-    public func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?
-    ) -> AsyncStream<ModelEvent<String>> {
-        core.stream(input: input, tools: tools)
-    }
-
-    public func stream<T: AgentOutput>(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        core.stream(input: input, tools: tools, responseType: T.self)
+    public func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
+        tools: [AnyTool],
+        authority: any Authority,
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where
+        Input: Sendable,
+        Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
+    {
+        core.stream(
+            input: input, entries: entries, tools: tools, authority: authority,
+            generating: outputType, purpose: purpose
+        )
     }
 }
 
@@ -88,15 +91,22 @@ extension KimiCodeEndpoint: SessionOwningEndpoint {
         }
     }
 
-    public func stream<T: AgentOutput>(
-        input: ModelInput,
+    public func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
         delta turnDelta: TurnDelta,
         authority: any Authority,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
+        tools: [AnyTool],
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where
+        Input: Sendable,
+        Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
+    {
         core.stream(
-            input: input, delta: turnDelta, authority: authority, tools: tools, responseType: T.self)
+            input: input, entries: entries, delta: turnDelta, authority: authority, tools: tools,
+            generating: outputType, purpose: purpose)
     }
 
     public func terminateSession() async {

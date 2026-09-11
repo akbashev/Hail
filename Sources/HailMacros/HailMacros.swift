@@ -101,7 +101,7 @@ private func hasRenderMethod(in declaration: some DeclGroupSyntax) -> Bool {
 
 private func hasExistingToolImplementation(in declaration: some DeclGroupSyntax) -> Bool {
     return declaration.memberBlock.members.contains { member in
-        member.decl.as(FunctionDeclSyntax.self)?.name.text == "run"
+        member.decl.as(FunctionDeclSyntax.self)?.name.text == "runOutput"
     }
 }
 
@@ -161,10 +161,10 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                 ),
                 DeclSyntax(
                     stringLiteral: """
-                        public func run(
+                        public func runOutput(
                             input: Input,
                             token: borrowing EffectToken<Effect>
-                        ) async throws -> String {
+                        ) async throws -> ToolOutput {
                             let output: Effect.Output = try await Effect.run(in: token)
                             return render(output)
                         }
@@ -210,7 +210,7 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                             public var description: String { "\(command.description ?? command.name)" }
                             public var schema: ToolDefinition { ToolDefinition(name: name, description: description, parameters: Input.generationSchema) }
                             public func effect(for input: Input) throws -> Effect { \(invocation) }
-                            public func run(input: Input, token: borrowing EffectToken<Effect>) async throws -> String {
+                            public func runOutput(input: Input, token: borrowing EffectToken<Effect>) async throws -> ToolOutput {
                                 let output: Effect.Output = try await Effect.run(in: token)
                                 return owner.render(output)
                             }

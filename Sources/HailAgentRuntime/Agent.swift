@@ -164,7 +164,11 @@ public distributed actor Agent: AsyncSequence {
                 guard let self else { return }
                 defer { stream.finish() }
                 do {
-                    try await self.stream(message, through: stream.connection)
+                    try await self.stream(
+                        message,
+                        message: message,
+                        through: stream.connection
+                    )
                 } catch {
                     actorSystem.log.error(
                         "Interrupted turn replay failed",
@@ -340,11 +344,10 @@ public distributed actor Agent: AsyncSequence {
 
     // MARK: - Distributed API
 
-    /// Runs one streaming turn for a typed input. Live updates and the final
+    /// Runs one streaming turn for a captured turn input. Live updates and the final
     /// response are delivered through the provided connection.
     ///
-    /// For chat-style turns stream a `String`; for product turns stream a
-    /// custom ``AgentInput`` value. The final generated value is emitted as a
+    /// The final generated value is emitted as a
     /// `.responseRecorded` update on the connection; callers that only need the
     /// final result use ``respond(_:)`` instead.
     ///
@@ -352,11 +355,15 @@ public distributed actor Agent: AsyncSequence {
     /// `nil` runs the turn under the agent's plugin-derived authority. The lane
     /// is a per-turn value: the agent's default tool registry and future turns
     /// are unaffected.
-    public distributed func stream<Input: AgentInput, Output: AgentOutput>(
+    public distributed func stream<Input: Codable & Sendable, Output>(
         _ input: Input,
+        message: ChatMessage,
+        referenceEntries: [Transcript.Entry] = [],
+        inputID: String? = nil,
         through connection: AgentConnection<Output>,
         authority lane: TurnAuthorityLane? = nil
-    ) async throws {
+    ) async throws
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         let previousTask = processingTask
         let turnID = TurnID()
         let loop = reasoningLoop(lane: lane, turnID: turnID)
@@ -369,7 +376,13 @@ public distributed actor Agent: AsyncSequence {
             try await self.emit(event: .turnIdentified(id: turnID))
             recordActivity(.turn(.started, at: Date()))
             do {
-                try await loop.run(input, through: connection)
+                try await loop.run(
+                    input,
+                    message: message,
+                    referenceEntries: referenceEntries,
+                    inputID: inputID,
+                    through: connection
+                )
             } catch let loopError as ReasoningLoopError {
                 switch loopError {
                 case .failureNotEmitted(let runtimeError):
@@ -408,24 +421,35 @@ public distributed actor Agent: AsyncSequence {
     /// This is a convenience over ``stream(_:through:)`` that ignores live
     /// updates and returns only the final result. `authority` pins the turn to
     /// an effect lane, exactly as in ``stream(_:through:authority:)``.
-    public distributed func respond<Input: AgentInput, Output: AgentOutput>(
+    public distributed func respond<Input: Codable & Sendable, Output>(
         _ input: Input,
+        message: ChatMessage,
+        referenceEntries: [Transcript.Entry] = [],
+        inputID: String? = nil,
         authority lane: TurnAuthorityLane? = nil
-    ) async throws -> Output {
+    ) async throws -> Output
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         let stream = AgentStream<Output>(actorSystem: actorSystem)
         defer { stream.finish() }
 
         let responseTask = Task<Output?, Error> {
             var result: Output?
             for await update in stream.updates {
-                if case .run(.event(.responseRecorded(let content, _))) = update {
+                if case .responseRecorded(let content, _) = update {
                     result = content
                 }
             }
             return result
         }
 
-        try await self.stream(input, through: stream.connection, authority: lane)
+        try await self.stream(
+            input,
+            message: message,
+            referenceEntries: referenceEntries,
+            inputID: inputID,
+            through: stream.connection,
+            authority: lane
+        )
         stream.finish()
 
         guard let outcome = try await responseTask.value else {
@@ -445,7 +469,7 @@ public distributed actor Agent: AsyncSequence {
     /// Records an externally reported status line onto the activity stream (the
     /// `report_status` tool sink). Ephemeral — not journaled.
     public distributed func recordStatusActivity(_ message: String, at: Date) async {
-        recordActivity(.turn(.progress(.status(message)), at: at))
+        recordActivity(.turn(.progress(.status(GeneratedContent(message))), at: at))
     }
 
     /// Journals a display-only message into the conversation thread and

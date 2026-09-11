@@ -1,9 +1,10 @@
 /// The canonical context available while resolving tools for one agent turn.
 ///
-/// Hail deliberately exposes the normalized chat message rather than the
-/// product-specific `AgentInput` value. Hosts may use the message to scope
-/// tools to the current sender or request, while Hail remains unaware of the
-/// host's domain semantics.
+import AnyLanguageModel
+
+/// The application message that opened the current turn, plus stable turn
+/// metadata used while composing tools. This is domain context, not the model
+/// transcript sent to an endpoint.
 public struct AgentTurnContext: Sendable {
     public let agentID: AgentID
     public let turnID: TurnID

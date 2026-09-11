@@ -52,42 +52,21 @@ struct ACPModelEndpoint: ModelEndpoint {
         self.session = session
     }
 
-    func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?
-    ) -> AsyncStream<ModelEvent<String>> {
-        AsyncStream(ModelEvent<String>.self) { continuation in
-            let task = Task {
-                do {
-                    let messages = try input.textMessages(for: model)
-                    let parts = turnParts(messages: messages, turnDelta: nil, responseType: String.self)
-                    let outcome = try await runPrompt(
-                        bootstrap: parts.bootstrap,
-                        delta: parts.delta,
-                        identity: parts.identity,
-                        responseType: String.self,
-                        continuation: continuation
-                    )
-                    continuation.yield(.generated(outcome ?? ""))
-                    continuation.finish()
-                } catch is CancellationError {
-                    continuation.yield(.failed(ModelEndpointError.cancelled))
-                    continuation.finish()
-                } catch {
-                    continuation.yield(.failed(ModelEndpointError.requestFailed(String(describing: error))))
-                    continuation.finish()
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
-    func stream<T: AgentOutput>(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        stream(input: input, turnDelta: nil, tools: tools, responseType: responseType)
+    func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
+        tools: [AnyTool],
+        authority: any Authority,
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where
+        Input: Sendable,
+        Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
+    {
+        stream(
+            entries: entries, turnDelta: nil, authority: authority, tools: tools.map(\.schema),
+            generating: outputType, purpose: purpose)
     }
 
     /// The shared streaming body. With a precise ``TurnDelta`` from the
@@ -95,37 +74,35 @@ struct ACPModelEndpoint: ModelEndpoint {
     /// (plain ``ModelEndpoint`` calls) it falls back to the conversation tail.
     /// `authority` is the turn's effect lane; `nil` keeps the session's
     /// current authority.
-    private func stream<T: AgentOutput>(
-        input: ModelInput,
+    private func stream<Output>(
+        entries: [Transcript.Entry],
         turnDelta: TurnDelta?,
         authority: (any Authority)? = nil,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        AsyncStream(ModelEvent<T>.self) { continuation in
+        tools: [ToolDefinition],
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
+        _ = tools
+        _ = purpose
+        return AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
                 do {
-                    let messages = try input.textMessages(for: model)
-                    let parts = turnParts(messages: messages, turnDelta: turnDelta, responseType: T.self)
+                    let parts = turnParts(entries: entries, turnDelta: turnDelta, responseType: outputType)
                     let outcome = try await runPrompt(
                         bootstrap: parts.bootstrap,
                         delta: parts.delta,
                         identity: parts.identity,
                         authority: authority,
-                        responseType: T.self,
+                        responseType: outputType,
                         continuation: continuation
                     )
                     if let outcome {
                         continuation.yield(.generated(outcome))
                     } else {
-                        let expectedTools = Self.expectedReportToolNames(for: T.self)
-                        let reason =
-                            expectedTools.isEmpty
-                            ? "Agent finished without producing a response."
-                            : "Agent finished without calling \(expectedTools.joined(separator: " or "))."
                         continuation.yield(
                             .failed(
-                                ModelEndpointError.invalidResponse(reason)
+                                ModelEndpointError.invalidResponse("Agent finished without producing a response.")
                             ))
                     }
                     continuation.finish()
@@ -147,54 +124,55 @@ struct ACPModelEndpoint: ModelEndpoint {
     /// precise ``TurnDelta`` from the reasoning loop the warm path sends only
     /// the new content; without one the delta falls back to the conversation
     /// tail and the identity to the system prefix.
-    private func turnParts<T: AgentOutput>(
-        messages: [LLMMessage],
+    private func turnParts<T>(
+        entries: [Transcript.Entry],
         turnDelta: TurnDelta?,
         responseType: T.Type
-    ) -> (bootstrap: String, delta: String, identity: SessionIdentity) {
+    ) -> (bootstrap: String, delta: String, identity: SessionIdentity)
+    where T: Codable & Sendable & Generable {
         let bootstrap = Self.appendOutcomeInstruction(
-            prompt: Self.formatPrompt(messages: messages),
+            prompt: Self.formatPrompt(entries: entries),
             responseType: responseType
         )
         if let turnDelta {
             let delta = Self.appendOutcomeInstruction(
-                prompt: Self.formatCompactMessages(turnDelta.current.messages),
+                prompt: Self.formatCompactEntries(turnDelta.current.entries),
                 responseType: responseType
             )
             return (bootstrap, delta, turnDelta.sessionIdentity)
         }
         let delta = Self.appendOutcomeInstruction(
-            prompt: Self.formatCompactMessages(messages.filter { $0.role != .system }),
+            prompt: Self.formatCompactEntries(
+                entries.filter {
+                    if case .instructions = $0 { return false }
+                    return true
+                }),
             responseType: responseType
         )
         let identity = AgentSessionIdentity.fingerprint(
             model: model,
-            systemPrompt: messages.filter { $0.role == .system }.map(\.content).joined(separator: "\n\n")
+            systemPrompt: entries.filter {
+                if case .instructions = $0 { return true }
+                return false
+            }.map(Self.text).joined(separator: "\n\n")
         )
         return (bootstrap, delta, identity)
     }
 
-    /// Runs a prompt through the ACP session, yielding text/thinking/status
-    /// events through the continuation and returning the decoded outcome (if any).
-    ///
-    /// For chat turns `T` is `String` and the returned value is the collected text.
-    /// For structured turns `T` is an ``AgentOutput`` type decoded from a
-    /// report-tool call. Plain-text JSON is not accepted here; that fallback
-    /// belongs to non-tool providers through ``ModelEndpoint``.
-    private func runPrompt<T: AgentOutput>(
+    /// Runs a prompt through the ACP session, yielding activity through the
+    /// continuation and decoding the declared output at this text-only
+    /// adapter boundary. Tool notifications remain activity; they are not the
+    /// model result.
+    private func runPrompt<T>(
         bootstrap: String,
         delta: String,
         identity: SessionIdentity,
         authority: (any Authority)? = nil,
         responseType: T.Type,
         continuation: AsyncStream<ModelEvent<T>>.Continuation
-    ) async throws -> T? {
-        let isStructured: Bool =
-            switch T.outputContract {
-            case .plainText: false
-            case .reportTool: true
-            }
-        let expectedReportTools = Self.expectedReportToolNames(for: T.self)
+    ) async throws -> T?
+    where T: Codable & Sendable & Generable {
+        let isStructured = T.self != String.self
         logger.info(
             "Starting \(harness) \(isStructured ? "structured" : "chat") stream",
             metadata: [
@@ -204,7 +182,7 @@ struct ACPModelEndpoint: ModelEndpoint {
                 "responseType": .string("\(T.self)"),
             ]
         )
-        continuation.yield(.status("Generating..."))
+        continuation.yield(.activity(.status(GeneratedContent("Generating..."))))
 
         let (stream, responseTask) = try await session.executeTurnPrompt(
             bootstrap: bootstrap,
@@ -214,11 +192,6 @@ struct ACPModelEndpoint: ModelEndpoint {
         )
 
         var collectedText = ""
-        var decodedOutcome: T?
-        // ACP may send the report tool's arguments on the initial `toolCall`
-        // notification or on a subsequent `toolCallUpdate`. Track the IDs of
-        // report-outcome tool calls so updates can be decoded too.
-        var reportToolCallIDs: Set<String> = []
         for try await event in stream {
             switch event {
             case .text(let fragment):
@@ -227,26 +200,16 @@ struct ACPModelEndpoint: ModelEndpoint {
                     metadata: ["length": .string("\(fragment.count)")]
                 )
                 collectedText += fragment
-                continuation.yield(.text(fragment))
+                continuation.yield(.activity(.narrationDelta(GeneratedContent(fragment))))
 
             case .thought(let text):
                 logger.debug("\(harness) thought fragment")
-                continuation.yield(.thinking(text))
+                continuation.yield(.activity(.reasoningDelta(GeneratedContent(text))))
 
             case .toolCall(let update):
                 let name = update.title ?? update.kind.map { $0.rawValue } ?? "tool"
                 logger.debug("\(harness) tool call", metadata: ["name": .string(name)])
-                if isStructured, Self.isReportOutcomeTool(name: name, expected: expectedReportTools) {
-                    reportToolCallIDs.insert(update.toolCallId)
-                    if let outcome = Self.decodeOutcome(from: update, as: T.self) {
-                        decodedOutcome = outcome
-                        continuation.yield(.status("Reporting outcome."))
-                    } else {
-                        continuation.yield(.status("Calling \(name)."))
-                    }
-                } else {
-                    continuation.yield(.status("Calling \(name)."))
-                }
+                continuation.yield(.activity(.status(GeneratedContent("Calling \(name)."))))
 
             case .toolCallUpdate(let details):
                 let name = details.title ?? details.kind.map { $0.rawValue } ?? "tool"
@@ -255,20 +218,11 @@ struct ACPModelEndpoint: ModelEndpoint {
                     "\(harness) tool call update",
                     metadata: ["name": .string(name), "status": .string(status)]
                 )
-                if isStructured,
-                    reportToolCallIDs.contains(details.toolCallId),
-                    decodedOutcome == nil,
-                    let outcome = Self.decodeOutcome(from: details, as: T.self)
-                {
-                    decodedOutcome = outcome
-                    continuation.yield(.status("Outcome received."))
-                } else {
-                    continuation.yield(.status("\(name): \(status)."))
-                }
+                continuation.yield(.activity(.status(GeneratedContent("\(name): \(status)."))))
 
             case .plan:
                 logger.debug("\(harness) plan update")
-                continuation.yield(.status("Plan updated."))
+                continuation.yield(.activity(.status(GeneratedContent("Plan updated."))))
 
             case .usage(let usageUpdate):
                 logger.debug(
@@ -314,22 +268,15 @@ struct ACPModelEndpoint: ModelEndpoint {
             metadata: ["stopReason": .string("\(response.stopReason)")]
         )
 
-        if let outcome = decodedOutcome {
-            return outcome
-        }
-        switch T.outputContract {
-        case .plainText:
-            // Plain-text outputs (String, ChatResponse) decode from the
-            // collected stream text; no reporting tool is involved.
-            do {
-                return try T(GeneratedContent(kind: .string(collectedText)))
-            } catch {
-                throw ModelEndpointError.invalidResponse(
-                    "ACP plain-text output did not satisfy the response contract: \(error)"
-                )
+        do {
+            if let value = collectedText as? T {
+                return value
             }
-        case .reportTool:
-            return nil
+            return try T(GeneratedContent(json: collectedText))
+        } catch {
+            throw ModelEndpointError.invalidResponse(
+                "ACP output did not satisfy \(T.self): \(error)"
+            )
         }
     }
 
@@ -338,132 +285,61 @@ struct ACPModelEndpoint: ModelEndpoint {
     /// Formats the full message list into a single ACP prompt text. System
     /// messages appear first so the agent receives its role and contract before
     /// the user/tool transcript.
-    private static func formatPrompt(messages: [LLMMessage]) -> String {
-        let systemMessages = messages.filter { $0.role == .system }
-        let nonSystemMessages = messages.filter { $0.role != .system }
+    private static func formatPrompt(entries: [Transcript.Entry]) -> String {
+        let systemMessages = entries.filter {
+            if case .instructions = $0 { return true }
+            return false
+        }
+        let nonSystemMessages = entries.filter {
+            if case .instructions = $0 { return false }
+            return true
+        }
 
         var parts: [String] = []
         if !systemMessages.isEmpty {
-            parts.append(systemMessages.map(\.content).joined(separator: "\n\n"))
+            parts.append(systemMessages.map(Self.text).joined(separator: "\n\n"))
         }
         if !nonSystemMessages.isEmpty {
-            parts.append(formatCompactMessages(nonSystemMessages))
+            parts.append(formatCompactEntries(nonSystemMessages))
         }
         return parts.joined(separator: "\n\n")
     }
 
     /// Formats a compact message transcript for the ACP agent.
-    private static func formatCompactMessages(_ messages: [LLMMessage]) -> String {
-        messages.map { message in
-            switch message.role {
-            case .system:
-                return message.content
-            case .user:
-                return "User: \(message.content)"
-            case .assistant:
-                if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
-                    let calls = toolCalls.map {
-                        "\($0.function.name): \($0.function.arguments)"
-                    }.joined(separator: "\n")
-                    return "Assistant (tool calls):\n\(calls)"
-                }
-                return "Assistant: \(message.content)"
-            case .tool:
-                return "Tool result: \(message.content)"
-            }
+    private static func formatCompactEntries(_ entries: [Transcript.Entry]) -> String {
+        entries.map { entry in
+            text(entry)
         }.joined(separator: "\n\n")
     }
 
-    /// Appends a concise instruction to call the dedicated outcome tool for
-    /// structured assignment turns.
-    private static func appendOutcomeInstruction<T: AgentOutput>(
+    /// ACP is a text-only transport. Structured Hail content is serialized
+    /// here, at this adapter boundary, rather than being flattened in Hail's
+    /// transcript model.
+    private static func text(_ entry: Transcript.Entry) -> String {
+        switch entry {
+        case .instructions(let value): return render(value.segments)
+        case .prompt(let value): return "User: \(render(value.segments))"
+        case .response(let value): return "Assistant: \(render(value.segments))"
+        case .toolCalls(let value): return "Assistant tool calls: \(value.id)"
+        case .toolOutput(let value): return "Tool result: \(render(value.segments))"
+        }
+    }
+
+    private static func render(_ segments: [Transcript.Segment]) -> String {
+        segments.map { segment in
+            switch segment {
+            case .text(let text): return text.content
+            case .structure(let value): return value.content.jsonString
+            case .image: return "[image]"
+            }
+        }.joined(separator: "\n")
+    }
+
+    private static func appendOutcomeInstruction<T>(
         prompt: String,
         responseType: T.Type
-    ) -> String {
-        switch T.outputContract {
-        case .plainText:
-            return prompt
-        case .reportTool(let name, _):
-            return prompt + """
-
-
-                Call the `\(name)` tool to report the outcome. \
-                Do not reply with plain text.
-                """
-        }
-    }
-
-    // MARK: - Outcome decoding
-
-    private static func expectedReportToolNames(for type: Any.Type) -> [String] {
-        guard let outputType = type as? any AgentOutput.Type else { return [] }
-        switch outputType.outputContract {
-        case .plainText:
-            return []
-        case .reportTool(let name, _):
-            return [name, "mcp__hail__\(name)"]
-        }
-    }
-
-    private static func isReportOutcomeTool(name: String, expected: [String]) -> Bool {
-        expected.contains(name)
-    }
-
-    private static func decodeOutcome<T: Codable & Generable & Sendable>(
-        from toolCall: ToolCallUpdate,
-        as type: T.Type
-    ) -> T? {
-        guard let rawInput = toolCall.rawInput else { return nil }
-        return decodeOutcome(from: rawInput, as: type)
-    }
-
-    private static func decodeOutcome<T: Codable & Generable & Sendable>(
-        from details: ToolCallUpdateDetails,
-        as type: T.Type
-    ) -> T? {
-        guard let rawInput = details.rawInput else { return nil }
-        return decodeOutcome(from: rawInput, as: type)
-    }
-
-    private static func decodeOutcome<T: Codable & Generable & Sendable>(
-        from rawInput: AnyCodable,
-        as type: T.Type
-    ) -> T? {
-        // First try a direct Codable decode; this is the common path for
-        // report-tool arguments sent by the agent.
-        if let direct = decodeDirect(from: rawInput, as: type) {
-            return direct
-        }
-        // Fall back to the GeneratedContent path for providers that shape
-        // arguments differently.
-        do {
-            let data = try JSONEncoder().encode(rawInput)
-            guard let json = String(data: data, encoding: .utf8) else { return nil }
-            let content = try GeneratedContent(json: json)
-            return try T(content)
-        } catch {
-            logger.debug(
-                "Failed to decode tool arguments as structured outcome",
-                metadata: ["error": .string(String(describing: error))]
-            )
-            return nil
-        }
-    }
-
-    private static func decodeDirect<T: Codable & Sendable>(
-        from rawInput: AnyCodable,
-        as type: T.Type
-    ) -> T? {
-        do {
-            let data = try JSONEncoder().encode(rawInput)
-            return try JSONDecoder().decode(T.self, from: data)
-        } catch {
-            logger.debug(
-                "Direct tool-argument decode failed",
-                metadata: ["error": .string(String(describing: error))]
-            )
-            return nil
-        }
+    ) -> String where T: Codable & Sendable & Generable {
+        prompt
     }
 }
 
@@ -476,16 +352,22 @@ extension ACPModelEndpoint: SessionOwningEndpoint {
         }
     }
 
-    func stream<T: AgentOutput>(
-        input: ModelInput,
+    func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
         delta turnDelta: TurnDelta,
         authority: any Authority,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
+        tools: [AnyTool],
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where
+        Input: Sendable,
+        Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
+    {
         stream(
-            input: input, turnDelta: turnDelta, authority: authority, tools: tools,
-            responseType: responseType)
+            entries: entries, turnDelta: turnDelta, authority: authority, tools: tools.map(\.schema),
+            generating: outputType, purpose: purpose)
     }
 
     func terminateSession() async {

@@ -60,10 +60,10 @@ public struct TurnDelta: Sendable {
     /// supplied separately as ``ModelEndpoint/stream(input:delta:authority:tools:responseType:)``'s
     /// `input` and can never be stored in this value by accident.
     public struct Current: Sendable {
-        public let messages: [LLMMessage]
+        public let entries: [Transcript.Entry]
 
-        public init(messages: [LLMMessage]) {
-            self.messages = messages
+        public init(entries: [Transcript.Entry]) {
+            self.entries = entries
         }
     }
 
@@ -75,10 +75,10 @@ public struct TurnDelta: Sendable {
     public let sessionIdentity: SessionIdentity
 
     public init(
-        currentMessages: [LLMMessage],
+        currentEntries: [Transcript.Entry],
         sessionIdentity: SessionIdentity
     ) {
-        self.current = Current(messages: currentMessages)
+        self.current = Current(entries: currentEntries)
         self.sessionIdentity = sessionIdentity
     }
 }
@@ -100,12 +100,13 @@ public struct ModelSessionResume: Codable, Sendable, Equatable {
 /// A model endpoint backed by a harness that owns a stateful conversation
 /// session (the local `kimi`/`claude` CLIs or Codex App Server).
 ///
-/// On every turn the reasoning loop hands the endpoint both the full context
-/// (`input`, for cold bootstraps) and the per-turn ``TurnDelta``. The
+/// On every turn the reasoning loop hands the endpoint the typed turn input,
+/// the full transcript entries for cold bootstraps, and the per-turn
+/// ``TurnDelta``. The
 /// endpoint — which alone knows whether its session is alive — sends only the
 /// delta on a warm session and bootstraps with the full context on a cold one.
-/// Stateless endpoints (plain chat-model APIs) do not conform; the loop calls
-/// their plain `stream(input:tools:)` instead.
+/// Stateless endpoints (plain chat-model APIs) use the same transcript-based
+/// ``ModelEndpoint`` operation.
 public protocol SessionOwningEndpoint: ModelEndpoint {
     /// The harness session id currently in use, if any. The reasoning loop
     /// journals it after a turn so a restart can resume the session.
@@ -116,13 +117,19 @@ public protocol SessionOwningEndpoint: ModelEndpoint {
     /// against it for this prompt. Because turns are serialized per agent, the
     /// endpoint applies it at prompt start and needs no restore — the next
     /// turn simply carries its own.
-    func stream<T: AgentOutput>(
-        input: ModelInput,
+    func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
         delta: TurnDelta,
         authority: any Authority,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>>
+        tools: [AnyTool],
+        generating: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where
+        Input: Sendable,
+        Output: Codable & Sendable & Generable,
+        Output.PartiallyGenerated: Sendable
 
     /// Tears down the live harness session, killing the harness process if
     /// one is running. Called when the owning agent deactivates; the next turn

@@ -12,8 +12,8 @@ import ScopedEffect
 private let codexSessionLogger = Logger(label: "CodexAppServerSession")
 
 enum CodexNarration: Sendable {
-    case text(String)
-    case thinking(String)
+    case narrationDelta(String)
+    case reasoningDelta(String)
     case status(String)
 }
 
@@ -250,11 +250,11 @@ actor CodexAppServerSession {
                 if let delta = try message.params?.decode(CodexTextDelta.self).delta, !delta.isEmpty {
                     sawTextDelta = true
                     finalText += delta
-                    onNarration(.text(delta))
+                    onNarration(.narrationDelta(delta))
                 }
             case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
                 if let delta = try message.params?.decode(CodexTextDelta.self).delta, !delta.isEmpty {
-                    onNarration(.thinking(delta))
+                    onNarration(.reasoningDelta(delta))
                 }
             case "item/started", "item/completed":
                 guard let item = try message.params?.decode(CodexItemNotification.self).item else {
@@ -265,7 +265,7 @@ actor CodexAppServerSession {
                     let text = item.text, !text.isEmpty
                 {
                     finalText = text
-                    if !sawTextDelta { onNarration(.text(text)) }
+                    if !sawTextDelta { onNarration(.narrationDelta(text)) }
                 } else {
                     narrate(item: item, started: method == "item/started", to: onNarration)
                 }

@@ -51,21 +51,51 @@ public struct ContextUsage: Codable, Sendable, Equatable {
     }
 }
 
+/// Non-terminal provider activity. Activity never becomes the model result.
+public enum ModelActivity: Sendable, Equatable {
+    case narrationDelta(GeneratedContent)
+    case reasoningDelta(GeneratedContent)
+    case status(GeneratedContent)
+}
+
+/// The complete assistant response that ended a model request by asking Hail
+/// to execute tools. Providers assemble this value at their transport
+/// boundary. The reasoning loop receives an already completed round and never
+/// reconstructs it from activity fragments.
+public struct ModelToolRound: Codable, Sendable, Equatable {
+    /// Assistant-visible content, when the provider emitted any before the
+    /// tool calls. Transcript segments preserve structured content without
+    /// reducing it to a text sentinel.
+    public let narration: Transcript.Response?
+
+    /// Provider reasoning retained for protocols that require it to accompany
+    /// the subsequent tool result. AnyLanguageModel has no native reasoning
+    /// segment, so Hail preserves it as ordered transcript segments.
+    public let reasoning: [Transcript.Segment]
+
+    /// Complete tool calls with their provider-native generated arguments.
+    public let calls: [ToolCall]
+
+    public init(
+        narration: Transcript.Response? = nil,
+        reasoning: [Transcript.Segment] = [],
+        calls: [ToolCall]
+    ) {
+        self.narration = narration
+        self.reasoning = reasoning
+        self.calls = calls
+    }
+}
+
 /// Events emitted by a model during a streaming turn.
-public enum ModelEvent<Output: AgentOutput>: Sendable {
-    /// A plain-text fragment from the model. Used for chat-style streaming.
-    case text(String)
+public enum ModelEvent<Output>: Sendable
+where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
+    /// Non-terminal provider activity.
+    case activity(ModelActivity)
 
-    /// A low-volume thought/trace fragment that should not be forwarded to the
-    /// UI or logged at `info`.
-    case thinking(String)
-
-    /// A high-level status update, e.g. "Calling a tool." or "Generating...".
-    case status(String)
-
-    /// A request to execute one or more tools. The caller executes the tool and
-    /// feeds the result back into the next turn.
-    case toolCall(ToolCall)
+    /// A complete assistant round requesting one or more tools. The caller
+    /// executes the tools and feeds their results back into the next turn.
+    case toolsRequested(ModelToolRound)
 
     /// A partial generated value as it is being generated. Providers that
     /// support native streaming yield cumulative snapshots; plain-text typed
@@ -78,8 +108,7 @@ public enum ModelEvent<Output: AgentOutput>: Sendable {
     /// Current context occupancy, when the endpoint can report it.
     case contextUsage(ContextUsage)
 
-    /// The final generated result of the turn. For chat this is a plain string;
-    /// for structured turns it is the typed response.
+    /// The only successful terminal result of the turn.
     case generated(Output)
 
     /// The turn failed.
@@ -113,146 +142,8 @@ public enum ModelRequestPurpose: Sendable, Equatable {
 public enum TokenCounting: Sendable {
     case unavailable
     case available(
-        @Sendable (_ messages: [LLMMessage], _ tools: [ToolDefinition]) async throws(AgentRuntimeError) -> Int
+        @Sendable (_ entries: [Transcript.Entry], _ tools: [ToolDefinition]) async throws(AgentRuntimeError) -> Int
     )
-    /// Provider-specific counting that can inspect the rich input before it is
-    /// projected onto the provider wire format. This is the capability used
-    /// when a tool returns an image, audio file, document, or other artifact.
-    case availableInput(
-        @Sendable (_ input: ModelInput, _ tools: [ToolDefinition]) async throws(AgentRuntimeError) -> Int
-    )
-}
-
-/// The ordered, live input to one model request.
-///
-/// Conversation messages remain plain, durable values. A binary tool output is
-/// represented by its own entry and exists only while Hail continues the
-/// current reasoning turn. Its semantic `ToolResult` is journaled, but the
-/// fetched body is not embedded in journal events or snapshots.
-public struct ModelInput: Sendable {
-    public enum Entry: Sendable {
-        case message(LLMMessage)
-        case toolOutput(callID: String, name: String, output: ToolOutput)
-    }
-
-    public private(set) var entries: [Entry]
-
-    public init(messages: [LLMMessage]) {
-        self.entries = messages.map(Entry.message)
-    }
-
-    public init(entries: [Entry]) {
-        self.entries = entries
-    }
-
-    public mutating func append(_ message: LLMMessage) {
-        entries.append(.message(message))
-    }
-
-    public mutating func appendToolOutput(
-        callID: String,
-        name: String,
-        output: ToolOutput
-    ) {
-        entries.append(.toolOutput(callID: callID, name: name, output: output))
-    }
-
-    /// Plain semantic projection used for persistence, compaction and
-    /// text-only endpoints. Binary tool bodies are reduced to metadata.
-    public var messages: [LLMMessage] {
-        entries.map { entry in
-            switch entry {
-            case .message(let message):
-                return message
-            case .toolOutput(let callID, _, let output):
-                let content: String
-                switch output {
-                case .text(let text):
-                    content = text
-                case .data(let data) where data.isTextLike:
-                    content = String(decoding: data.body, as: UTF8.self)
-                case .data:
-                    content = output.transcript
-                }
-                return LLMMessage(
-                    role: .tool,
-                    content: content,
-                    toolCallID: callID
-                )
-            }
-        }
-    }
-
-    /// Semantic messages for rich outputs produced during the live reasoning
-    /// turn. These can be attached to a rebuilt durable request when the
-    /// compactor has not retained their metadata message.
-    public var richOutputMessages: [LLMMessage] {
-        entries.compactMap { entry in
-            guard case .toolOutput(let callID, _, let output) = entry else { return nil }
-            let content: String
-            switch output {
-            case .text(let text):
-                content = text
-            case .data(let data) where data.isTextLike:
-                content = String(decoding: data.body, as: UTF8.self)
-            case .data:
-                content = output.transcript
-            }
-            return LLMMessage(role: .tool, content: content, toolCallID: callID)
-        }
-    }
-
-    public var containsData: Bool {
-        entries.contains { entry in
-            guard case .toolOutput(_, _, .data) = entry else { return false }
-            return true
-        }
-    }
-
-    public var containsUnsupportedData: Bool {
-        entries.contains { entry in
-            guard case .toolOutput(_, _, .data(let data)) = entry else { return false }
-            return !data.isTextLike
-        }
-    }
-
-    /// Projects this request for an endpoint that cannot consume rich tool
-    /// output. It fails explicitly instead of pretending resource metadata is
-    /// the fetched content.
-    public func textMessages(for model: String) throws(ModelEndpointError) -> [LLMMessage] {
-        guard !containsUnsupportedData else {
-            throw .invalidRequest(
-                "Model endpoint \(model) cannot consume the data returned by this tool."
-            )
-        }
-        return messages
-    }
-
-    /// Rebuilds compacted context while retaining matching live tool outputs.
-    public func rebased(on messages: [LLMMessage]) -> ModelInput {
-        var outputs: [String: [Entry]] = [:]
-        for entry in entries {
-            guard case .toolOutput(let callID, _, _) = entry else { continue }
-            outputs[callID, default: []].append(entry)
-        }
-        var outputIndices: [String: Int] = [:]
-        return ModelInput(
-            entries: messages.map { message in
-                guard message.role == .tool,
-                    let callID = message.toolCallID,
-                    let matchingOutputs = outputs[callID]
-                else {
-                    return .message(message)
-                }
-                let index = outputIndices[callID, default: 0]
-                guard matchingOutputs.indices.contains(index) else {
-                    return .message(message)
-                }
-                outputIndices[callID] = index + 1
-                return matchingOutputs[index]
-            }
-        )
-    }
 }
 
 public protocol ModelEndpoint: Sendable {
@@ -267,36 +158,21 @@ public protocol ModelEndpoint: Sendable {
     /// Exact request-counting capability for this endpoint.
     var tokenCounting: TokenCounting { get }
 
-    /// Streams one model turn for the given conversation context and tools.
-    ///
-    /// The stream yields intermediate events (text, thinking, status, tool calls)
-    /// and terminates with exactly one of `.generated(String)` or `.failed(...)`.
-    /// The caller executes any tool calls, appends the results to `messages`, and
-    /// invokes `stream` again for the next turn.
-    func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?
-    ) -> AsyncStream<ModelEvent<String>>
-
-    /// Streams a plain-text request with an explicit semantic purpose.
-    /// Compaction requests are separate so a provider can bound summarizer
-    /// output without silently changing ordinary generation limits.
-    func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
+    /// Streams one model turn with an explicitly declared generated value.
+    /// The provider owns the transport and decoding details; Hail only sees
+    /// typed partials, tool calls, usage, and the completed value.
+    func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
+        tools: [AnyTool],
+        authority: any Authority,
+        generating: Output.Type,
         purpose: ModelRequestPurpose
-    ) -> AsyncStream<ModelEvent<String>>
-
-    /// Streams one structured model turn, decoding the final response as `T`.
-    ///
-    /// Providers with native structured output may use their schema mechanism.
-    /// Providers without it may use the portable report-tool contract. The
-    /// stream terminates with exactly one of `.generated(T)` or `.failed(...)`.
-    func stream<T: AgentOutput>(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>>
+    ) -> AsyncStream<ModelEvent<Output>>
+    where
+        Input: Sendable,
+        Output: Codable & Sendable & Generable,
+        Output.PartiallyGenerated: Sendable
 }
 
 // MARK: - Default structured fallback
@@ -306,60 +182,6 @@ extension ModelEndpoint {
 
     public var tokenCounting: TokenCounting { .unavailable }
 
-    public func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        purpose: ModelRequestPurpose
-    ) -> AsyncStream<ModelEvent<String>> {
-        stream(input: input, tools: tools)
-    }
-
-    /// Default implementation for endpoints that do not provide native structured
-    /// output: stream the text form and attempt to decode the final string as JSON
-    /// matching `T`.
-    public func stream<T: AgentOutput>(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        AsyncStream(ModelEvent<T>.self) { continuation in
-            let task = Task {
-                for await event in stream(input: input, tools: tools) {
-                    switch event {
-                    case .text(let text):
-                        continuation.yield(.text(text))
-                    case .thinking(let text):
-                        continuation.yield(.thinking(text))
-                    case .status(let message):
-                        continuation.yield(.status(message))
-                    case .toolCall(let call):
-                        continuation.yield(.toolCall(call))
-                    case .usage, .contextUsage:
-                        break
-                    case .partialUpdated(let partial):
-                        guard let value = partial as? T.PartiallyGenerated else { break }
-                        continuation.yield(.partialUpdated(value))
-                    case .generated(let text):
-                        if let value = text as? T {
-                            continuation.yield(.generated(value))
-                        } else {
-                            do {
-                                let content = try GeneratedContent(json: text)
-                                let decoded = try T(content)
-                                continuation.yield(.generated(decoded))
-                            } catch {
-                                continuation.yield(.failed(ModelEndpointError.decodingError(String(describing: error))))
-                            }
-                        }
-                    case .failed(let error):
-                        continuation.yield(.failed(error))
-                    }
-                }
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
 }
 
 public enum ModelEndpointError: Error, Sendable, Equatable {

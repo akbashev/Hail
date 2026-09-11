@@ -103,20 +103,20 @@ public struct AgentTool {
         CoordinationEffect(subsystem: "agent", action: input.action.rawValue)
     }
 
-    public func run(input: Input, token: borrowing EffectToken<CoordinationEffect>) async throws -> String {
+    public func runOutput(input: Input, token: borrowing EffectToken<CoordinationEffect>) async throws -> ToolOutput {
         _ = token
         switch input.action {
         case .listAgents:
             let agents = try await system.agentRuntime.allAgents()
                 .filter { $0.agentID != sourceAgentID }
             guard !agents.isEmpty else {
-                return "No other active agents."
+                return .text("No other active agents.")
             }
             var lines = ["Active agents:"]
             for entry in agents {
                 lines.append("- \(entry.agentID) (type: \(entry.role))")
             }
-            return lines.joined(separator: "\n")
+            return .text(lines.joined(separator: "\n"))
 
         case .send:
             guard let target = input.target, !target.isEmpty else {
@@ -157,12 +157,14 @@ public struct AgentTool {
             let logger = system.log
             let deliveryID = await system.agentRuntime.enqueueDelivery {
                 do {
-                    let _: String? = try await other.respond(
-                        ChatMessage.text(
-                            sender: sourceAgentID.rawValue,
-                            content: messageText,
-                            timestamp: Date()
-                        )
+                    let message = ChatMessage.text(
+                        sender: sourceAgentID.rawValue,
+                        content: messageText,
+                        timestamp: Date()
+                    )
+                    let _: String = try await other.respond(
+                        message,
+                        message: message
                     )
                 } catch {
                     logger.error(
@@ -176,8 +178,9 @@ public struct AgentTool {
                     throw error
                 }
             }
-            return
+            return .text(
                 "Queued message to \(targetID.rawValue) (delivery \(deliveryID)); best effort, no response is expected in this turn."
+            )
         }
     }
 }

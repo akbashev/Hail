@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import HailCore
 
 #if canImport(FoundationEssentials)
@@ -6,7 +7,11 @@ import HailCore
     import Foundation
 #endif
 
-/// A heuristic token estimator used to decide when compaction is due.
+/// A heuristic token estimator for hosts that explicitly choose an estimate.
+/// It is not a substitute for a provider's preflight tokenizer: the JSON
+/// representation used here is not necessarily the provider's rendered chat
+/// template. Runtime code should use a provider measurement when available and
+/// wait for an explicit overflow when it is not.
 ///
 /// Exact counts need each model's tokenizer; a compactor only needs to know
 /// "are we near the window", so the estimator counts characters and applies a
@@ -19,14 +24,15 @@ public struct TokenEstimator: Sendable {
     public var perMessageOverhead: Int
 
     /// Optional model-specific counter. Hosts can wrap a tokenizer already
-    /// owned by their Qwen/MLX/llama.cpp endpoint. Absence uses the heuristic;
-    /// a configured counter failure propagates.
-    public var exactCount: (@Sendable ([LLMMessage], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)?
+    /// owned by their Qwen/MLX/llama.cpp endpoint. Absence uses this estimator
+    /// only when the host explicitly asks for it; a configured counter failure
+    /// propagates.
+    public var exactCount: (@Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)?
 
     public init(
         charactersPerToken: Double = 4.0,
         perMessageOverhead: Int = 4,
-        exactCount: (@Sendable ([LLMMessage], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil
+        exactCount: (@Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil
     ) {
         self.charactersPerToken = charactersPerToken
         self.perMessageOverhead = perMessageOverhead
@@ -45,7 +51,8 @@ public struct TokenEstimator: Sendable {
         self.init(
             charactersPerToken: charactersPerToken,
             perMessageOverhead: perMessageOverhead,
-            exactCount: { (messages: [LLMMessage], tools: [ToolDefinition]) async throws(AgentRuntimeError) -> Int in
+            exactCount: {
+                (messages: [Transcript.Entry], tools: [ToolDefinition]) async throws(AgentRuntimeError) -> Int in
                 do {
                     return try tokenizer.count(messages: messages, tools: tools)
                 } catch is CancellationError {
@@ -69,18 +76,20 @@ public struct TokenEstimator: Sendable {
     /// schemas are included because providers place them in the prompt even
     /// though they are not ordinary chat messages.
     public func estimate(
-        messages: [LLMMessage],
+        messages: [Transcript.Entry],
         tools: [ToolDefinition]
     ) async throws(AgentRuntimeError) -> Int {
         if let exactCount {
             return max(try await exactCount(messages, tools), 0)
         }
 
-        let messageTokens = messages.reduce(0) { total, message in
-            total + perMessageOverhead + estimate(encodedCharacterCount(message))
+        var messageTokens = 0
+        for message in messages {
+            messageTokens += perMessageOverhead + estimate(try encodedCharacterCount(message))
         }
-        let toolTokens = tools.reduce(0) { total, tool in
-            total + estimate(encodedCharacterCount(tool))
+        var toolTokens = 0
+        for tool in tools {
+            toolTokens += estimate(try encodedCharacterCount(tool))
         }
         return messageTokens + toolTokens
     }
@@ -95,11 +104,12 @@ public struct TokenEstimator: Sendable {
         Int((Double(characters) / charactersPerToken).rounded(.up))
     }
 
-    private func encodedCharacterCount<T: Encodable>(_ value: T) -> Int {
-        guard let data = try? JSONEncoder().encode(value) else {
-            return String(describing: value).count
+    private func encodedCharacterCount<T: Encodable>(_ value: T) throws(AgentRuntimeError) -> Int {
+        do {
+            return try JSONEncoder().encode(value).count
+        } catch {
+            throw .infrastructureFailure("Could not encode the model request for token estimation.")
         }
-        return data.count
     }
 
     private func characters(of message: ChatMessage) -> Int {
@@ -107,21 +117,36 @@ public struct TokenEstimator: Sendable {
         case .text(_, let content, _):
             return content.count
         case .response(_, let payload, _):
-            return payload.count
+            return payload.jsonString.count
         case .toolCall(let calls, _):
-            return calls.reduce(0) { $0 + $1.name.count + $1.arguments.json.count }
-        case .assistantToolCall(let content, let thinking, let calls, _):
-            return content.count
-                + (thinking?.count ?? 0)
-                + calls.reduce(0) { $0 + $1.name.count + $1.arguments.json.count }
-        case .toolResult(_, let content, _):
-            return content.count
+            return calls.reduce(0) { $0 + $1.name.count + $1.arguments.jsonString.count }
+        case .assistantToolCall(let round, _):
+            let narration = round.narration.map { characters(of: $0.segments) } ?? 0
+            let reasoning = characters(of: round.reasoning)
+            return narration
+                + reasoning
+                + round.calls.reduce(0) { $0 + $1.name.count + $1.arguments.jsonString.count }
+        case .toolResult(_, let name, let output, _):
+            return name.count + characters(of: output.transcriptSegments)
         case .failure(let error, _):
             return String(describing: error).count
         case .decisionRequest(_, let question, let options, _):
             return options.reduce(question.count) { $0 + $1.label.count }
         case .decisionResolved(_, let question, let resolution, let comment, _):
             return question.count + resolution.count + (comment?.count ?? 0)
+        }
+    }
+
+    private func characters(of segments: [Transcript.Segment]) -> Int {
+        segments.reduce(0) { total, segment in
+            switch segment {
+            case .text(let value):
+                return total + value.content.count
+            case .structure(let value):
+                return total + value.content.jsonString.count
+            case .image:
+                return total + 1
+            }
         }
     }
 }

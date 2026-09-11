@@ -1,3 +1,5 @@
+import AnyLanguageModel
+
 #if canImport(FoundationEssentials)
     import FoundationEssentials
 #else
@@ -19,7 +21,7 @@ public struct AgentState: Codable, Sendable {
     /// `conversationCompacted` event REPLACES it (the new summary folds the
     /// old one in), so the window carries at most one summary no matter how
     /// many compactions ran.
-    public private(set) var contextSummary: String? = nil
+    public private(set) var contextSummary: GeneratedContent? = nil
 
     /// The turn currently in flight, if any. Set by `turnStarted`, cleared by
     /// `turnCompleted`. `opening` is the message that opened the turn (once
@@ -116,7 +118,7 @@ public struct AgentState: Codable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         agentID = try container.decode(AgentID.self, forKey: .agentID)
         conversationThread = try container.decode([ChatMessage].self, forKey: .conversationThread)
-        contextSummary = try container.decodeIfPresent(String.self, forKey: .contextSummary)
+        contextSummary = try container.decodeIfPresent(GeneratedContent.self, forKey: .contextSummary)
         activeTurn = try container.decodeIfPresent(ActiveTurn.self, forKey: .activeTurn)
         pendingTurnRerun = try container.decodeIfPresent(ChatMessage.self, forKey: .pendingTurnRerun)
         modelSession = try container.decodeIfPresent(ModelSessionResume.self, forKey: .modelSession)
@@ -197,35 +199,34 @@ public struct AgentState: Codable, Sendable {
                     }
                 }
             }
-        case .assistantToolRound(let content, let thinking, let calls, let at):
+        case .assistantToolRound(let round, let at):
             conversationThread.append(
                 .assistantToolCall(
-                    content: content,
-                    thinking: thinking,
-                    calls: calls,
+                    round: round,
                     timestamp: at
                 )
             )
             phase = .executingTool
-            currentToolName = calls.first?.name
+            currentToolName = round.calls.first?.name
         case .toolResult(let result, let at):
             conversationThread.append(
                 .toolResult(
                     id: result.toolCallID,
-                    content: result.output,
+                    name: result.name,
+                    output: result.output,
                     timestamp: replayTimestamp(for: at)
                 )
             )
             phase = .generating
             currentToolName = nil
-        case .conversationCompacted(let archivedCount, let summary):
-            contextSummary = summary
+        case .conversationCompacted(let archivedCount, let content):
+            contextSummary = content
             if archivedCount > 0 && archivedCount <= conversationThread.count {
                 conversationThread.removeFirst(archivedCount)
             }
             phase = .generating
-        case .responseReceived(let sender, let payload, let timestamp):
-            conversationThread.append(.response(sender: sender, payload: payload, timestamp: timestamp))
+        case .responseReceived(let sender, let content, let timestamp):
+            conversationThread.append(.response(sender: sender, content: content, timestamp: timestamp))
             activeTurn?.responded = true
         case .turnFailed(let error, let at):
             conversationThread.append(.failure(error: error, timestamp: at))

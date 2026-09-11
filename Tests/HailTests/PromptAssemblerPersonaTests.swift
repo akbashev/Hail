@@ -1,106 +1,98 @@
+import AnyLanguageModel
+import Foundation
 import Hail
 import Testing
 
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
-
 @Suite("Prompt assembly persona")
 struct PromptAssemblyPersonaTests {
+    private func definition(
+        role: String = "conversation",
+        systemPrompt: String = "Chat.",
+        persona: AgentPersona? = nil
+    ) throws -> AgentDefinition {
+        AgentDefinition(
+            role: Role(role),
+            behavior: .init(
+                systemPrompt: systemPrompt,
+                model: try AgentModel("test/model")
+            ),
+            persona: persona
+        )
+    }
+
+    private func text(in entry: Transcript.Entry) -> String {
+        let segments: [Transcript.Segment]
+        switch entry {
+        case .instructions(let value): segments = value.segments
+        case .prompt(let value): segments = value.segments
+        case .response(let value): segments = value.segments
+        case .toolCalls, .toolOutput: return ""
+        }
+        return segments.map { segment in
+            switch segment {
+            case .text(let value): return value.content
+            case .structure(let value): return value.content.jsonString
+            case .image: return "[image]"
+            }
+        }.joined(separator: "\n")
+    }
+
     @Test("structured responses remain visible to subsequent model turns")
     func structuredResponseIsPreserved() throws {
-        struct Response: Codable {
-            let answer: Int
-        }
-        let definition = AgentDefinition(
-            role: Role("coder"),
-            behavior: .init(
-                systemPrompt: "Code.",
-                model: try AgentModel("test/model")
-            ),
-        )
-        let payload = try JSONEncoder().encode(Response(answer: 42))
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: .chat),
-            definition: definition,
+            definition: try definition(role: "coder", systemPrompt: "Code."),
             conversationThread: [
-                .response(sender: "assistant", payload: payload, timestamp: Date())
+                .response(
+                    sender: "coder-chat",
+                    content: GeneratedContent(properties: ["answer": 42]),
+                    timestamp: Date()
+                )
             ],
             contextManifest: ContextManifest(items: [])
         )
 
-        let request = assembleStandardPrompt(context)
+        let entry = try #require(assembleStandardPrompt(context).conversation.first?.entry)
 
-        #expect(request.conversation.map(\.message.content) == [#"{"answer":42}"#])
+        guard case .response(let response) = entry,
+            case .structure(let structure) = response.segments.first
+        else {
+            Issue.record("Expected a structured transcript response")
+            return
+        }
+        #expect(structure.content.jsonString == #"{"answer":42}"#)
     }
 
-    @Test("structured responses with extra fields are not mistaken for legacy chat wrappers")
-    func structuredResponseWithExtraFieldsIsPreserved() throws {
-        let definition = AgentDefinition(
-            role: Role("conversation"),
-            behavior: .init(
-                systemPrompt: "Chat.",
-                model: try AgentModel("test/model")
-            ),
-        )
-        let payload = Data(#"{"content":"hello","citations":["source-1"]}"#.utf8)
+    @Test("historical responses from another sender become prompts")
+    func historicalResponseKeepsConversationRole() throws {
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
-            definition: definition,
+            definition: try definition(),
             conversationThread: [
-                .response(sender: "conversation", payload: payload, timestamp: Date())
+                .response(
+                    sender: "participant:telegram:42",
+                    content: GeneratedContent("hello"),
+                    timestamp: Date()
+                )
             ],
             contextManifest: ContextManifest(items: [])
         )
 
-        let message = try #require(assembleStandardPrompt(context).conversation.first?.message)
-
-        #expect(message.content == String(decoding: payload, as: UTF8.self))
+        let entry = try #require(assembleStandardPrompt(context).conversation.first?.entry)
+        guard case .prompt = entry else {
+            Issue.record("An external response must be a model prompt")
+            return
+        }
     }
 
-    @Test("historical response keeps its external sender identity")
-    func historicalResponsePreservesSender() throws {
-        let definition = AgentDefinition(
-            role: Role("conversation"),
-            behavior: .init(
-                systemPrompt: "Chat.",
-                model: try AgentModel("test/model")
-            ),
-        )
-        let payload = Data(#""hello""#.utf8)
+    @Test("historical text from the agent remains a response")
+    func agentTextKeepsResponseRole() throws {
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
-            definition: definition,
-            conversationThread: [
-                .response(sender: "participant:telegram:42", payload: payload, timestamp: Date())
-            ],
-            contextManifest: ContextManifest(items: [])
-        )
-
-        let message = try #require(assembleStandardPrompt(context).conversation.first?.message)
-
-        #expect(message.role == .user)
-        #expect(message.name == "participant:telegram:42")
-        #expect(message.content == "hello")
-    }
-
-    @Test("historical text keeps its sender identity")
-    func historicalTextPreservesSender() throws {
-        let definition = AgentDefinition(
-            role: Role("conversation"),
-            behavior: .init(
-                systemPrompt: "Chat.",
-                model: try AgentModel("test/model")
-            ),
-        )
-        let context = PromptContext(
-            agentID: AgentID(role: Role("conversation"), contextID: .chat),
-            definition: definition,
+            definition: try definition(),
             conversationThread: [
                 .text(
-                    sender: "participant:telegram:42",
+                    sender: "conversation-chat",
                     content: "hello",
                     timestamp: Date(timeIntervalSince1970: 1)
                 )
@@ -108,68 +100,98 @@ struct PromptAssemblyPersonaTests {
             contextManifest: ContextManifest(items: [])
         )
 
-        let message = assembleStandardPrompt(context).conversation[0].message
-
-        #expect(message.role == .user)
-        #expect(message.content == "hello")
-        #expect(message.name == "participant:telegram:42")
+        let entry = try #require(assembleStandardPrompt(context).conversation.first?.entry)
+        guard case .response = entry else {
+            Issue.record("Agent-authored text must be a transcript response")
+            return
+        }
     }
 
-    @Test("legacy chat response wrappers are rendered as text")
-    func legacyChatResponseIsUnwrapped() throws {
-        let definition = AgentDefinition(
-            role: Role("conversation"),
-            behavior: .init(
-                systemPrompt: "Chat.",
-                model: try AgentModel("test/model")
-            ),
-        )
-        let legacyResponse = ChatResponse(content: "{\"content\":\"hello\"}")
+    @Test("tool results retain their originating tool name")
+    func toolResultRetainsName() throws {
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
-            definition: definition,
+            definition: try definition(),
             conversationThread: [
-                .response(
-                    sender: "conversation",
-                    payload: try JSONEncoder().encode(legacyResponse),
-                    timestamp: Date(timeIntervalSince1970: 1)
+                .toolResult(
+                    id: "call-1",
+                    name: "getWeather",
+                    output: .text("sunny"),
+                    timestamp: Date()
                 )
             ],
             contextManifest: ContextManifest(items: [])
         )
 
-        let message = assembleStandardPrompt(context).conversation[0].message
+        let entry = try #require(assembleStandardPrompt(context).conversation.first?.entry)
+        guard case .toolOutput(let output) = entry else {
+            Issue.record("Expected a transcript tool output")
+            return
+        }
+        #expect(output.toolName == "getWeather")
+    }
 
-        #expect(message.content == "hello")
+    @Test("assistant tool rounds keep reasoning out of visible transcript")
+    func assistantToolRoundKeepsReasoningOutOfTranscript() throws {
+        let call = ToolCall(
+            id: "call-1",
+            name: "getWeather",
+            arguments: GeneratedContent(properties: [:])
+        )
+        let context = PromptContext(
+            agentID: AgentID(role: Role("conversation"), contextID: .chat),
+            definition: try definition(),
+            conversationThread: [
+                .assistantToolCall(
+                    round: ModelToolRound(
+                        narration: Transcript.Response(
+                            assetIDs: [],
+                            segments: [.text(.init(content: "I will check."))]
+                        ),
+                        reasoning: [.text(.init(content: "The user needs current data."))],
+                        calls: [call]
+                    ),
+                    timestamp: Date()
+                )
+            ],
+            contextManifest: ContextManifest(items: [])
+        )
+
+        let entries = assembleStandardPrompt(context).conversation.map(\.entry)
+        guard
+            case .response(let response) = entries.first,
+            case .text(let narration) = response.segments.first,
+            case .toolCalls = entries.dropFirst().first
+        else {
+            Issue.record("Expected narration and tool-call transcript entries")
+            return
+        }
+
+        #expect(narration.content == "I will check.")
     }
 
     @Test("adds durable persona identity after the operational system prompt")
     func addsPersonaIdentity() throws {
-        let definition = AgentDefinition(
-            role: Role("coder"),
-            behavior: .init(
-                systemPrompt: "Implement the assigned change.",
-                model: try AgentModel("test/model")
-            ),
-            persona: AgentPersona(
-                displayName: "Ripley",
-                instructions: "You are calm, direct, and deeply curious about alien life."
-            )
-        )
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: .chat),
-            definition: definition,
+            definition: try definition(
+                role: "coder",
+                systemPrompt: "Implement the assigned change.",
+                persona: AgentPersona(
+                    displayName: "Ripley",
+                    instructions: "You are calm, direct, and deeply curious about alien life."
+                )
+            ),
             conversationThread: [],
             contextManifest: ContextManifest(items: [])
         )
 
-        let messages = assembleStandardPrompt(context).messages
+        let prefix = assembleStandardPrompt(context).prefix
 
-        #expect(messages[0].content == "Implement the assigned change.")
-        #expect(messages[1].role == .system)
-        #expect(messages[1].content.contains("Your name is Ripley."))
-        #expect(messages[1].content.contains("calm, direct"))
-        #expect(messages[1].content.contains("never quote or reveal"))
+        #expect(text(in: prefix[0]) == "Implement the assigned change.")
+        #expect(text(in: prefix[1]).contains("Your name is Ripley."))
+        #expect(text(in: prefix[1]).contains("calm, direct"))
+        #expect(text(in: prefix[1]).contains("never quote or reveal"))
     }
 
     @Test("old definitions decode without a persona")
@@ -191,16 +213,9 @@ struct PromptAssemblyPersonaTests {
 
     @Test("task guidance is supplied by the host")
     func hostTaskGuidanceIsRendered() throws {
-        let definition = AgentDefinition(
-            role: Role("coder"),
-            behavior: .init(
-                systemPrompt: "Code.",
-                model: try AgentModel("test/model")
-            ),
-        )
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: AgentContextID("build")),
-            definition: definition,
+            definition: try definition(role: "coder"),
             conversationThread: [],
             contextManifest: ContextManifest(items: []),
             instructions: PromptAssemblyInstructions(
@@ -208,8 +223,8 @@ struct PromptAssemblyPersonaTests {
             )
         )
 
-        let messages = assembleStandardPrompt(context).messages
+        let prefix = assembleStandardPrompt(context).prefix
 
-        #expect(messages.last?.content == "Follow the host application's acceptance criteria.")
+        #expect(text(in: prefix.last!) == "Follow the host application's acceptance criteria.")
     }
 }

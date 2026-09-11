@@ -62,7 +62,7 @@ public struct ReportStatusTool {
         CoordinationEffect(subsystem: "agent", action: "report_status")
     }
 
-    public func run(input: Input, token: borrowing EffectToken<CoordinationEffect>) async throws -> String {
+    public func runOutput(input: Input, token: borrowing EffectToken<CoordinationEffect>) async throws -> ToolOutput {
         _ = token
         guard
             let entry = try await system.agentRuntime.entry(forAgentID: sourceAgentID),
@@ -78,6 +78,6 @@ public struct ReportStatusTool {
         )
         let timestamp = input.timestamp.flatMap { try? Date.ISO8601FormatStyle().parse($0) } ?? Date()
         try await agent.recordStatusActivity(input.message, at: timestamp)
-        return "Status reported."
+        return .text("Status reported.")
     }
 }

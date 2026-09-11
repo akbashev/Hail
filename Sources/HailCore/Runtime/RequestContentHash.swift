@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import CryptoKit
 
 #if canImport(FoundationEssentials)
@@ -17,7 +18,7 @@ public enum RequestContentHash {
     /// message in request order.
     public static func chain(
         tools: [ToolDefinition],
-        messages: [LLMMessage]
+        messages: [Transcript.Entry]
     ) -> [String] {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

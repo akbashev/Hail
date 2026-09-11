@@ -1,4 +1,5 @@
 import ACPModel
+import AnyLanguageModel
 import Hail
 import ScopedEffect
 import Testing
@@ -505,8 +506,7 @@ struct ProtocolViolatingHarnessTests {
 @Suite("AgentState repeated crash dedup")
 struct RepeatedCrashDedupTests {
     private func makeToolResult(id: String, output: String) throws -> ToolResult {
-        let json = #"{"tool_call_id":"\#(id)","name":"read_file","output":"\#(output)","failure_kind":null}"#
-        return try JSONDecoder().decode(ToolResult.self, from: Data(json.utf8))
+        ToolResult(toolCallID: id, name: "read_file", output: .text(output))
     }
 
     @Test("two consecutive interrupted re-runs keep a single opening")
@@ -523,9 +523,9 @@ struct RepeatedCrashDedupTests {
         state.apply(.messageReceived(message))
         state.apply(
             .assistantToolRound(
-                content: "",
-                thinking: nil,
-                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
+                round: ModelToolRound(
+                    calls: [ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:]))]
+                ),
                 at: Date(timeIntervalSince1970: 2_001)
             )
         )
@@ -541,9 +541,9 @@ struct RepeatedCrashDedupTests {
         state.apply(.messageReceived(message))
         state.apply(
             .assistantToolRound(
-                content: "",
-                thinking: nil,
-                calls: [ToolCall(id: "call-2", name: "read_file", arguments: ToolArguments(json: "{}"))],
+                round: ModelToolRound(
+                    calls: [ToolCall(id: "call-2", name: "read_file", arguments: GeneratedContent(properties: [:]))]
+                ),
                 at: Date(timeIntervalSince1970: 3_001)
             )
         )
@@ -563,7 +563,11 @@ struct RepeatedCrashDedupTests {
 
         // The recovered turn then completes cleanly.
         state.apply(
-            .responseReceived(sender: "coder", payload: Data("done".utf8), at: Date(timeIntervalSince1970: 4_100)),
+            .responseReceived(
+                sender: "coder",
+                content: GeneratedContent("done"),
+                at: Date(timeIntervalSince1970: 4_100)
+            ),
         )
         state.apply(.turnCompleted(at: Date(timeIntervalSince1970: 4_100)))
         #expect(state.activeTurn == nil)
@@ -590,8 +594,7 @@ struct CorruptedJournalTests {
     }
 
     private func makeToolResult(id: String, output: String) throws -> ToolResult {
-        let json = #"{"tool_call_id":"\#(id)","name":"read_file","output":"\#(output)","failure_kind":null}"#
-        return try JSONDecoder().decode(ToolResult.self, from: Data(json.utf8))
+        ToolResult(toolCallID: id, name: "read_file", output: .text(output))
     }
 
     @Test("a torn tail event throws and never partially applies")
@@ -608,9 +611,9 @@ struct CorruptedJournalTests {
             try encode(.messageReceived(message)),
             try encode(
                 .assistantToolRound(
-                    content: "",
-                    thinking: nil,
-                    calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
+                    round: ModelToolRound(
+                        calls: [ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:]))]
+                    ),
                     at: Date(timeIntervalSince1970: 2_001)
                 )
             ),

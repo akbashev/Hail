@@ -60,82 +60,74 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         )
     }
 
-    public func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?
-    ) -> AsyncStream<ModelEvent<String>> {
-        _ = tools
+    public func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
+        tools: [AnyTool],
+        authority: any Authority,
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
         return makeStream(
-            input: input,
+            entries: entries,
             delta: nil,
             sessionIdentity: nil,
-            authority: nil,
-            responseType: String.self
+            authority: authority,
+            generating: outputType,
+            purpose: purpose
         )
     }
 
-    public func stream<T: AgentOutput>(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        _ = tools
-        return makeStream(
-            input: input,
-            delta: nil,
-            sessionIdentity: nil,
-            authority: nil,
-            responseType: responseType
-        )
-    }
-
-    private func makeStream<T: AgentOutput>(
-        input: ModelInput,
-        delta: [LLMMessage]?,
+    private func makeStream<Output>(
+        entries: [Transcript.Entry],
+        delta: [Transcript.Entry]?,
         sessionIdentity: SessionIdentity?,
         authority: (any Authority)?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        let structured: Bool =
-            switch T.outputContract {
-            case .plainText: false
-            case .reportTool: true
-            }
-        return AsyncStream { continuation in
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
+        let structured = Output.self != String.self
+        return AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
                 do {
-                    let messages = try input.textMessages(for: model)
                     let schema =
                         structured
-                        ? try CLIEndpointSupport.finalOutputSchema(for: T.self)
+                        ? try CLIEndpointSupport.finalOutputSchema(for: Output.self)
                         : nil
-                    continuation.yield(.status("Codex is running."))
+                    continuation.yield(.activity(.status(GeneratedContent("Codex is running."))))
                     let result = try await session.runTurn(
-                        fullPrompt: Self.formatPrompt(messages: messages, structured: structured),
-                        deltaPrompt: delta.map { Self.formatPrompt(messages: $0, structured: structured) },
+                        fullPrompt: Self.formatPrompt(
+                            entries: entries,
+                            structured: structured
+                        ),
+                        deltaPrompt: delta.map { Self.formatPrompt(entries: $0, structured: structured) },
                         identity: sessionIdentity,
                         outputSchema: schema,
                         turnAuthority: authority,
                         onNarration: { narration in
                             switch narration {
-                            case .text(let text): continuation.yield(.text(text))
-                            case .thinking(let text): continuation.yield(.thinking(text))
-                            case .status(let text): continuation.yield(.status(text))
+                            case .narrationDelta(let text):
+                                continuation.yield(.activity(.narrationDelta(GeneratedContent(text))))
+                            case .reasoningDelta(let text):
+                                continuation.yield(.activity(.reasoningDelta(GeneratedContent(text))))
+                            case .status(let text): continuation.yield(.activity(.status(GeneratedContent(text))))
                             }
                         }
                     )
-                    let value: T? =
+                    let value: Output? =
                         structured
                         ? CLIEndpointSupport.decodeOutcome(
-                            fromJSON: result, as: T.self, logger: codexLogger)
+                            fromJSON: result, as: Output.self, logger: codexLogger)
                         : CLIEndpointSupport.decodeOutcome(
-                            fromText: result, as: T.self, logger: codexLogger)
+                            fromText: result, as: Output.self, logger: codexLogger)
                     guard let value else {
-                        continuation.yield(.failed(.decodingError("Codex output is not \(T.self)")))
+                        continuation.yield(.failed(.decodingError("Codex output is not \(Output.self)")))
                         continuation.finish()
                         return
                     }
-                    if structured { continuation.yield(.status("Outcome received.")) }
+                    if structured { continuation.yield(.activity(.status(GeneratedContent("Outcome received.")))) }
                     continuation.yield(.generated(value))
                     continuation.finish()
                 } catch CodexSessionError.cancelled {
@@ -156,15 +148,12 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         }
     }
 
-    private static func formatPrompt(messages: [LLMMessage], structured: Bool) -> String {
-        let system = messages.filter { $0.role == .system }.map(\.content).joined(separator: "\n\n")
-        let transcript = messages.filter { $0.role != .system }.map { message -> String in
-            switch message.role {
-            case .system: return message.content
-            case .user: return "User: \(message.content)"
-            case .assistant: return "Assistant: \(message.content)"
-            case .tool: return "Tool result: \(message.content)"
-            }
+    private static func formatPrompt(entries: [Transcript.Entry], structured: Bool) -> String {
+        let rendered = entries.map(Self.text)
+        let transcript = rendered.joined(separator: "\n\n")
+        let system = entries.compactMap { entry -> String? in
+            guard case .instructions = entry else { return nil }
+            return Self.text(entry)
         }.joined(separator: "\n\n")
         var parts = [system, transcript].filter { !$0.isEmpty }
         parts.append(
@@ -177,6 +166,26 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         }
         return parts.joined(separator: "\n\n")
     }
+
+    private static func text(_ entry: Transcript.Entry) -> String {
+        switch entry {
+        case .instructions(let value): return render(value.segments)
+        case .prompt(let value): return "User: \(render(value.segments))"
+        case .response(let value): return "Assistant: \(render(value.segments))"
+        case .toolCalls(let value): return "Assistant tool calls: \(value.id)"
+        case .toolOutput(let value): return "Tool result: \(render(value.segments))"
+        }
+    }
+
+    private static func render(_ segments: [Transcript.Segment]) -> String {
+        segments.map { segment in
+            switch segment {
+            case .text(let text): return text.content
+            case .structure(let value): return value.content.jsonString
+            case .image: return "[image]"
+            }
+        }.joined(separator: "\n")
+    }
 }
 
 extension CodexAppServerEndpoint: SessionOwningEndpoint {
@@ -184,20 +193,23 @@ extension CodexAppServerEndpoint: SessionOwningEndpoint {
         get async { await session.currentSessionID }
     }
 
-    public func stream<T: AgentOutput>(
-        input: ModelInput,
+    public func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
         delta turnDelta: TurnDelta,
         authority: any Authority,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        _ = tools
+        tools: [AnyTool],
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
         return makeStream(
-            input: input,
-            delta: turnDelta.current.messages,
+            entries: entries,
+            delta: turnDelta.current.entries,
             sessionIdentity: turnDelta.sessionIdentity,
             authority: authority,
-            responseType: responseType
+            generating: outputType,
+            purpose: purpose
         )
     }
 

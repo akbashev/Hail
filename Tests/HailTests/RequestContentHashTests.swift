@@ -1,10 +1,16 @@
+import AnyLanguageModel
 import Hail
 import Testing
 
 @Suite("Request content hashing")
 struct RequestContentHashTests {
-    private func message(_ content: String) -> LLMMessage {
-        LLMMessage(role: .user, content: content)
+    private func message(_ content: String) -> Transcript.Entry {
+        .prompt(
+            .init(
+                id: "prompt-\(content)",
+                segments: [.text(.init(id: "text-\(content)", content: content))]
+            )
+        )
     }
 
     @Test("identical prefixes produce identical digests")

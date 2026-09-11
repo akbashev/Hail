@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import Hail
 import Testing
 
@@ -10,8 +11,7 @@ import Testing
 @Suite("AgentStateTurnTiming")
 struct AgentStateTurnTimingTests {
     private func makeToolResult(id: String, output: String) throws -> ToolResult {
-        let json = #"{"tool_call_id":"\#(id)","name":"read_file","output":"\#(output)","failure_kind":null}"#
-        return try JSONDecoder().decode(ToolResult.self, from: Data(json.utf8))
+        ToolResult(toolCallID: id, name: "read_file", output: .text(output))
     }
 
     @Test("tool events fold with their journaled timestamps, keeping replay deterministic")
@@ -22,9 +22,9 @@ struct AgentStateTurnTimingTests {
 
         state.apply(
             .assistantToolRound(
-                content: "",
-                thinking: nil,
-                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
+                round: ModelToolRound(
+                    calls: [ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:]))]
+                ),
                 at: invokedAt
             )
         )
@@ -44,9 +44,9 @@ struct AgentStateTurnTimingTests {
         state.apply(.turnStarted(at: nil))
         state.apply(
             .assistantToolRound(
-                content: "",
-                thinking: nil,
-                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
+                round: ModelToolRound(
+                    calls: [ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:]))]
+                ),
                 at: Date(timeIntervalSince1970: 1)
             )
         )
@@ -91,9 +91,9 @@ struct AgentStateTurnTimingTests {
         state.apply(.messageReceived(message))
         state.apply(
             .assistantToolRound(
-                content: "",
-                thinking: nil,
-                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
+                round: ModelToolRound(
+                    calls: [ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:]))]
+                ),
                 at: Date(timeIntervalSince1970: 2_001)
             )
         )
@@ -127,9 +127,9 @@ struct AgentStateTurnTimingTests {
         state.apply(.messageReceived(original))
         state.apply(
             .assistantToolRound(
-                content: "",
-                thinking: nil,
-                calls: [ToolCall(id: "call-1", name: "read_file", arguments: ToolArguments(json: "{}"))],
+                round: ModelToolRound(
+                    calls: [ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:]))]
+                ),
                 at: Date(timeIntervalSince1970: 2_001)
             )
         )
@@ -158,27 +158,6 @@ struct AgentStateTurnTimingTests {
         #expect(state.pendingTurnRerun == nil)
     }
 
-    /// Journals written before turn timing existed encode these cases without
-    /// the `at` field; replaying them must still decode and fold.
-    @Test("pre-timing journal entries decode with nil timestamps")
-    func legacyJournalEntriesDecode() throws {
-        let legacyLines = [
-            #"{"turnStarted":{}}"#,
-            #"{"assistantToolRound":{"content":"","calls":[{"id":"c1","name":"read_file","arguments":{"json":"{}"}}],"at":-978307199.0}}"#,
-            #"{"toolResult":{"_0":{"tool_call_id":"c1","name":"read_file","output":"ok","failure_kind":null}}}"#,
-            #"{"turnCompleted":{}}"#,
-        ]
-
-        var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
-        for line in legacyLines {
-            let event = try JSONDecoder().decode(AgentEvent.self, from: Data(line.utf8))
-            state.apply(event)
-        }
-
-        #expect(state.conversationThread.count == 2)
-        #expect(state.activeTurn == nil)
-    }
-
     @Test("replay normalization clears transient status and interrupts running requests")
     func replayNormalizationInterruptsRunningRequest() throws {
         let turnID = TurnID("turn-crashed")
@@ -201,9 +180,11 @@ struct AgentStateTurnTimingTests {
         state.apply(.messageReceived(opening))
         state.apply(
             .assistantToolRound(
-                content: "",
-                thinking: nil,
-                calls: [ToolCall(id: "call-crashed", name: "read_file", arguments: ToolArguments(json: "{}"))],
+                round: ModelToolRound(
+                    calls: [
+                        ToolCall(id: "call-crashed", name: "read_file", arguments: GeneratedContent(properties: [:]))
+                    ]
+                ),
                 at: startedAt
             )
         )

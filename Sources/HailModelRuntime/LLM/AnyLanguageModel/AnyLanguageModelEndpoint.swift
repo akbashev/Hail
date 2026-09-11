@@ -17,105 +17,38 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         modelIdentifier: String,
         temperature: Double,
         effectiveContextWindow: Int? = nil,
-        countTokens: (@Sendable ([LLMMessage], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
-        countInputTokens: (@Sendable (ModelInput, [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
+        countTokens: (@Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
         generationOptions: GenerationOptions? = nil
     ) {
         self.languageModel = languageModel
         self.model = modelIdentifier
         self.generationOptions = generationOptions ?? GenerationOptions(temperature: temperature)
         self.effectiveContextWindow = effectiveContextWindow
-        if let countInputTokens {
-            self.tokenCounting = .availableInput(countInputTokens)
-        } else {
-            self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
-        }
+        self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
     }
 
-    public func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?
-    ) -> AsyncStream<ModelEvent<String>> {
-        AsyncStream(ModelEvent<String>.self) { continuation in
+    public func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
+        tools: [AnyTool],
+        authority: any Authority,
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where
+        Input: Sendable,
+        Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
+    {
+        AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
                 do {
-                    let mapped = try TranscriptMapping.transcriptAndPrompt(from: input)
+                    let mapped = try TranscriptMapping.transcriptAndPrompt(from: entries)
 
-                    continuation.yield(.status("Generating..."))
+                    continuation.yield(.activity(.status(GeneratedContent("Generating..."))))
 
-                    let adaptedTools = (tools ?? []).map { SchemaOnlyAnyLanguageModelTool($0) }
-                    let session = LanguageModelSession(
-                        model: languageModel,
-                        tools: adaptedTools,
-                        transcript: mapped.transcript
-                    )
-
-                    // Keep Hail in control of tool execution.
-                    let delegate = StopOnToolCallsDelegate()
-                    session.toolExecutionDelegate = delegate
-
-                    let stream = session.streamResponse(
-                        to: mapped.prompt,
-                        generating: String.self,
-                        options: generationOptions
-                    )
-
-                    var accumulatedText = ""
-                    for try await snapshot in stream {
-                        guard case .string(let snapshotText) = snapshot.rawContent.kind else {
-                            continue
-                        }
-                        let delta = Self.textDelta(
-                            from: snapshotText,
-                            after: &accumulatedText
-                        )
-                        if !delta.isEmpty {
-                            continuation.yield(.text(delta))
-                        }
+                    let adaptedTools = tools.map {
+                        AuthorizedAnyLanguageModelTool(tool: $0, authority: authority)
                     }
-
-                    let generatedCalls = await delegate.generatedToolCalls
-                    if !generatedCalls.isEmpty {
-                        for call in generatedCalls {
-                            continuation.yield(.status("Calling \(call.toolName)."))
-                            continuation.yield(
-                                .toolCall(
-                                    ToolCall(
-                                        id: call.id,
-                                        name: call.toolName,
-                                        arguments: ToolArguments(json: call.arguments.jsonString)
-                                    )))
-                        }
-                    } else {
-                        continuation.yield(.generated(accumulatedText))
-                    }
-
-                    continuation.finish()
-                } catch is CancellationError {
-                    continuation.yield(.failed(ModelEndpointError.cancelled))
-                    continuation.finish()
-                } catch {
-                    continuation.yield(.failed(ModelEndpointError.requestFailed(String(describing: error))))
-                    continuation.finish()
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
-    public func stream<T: AgentOutput>(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        AsyncStream(ModelEvent<T>.self) { continuation in
-            let task = Task {
-                do {
-                    let mapped = try TranscriptMapping.transcriptAndPrompt(from: input)
-
-                    continuation.yield(.status("Generating..."))
-
-                    let adaptedTools = (tools ?? []).map { SchemaOnlyAnyLanguageModelTool($0) }
                     let session = LanguageModelSession(
                         model: languageModel,
                         tools: adaptedTools,
@@ -127,19 +60,18 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
 
                     let stream = session.streamResponse(
                         to: mapped.prompt,
-                        generating: responseType,
-                        options: generationOptions
+                        generating: outputType,
+                        options: Self.options(generationOptions, for: purpose)
                     )
 
-                    var lastComplete: T?
+                    var lastComplete: Output?
                     var accumulatedText = ""
-                    let isPlainText: Bool
-                    switch T.outputContract {
-                    case .plainText:
-                        isPlainText = true
-                    case .reportTool:
-                        isPlainText = false
-                    }
+                    var narrationSegments: [Transcript.Segment] = []
+                    // This is only an adapter-level rendering decision for
+                    // observer activity. The requested output contract is
+                    // `T` itself; Hail does not classify it as plain text or
+                    // a report tool.
+                    let isPlainText = Output.self == String.self
                     for try await snapshot in stream {
                         if isPlainText,
                             case .string(let snapshotText) = snapshot.rawContent.kind
@@ -149,7 +81,10 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                                 after: &accumulatedText
                             )
                             if !delta.isEmpty {
-                                continuation.yield(.text(delta))
+                                narrationSegments.append(
+                                    .text(.init(content: delta))
+                                )
+                                continuation.yield(.activity(.narrationDelta(GeneratedContent(delta))))
                             }
                             // String is itself Generable. Keep the text delta
                             // for chat consumers, while also exposing the
@@ -160,31 +95,44 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                         }
 
                         if snapshot.rawContent.isComplete {
-                            if let typed = snapshot.content as? T {
+                            if let typed = snapshot.content as? Output {
                                 lastComplete = typed
                             } else {
-                                lastComplete = try T(snapshot.rawContent)
+                                lastComplete = try Output(snapshot.rawContent)
                             }
                         }
                     }
 
                     let generatedCalls = await delegate.generatedToolCalls
                     if !generatedCalls.isEmpty {
-                        for call in generatedCalls {
-                            continuation.yield(.status("Calling \(call.toolName)."))
-                            continuation.yield(
-                                .toolCall(
-                                    ToolCall(
-                                        id: call.id,
-                                        name: call.toolName,
-                                        arguments: ToolArguments(json: call.arguments.jsonString)
-                                    )))
+                        let calls = generatedCalls.map { call in
+                            ToolCall(
+                                id: call.id,
+                                name: call.toolName,
+                                arguments: call.arguments
+                            )
                         }
+                        let narration =
+                            narrationSegments.isEmpty
+                            ? nil
+                            : Transcript.Response(
+                                assetIDs: [],
+                                segments: narrationSegments
+                            )
+                        for call in calls {
+                            continuation.yield(.activity(.status(GeneratedContent("Calling \(call.name)."))))
+                        }
+                        continuation.yield(
+                            .toolsRequested(
+                                ModelToolRound(
+                                    narration: narration,
+                                    calls: calls
+                                )))
                     } else if let outcome = lastComplete {
                         continuation.yield(.generated(outcome))
                     } else {
                         continuation.yield(
-                            .failed(ModelEndpointError.invalidResponse("No complete structured response")))
+                            .failed(ModelEndpointError.invalidResponse("No complete generated response")))
                     }
 
                     continuation.finish()
@@ -198,6 +146,17 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    private static func options(
+        _ base: GenerationOptions,
+        for purpose: ModelRequestPurpose
+    ) -> GenerationOptions {
+        var options = base
+        if case .compaction(let maxOutputTokens) = purpose {
+            options.maximumResponseTokens = maxOutputTokens
+        }
+        return options
     }
 
     /// AnyLanguageModel response streams expose the content generated so far,
@@ -220,33 +179,6 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         accumulated = snapshot
         return snapshot
     }
-}
-
-// MARK: - Tool adapter
-
-/// A lightweight wrapper that lets us build AnyLanguageModel tools directly from
-/// a ``ToolDefinition`` without requiring a full Hail ``Tool`` instance.
-private struct SchemaOnlyAnyLanguageModelTool: AnyLanguageModel.Tool {
-    typealias Arguments = GeneratedContent
-    typealias Output = String
-
-    let name: String
-    let description: String
-    let parameters: GenerationSchema
-
-    init(_ definition: ToolDefinition) {
-        self.name = definition.name
-        self.description = definition.description
-        self.parameters = definition.parameters
-    }
-
-    func call(arguments: GeneratedContent) async throws -> String {
-        // This path is never reached because we stop on tool calls and execute
-        // through Hail's ToolRegistry. The adapter only exists to register
-        // the schema with the session.
-        return ""
-    }
-
 }
 
 // MARK: - Delegate

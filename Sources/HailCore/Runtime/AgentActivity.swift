@@ -1,3 +1,5 @@
+import AnyLanguageModel
+
 #if canImport(FoundationEssentials)
     import FoundationEssentials
 #else
@@ -33,10 +35,10 @@ public enum AgentActivity: Codable, Sendable, Equatable {
     /// The work reported while a turn runs — status lines, reasoning traces,
     /// streamed reply text, and tool calls.
     public enum Progress: Codable, Sendable, Equatable {
-        case status(String)
+        case status(GeneratedContent)
         /// Model reasoning output (distinct from reply text).
-        case reasoning(String)
-        case text(String)
+        case reasoning(GeneratedContent)
+        case narration(GeneratedContent)
         case tool(name: String)
         /// Token usage reported by the model provider for the current request.
         case usage(ModelUsage)
@@ -59,7 +61,7 @@ public enum AgentActivity: Codable, Sendable, Equatable {
         }
     }
 
-    public var statusMessage: String? {
+    public var statusMessage: GeneratedContent? {
         switch self {
         case .turn(.progress(.status(let message)), _):
             return message

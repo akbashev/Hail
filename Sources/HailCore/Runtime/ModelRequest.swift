@@ -1,3 +1,5 @@
+import AnyLanguageModel
+
 #if canImport(FoundationEssentials)
     import FoundationEssentials
 #else
@@ -264,9 +266,9 @@ public struct ToolHistoryRecord: Codable, Sendable, Equatable {
 
 public struct CompactionHistoryRecord: Codable, Sendable, Equatable {
     public let archivedCount: Int
-    public let summary: String
+    public let summary: GeneratedContent
 
-    public init(archivedCount: Int, summary: String) {
+    public init(archivedCount: Int, summary: GeneratedContent) {
         self.archivedCount = archivedCount
         self.summary = summary
     }
@@ -331,8 +333,8 @@ public struct AgentHistoryReader: Sendable, Equatable {
             modelRequests[index].completedAt = at
             modelRequests[index].durationMilliseconds = durationMilliseconds
             modelRequests[index].outcome = .failed(error)
-        case .assistantToolRound(_, _, let calls, let at):
-            tools.append(contentsOf: calls.map { ToolHistoryRecord(call: $0, startedAt: at) })
+        case .assistantToolRound(let round, let at):
+            tools.append(contentsOf: round.calls.map { ToolHistoryRecord(call: $0, startedAt: at) })
         case .toolResult(let result, let at):
             guard let index = tools.lastIndex(where: { $0.call.id == result.toolCallID }) else { return }
             tools[index].result = result

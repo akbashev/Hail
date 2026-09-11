@@ -121,71 +121,40 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
 
     // MARK: - ModelEndpoint
 
-    public func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?
-    ) -> AsyncStream<ModelEvent<String>> {
-        AsyncStream(ModelEvent<String>.self) { continuation in
+    public func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
+        tools: [AnyTool],
+        authority turnAuthority: any Authority,
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
+        streamPlainText(
+            entries: entries,
+            authority: turnAuthority,
+            responseType: outputType,
+            purpose: purpose
+        )
+    }
+
+    private func streamPlainText<Output>(
+        entries: [Transcript.Entry],
+        authority turnAuthority: any Authority,
+        responseType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
+        _ = purpose
+        return AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
                 do {
-                    let messages = try input.textMessages(for: model)
-                    continuation.yield(.status("Claude CLI is running."))
-                    let prompt = Self.formatPrompt(messages: messages, reportToolName: nil)
+                    continuation.yield(.activity(.status(GeneratedContent("Claude CLI is running."))))
+                    let prompt = Self.formatPrompt(entries: entries, reportToolName: nil)
                     let outcome = try await runTurn(
                         prompt: prompt,
                         reportToolNames: [],
-                        authority: authority,
-                        onNarration: { Self.forward($0, to: continuation) }
-                    )
-                    if outcome.isError {
-                        continuation.yield(
-                            .failed(ModelEndpointError.requestFailed(outcome.errorText ?? "claude -p failed")))
-                    } else {
-                        continuation.yield(.generated(outcome.finalText))
-                    }
-                    continuation.finish()
-                } catch is CancellationError {
-                    continuation.yield(.failed(ModelEndpointError.cancelled))
-                    continuation.finish()
-                } catch let modelError as ModelEndpointError {
-                    continuation.yield(.failed(modelError))
-                    continuation.finish()
-                } catch {
-                    continuation.yield(.failed(ModelEndpointError.requestFailed(String(describing: error))))
-                    continuation.finish()
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
-    public func stream<T: AgentOutput>(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        switch T.outputContract {
-        case .plainText:
-            return streamPlainText(input: input, responseType: T.self)
-        case .reportTool(let name, _):
-            return streamStructured(input: input, reportToolName: name, responseType: T.self)
-        }
-    }
-
-    private func streamPlainText<T: AgentOutput>(
-        input: ModelInput,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        AsyncStream(ModelEvent<T>.self) { continuation in
-            let task = Task {
-                do {
-                    let messages = try input.textMessages(for: model)
-                    continuation.yield(.status("Claude CLI is running."))
-                    let prompt = Self.formatPrompt(messages: messages, reportToolName: nil)
-                    let outcome = try await runTurn(
-                        prompt: prompt,
-                        reportToolNames: [],
-                        authority: authority,
+                        authority: turnAuthority,
                         onNarration: { Self.forward($0, to: continuation) }
                     )
                     guard !outcome.isError else {
@@ -195,12 +164,12 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
                         return
                     }
                     if let value = CLIEndpointSupport.decodeOutcome(
-                        fromText: outcome.finalText, as: T.self, logger: claudeLogger)
+                        fromText: outcome.finalText, as: Output.self, logger: claudeLogger)
                     {
                         continuation.yield(.generated(value))
                     } else {
                         continuation.yield(
-                            .failed(ModelEndpointError.decodingError("Claude CLI output is not \(T.self)")))
+                            .failed(ModelEndpointError.decodingError("Claude CLI output is not \(Output.self)")))
                     }
                     continuation.finish()
                 } catch is CancellationError {
@@ -218,22 +187,23 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
         }
     }
 
-    private func streamStructured<T: AgentOutput>(
-        input: ModelInput,
+    private func streamStructured<Output>(
+        entries: [Transcript.Entry],
+        authority turnAuthority: any Authority,
         reportToolName: String,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        AsyncStream(ModelEvent<T>.self) { continuation in
+        responseType: Output.Type
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
+        return AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
                 do {
-                    let messages = try input.textMessages(for: model)
-                    continuation.yield(.status("Claude CLI is running."))
-                    let prompt = Self.formatPrompt(messages: messages, reportToolName: reportToolName)
+                    continuation.yield(.activity(.status(GeneratedContent("Claude CLI is running."))))
+                    let prompt = Self.formatPrompt(entries: entries, reportToolName: reportToolName)
                     let reportToolNames = [reportToolName, "mcp__hail__\(reportToolName)"]
                     let outcome = try await runTurn(
                         prompt: prompt,
                         reportToolNames: reportToolNames,
-                        authority: authority,
+                        authority: turnAuthority,
                         onNarration: { Self.forward($0, to: continuation) }
                     )
                     guard !outcome.isError else {
@@ -246,9 +216,9 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
                     // report tool the agent called inside its own loop.
                     if let reportJSON = outcome.reportJSON,
                         let value = CLIEndpointSupport.decodeOutcome(
-                            fromJSON: reportJSON, as: T.self, logger: claudeLogger)
+                            fromJSON: reportJSON, as: Output.self, logger: claudeLogger)
                     {
-                        continuation.yield(.status("Outcome received."))
+                        continuation.yield(.activity(.status(GeneratedContent("Outcome received."))))
                         continuation.yield(.generated(value))
                     } else {
                         continuation.yield(
@@ -276,8 +246,8 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     // MARK: - Turn execution
 
     private enum Narration {
-        case text(String)
-        case thinking(String)
+        case narrationDelta(String)
+        case reasoningDelta(String)
         case status(String)
     }
 
@@ -299,9 +269,9 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
         to continuation: AsyncStream<ModelEvent<Output>>.Continuation
     ) {
         switch narration {
-        case .text(let text): continuation.yield(.text(text))
-        case .thinking(let text): continuation.yield(.thinking(text))
-        case .status(let status): continuation.yield(.status(status))
+        case .narrationDelta(let text): continuation.yield(.activity(.narrationDelta(GeneratedContent(text))))
+        case .reasoningDelta(let text): continuation.yield(.activity(.reasoningDelta(GeneratedContent(text))))
+        case .status(let status): continuation.yield(.activity(.status(GeneratedContent(status))))
         }
     }
 
@@ -453,11 +423,11 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
                 case "text":
                     if let text = block["text"] as? String {
                         state.assistantText += text
-                        onNarration(.text(text))
+                        onNarration(.narrationDelta(text))
                     }
                 case "thinking":
                     if let text = block["thinking"] as? String {
-                        onNarration(.thinking(text))
+                        onNarration(.reasoningDelta(text))
                     }
                 case "tool_use":
                     let name = block["name"] as? String ?? "tool"
@@ -556,20 +526,19 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
     /// Formats the transcript into a single prompt (system context first), and
     /// appends an instruction to finish by calling the report tool — the agent
     /// does the work with its own tools, then reports the structured outcome.
-    private static func formatPrompt(messages: [LLMMessage], reportToolName: String?) -> String {
-        let systemText = messages.filter { $0.role == .system }
-            .map(\.content)
-            .joined(separator: "\n\n")
-        let transcript = messages.filter { $0.role != .system }
-            .map { message -> String in
-                switch message.role {
-                case .system: return message.content
-                case .user: return "User: \(message.content)"
-                case .assistant: return "Assistant: \(message.content)"
-                case .tool: return "Tool result: \(message.content)"
-                }
-            }
-            .joined(separator: "\n\n")
+    private static func formatPrompt(entries: [Transcript.Entry], reportToolName: String?) -> String {
+        let systemText = entries.filter {
+            if case .instructions = $0 { return true }
+            return false
+        }
+        .map(Self.text)
+        .joined(separator: "\n\n")
+        let transcript = entries.filter {
+            if case .instructions = $0 { return false }
+            return true
+        }
+        .map(Self.text)
+        .joined(separator: "\n\n")
 
         var parts: [String] = []
         if !systemText.isEmpty { parts.append(systemText) }
@@ -581,6 +550,26 @@ public struct ClaudeCliEndpoint: ModelEndpoint {
                     + "`\(reportToolName)` tool with the structured outcome.")
         }
         return parts.joined(separator: "\n\n")
+    }
+
+    private static func text(_ entry: Transcript.Entry) -> String {
+        switch entry {
+        case .instructions(let value): return render(value.segments)
+        case .prompt(let value): return "User: \(render(value.segments))"
+        case .response(let value): return "Assistant: \(render(value.segments))"
+        case .toolCalls(let value): return "Assistant tool calls: \(value.id)"
+        case .toolOutput(let value): return "Tool result: \(render(value.segments))"
+        }
+    }
+
+    private static func render(_ segments: [Transcript.Segment]) -> String {
+        segments.map { segment in
+            switch segment {
+            case .text(let text): return text.content
+            case .structure(let value): return value.content.jsonString
+            case .image: return "[image]"
+            }
+        }.joined(separator: "\n")
     }
 
     private static func exitCode(from status: TerminationStatus) -> Int {
@@ -608,25 +597,22 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
     /// this endpoint has no model-facing effect surface of its own (fs/terminal
     /// reach Hail through the MCP tools, not through a delegate), and the
     /// process spawn is infrastructure scoped against the creation authority.
-    public func stream<T: AgentOutput>(
-        input: ModelInput,
+    public func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
         delta turnDelta: TurnDelta,
         authority: any Authority,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        let reportToolName: String?
-        switch T.outputContract {
-        case .plainText:
-            reportToolName = nil
-        case .reportTool(let name, _):
-            reportToolName = name
-        }
+        tools: [AnyTool],
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
         return sessionStream(
-            input: input,
+            entries: entries,
             delta: turnDelta,
-            reportToolName: reportToolName,
-            responseType: T.self
+            reportToolName: nil,
+            generating: outputType,
+            purpose: purpose
         )
     }
 
@@ -639,24 +625,26 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
     /// arguments), not a model-decided effect, so it is always scoped against
     /// the endpoint's creation authority — a deny-everything lane must not
     /// make the turn itself impossible.
-    private func sessionStream<T: AgentOutput>(
-        input: ModelInput,
+    private func sessionStream<Output>(
+        entries: [Transcript.Entry],
         delta turnDelta: TurnDelta,
         reportToolName: String?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        AsyncStream(ModelEvent<T>.self) { continuation in
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
+        _ = purpose
+        return AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
                 do {
-                    let messages = try input.textMessages(for: model)
-                    continuation.yield(.status("Claude CLI is running."))
+                    continuation.yield(.activity(.status(GeneratedContent("Claude CLI is running."))))
 
                     let prompt: String
                     let resumeID: SessionID?
                     let snapshot = sessionState.snapshot
                     if let sessionID = snapshot.sessionID, snapshot.identity == turnDelta.sessionIdentity {
                         prompt = Self.formatPrompt(
-                            messages: turnDelta.current.messages,
+                            entries: turnDelta.current.entries,
                             reportToolName: reportToolName
                         )
                         resumeID = sessionID
@@ -672,7 +660,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
                         sessionState.reset(
                             identity: turnDelta.sessionIdentity
                         )
-                        prompt = Self.formatPrompt(messages: messages, reportToolName: reportToolName)
+                        prompt = Self.formatPrompt(entries: entries, reportToolName: reportToolName)
                         resumeID = nil
                         claudeLogger.info(
                             "Bootstrapping fresh claude session with full transcript",
@@ -705,7 +693,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
                         )
                         sessionState.setSessionID(nil)
                         outcome = try await runTurn(
-                            prompt: Self.formatPrompt(messages: messages, reportToolName: reportToolName),
+                            prompt: Self.formatPrompt(entries: entries, reportToolName: reportToolName),
                             resumeSessionID: nil,
                             reportToolNames: reportToolNames,
                             authority: authority,
@@ -727,7 +715,7 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
                     if let reportToolName {
                         guard let reportJSON = outcome.reportJSON,
                             let value = CLIEndpointSupport.decodeOutcome(
-                                fromJSON: reportJSON, as: T.self, logger: claudeLogger)
+                                fromJSON: reportJSON, as: Output.self, logger: claudeLogger)
                         else {
                             continuation.yield(
                                 .failed(
@@ -737,15 +725,15 @@ extension ClaudeCliEndpoint: SessionOwningEndpoint {
                             continuation.finish()
                             return
                         }
-                        continuation.yield(.status("Outcome received."))
+                        continuation.yield(.activity(.status(GeneratedContent("Outcome received."))))
                         continuation.yield(.generated(value))
                     } else if let value = CLIEndpointSupport.decodeOutcome(
-                        fromText: outcome.finalText, as: T.self, logger: claudeLogger)
+                        fromText: outcome.finalText, as: Output.self, logger: claudeLogger)
                     {
                         continuation.yield(.generated(value))
                     } else {
                         continuation.yield(
-                            .failed(ModelEndpointError.decodingError("Claude CLI output is not \(T.self)")))
+                            .failed(ModelEndpointError.decodingError("Claude CLI output is not \(Output.self)")))
                     }
                     continuation.finish()
                 } catch is CancellationError {

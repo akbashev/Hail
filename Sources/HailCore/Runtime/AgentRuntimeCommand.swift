@@ -29,7 +29,8 @@ public struct AgentWorkerReference: Sendable {
     }
 }
 
-public enum AgentRunEvent<Output: AgentOutput>: Codable, Sendable {
+public enum AgentRunEvent<Output>: Codable, Sendable
+where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
     case runStarted(agentID: AgentID, at: Date)
     case messageHandled(message: ChatMessage, at: Date)
     /// A cumulative structured snapshot produced while the model is still
@@ -43,26 +44,4 @@ public enum AgentRunEvent<Output: AgentOutput>: Codable, Sendable {
     case responseRecorded(content: Output, at: Date)
     case runCompleted(at: Date)
     case runFailed(error: AgentRuntimeError, at: Date)
-}
-
-public struct AgentRunSnapshot<Output: AgentOutput>: Codable, Sendable {
-    public let events: [AgentRunEvent<Output>]
-    public let response: Output?
-
-    public init(events: [AgentRunEvent<Output>], response: Output?) {
-        self.events = events
-        self.response = response
-    }
-}
-
-public enum AgentRunChange<Output: AgentOutput>: Codable, Sendable {
-    case event(AgentRunEvent<Output>)
-    case snapshot(AgentRunSnapshot<Output>)
-}
-
-/// The typed turn channel: control, typed partial snapshots, and the typed
-/// outcome. Ephemeral narration (status/thinking/text/tool) rides
-/// ``AgentActivity`` instead.
-public enum AgentUpdate<Output: AgentOutput>: Codable, Sendable {
-    case run(AgentRunChange<Output>)
 }

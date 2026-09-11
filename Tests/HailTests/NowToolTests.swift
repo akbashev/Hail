@@ -17,14 +17,14 @@ struct NowToolTests {
         let result = try await withDependencies {
             $0.date = .fixed(expected)
         } operation: {
-            try await NowTool().run(
+            try await NowTool().runOutput(
                 input: .init(timeZone: "Europe/Berlin"),
                 authority: FullAuthority()
             )
         }
 
-        #expect(result.contains("UTC instant: \(expected.ISO8601Format())"))
-        #expect(result.contains("Local (Europe/Berlin):"))
+        #expect(result.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(result.textRepresentation.contains("Local (Europe/Berlin):"))
     }
 
     @Test("renders the wall clock in the explicitly requested timezone")
@@ -33,14 +33,14 @@ struct NowToolTests {
         let result = try await withDependencies {
             $0.date = .fixed(expected)
         } operation: {
-            try await NowTool().run(
+            try await NowTool().runOutput(
                 input: .init(timeZone: "America/New_York"),
                 authority: FullAuthority()
             )
         }
 
-        #expect(result.contains("Local (America/New_York):"))
-        #expect(result.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(result.textRepresentation.contains("Local (America/New_York):"))
+        #expect(result.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
     }
 
     @Test("withDependencies changes the clock seen by tools")
@@ -51,18 +51,18 @@ struct NowToolTests {
         let overridden = try await withDependencies {
             $0.date = .fixed(expected)
         } operation: {
-            try await NowTool().run(
+            try await NowTool().runOutput(
                 input: .init(timeZone: utc.identifier),
                 authority: FullAuthority()
             )
         }
-        let live = try await NowTool().run(
+        let live = try await NowTool().runOutput(
             input: .init(timeZone: utc.identifier),
             authority: FullAuthority()
         )
 
-        #expect(overridden.contains("UTC instant: \(expected.ISO8601Format())"))
-        #expect(!live.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(overridden.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(!live.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
     }
 
     @Test("requires an explicit timezone")

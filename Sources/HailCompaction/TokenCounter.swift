@@ -83,7 +83,7 @@ public struct TokenCounter: Sendable {
     }
 
     public func count(
-        messages: [LLMMessage],
+        messages: [Transcript.Entry],
         tools: [ToolDefinition] = []
     ) throws -> Int {
         let prompt = messages.map(message)
@@ -91,30 +91,46 @@ public struct TokenCounter: Sendable {
         return try tokenizer.applyChatTemplate(messages: prompt, tools: toolSpecs).count
     }
 
-    private func message(_ message: LLMMessage) -> [String: any Sendable] {
-        var result: [String: any Sendable] = [
-            "role": message.role.rawValue,
-            "content": message.content,
-        ]
-        if let name = message.name {
-            result["name"] = name
+    private func message(_ entry: Transcript.Entry) -> [String: any Sendable] {
+        switch entry {
+        case .instructions(let instructions):
+            return ["role": "system", "content": render(instructions.segments)]
+        case .prompt(let prompt):
+            return ["role": "user", "content": render(prompt.segments)]
+        case .response(let response):
+            return ["role": "assistant", "content": render(response.segments)]
+        case .toolCalls(let calls):
+            return [
+                "role": "assistant",
+                "content": "",
+                "tool_calls": calls.map { call in
+                    [
+                        "id": call.id,
+                        "type": "function",
+                        "function": [
+                            "name": call.toolName,
+                            "arguments": call.arguments.jsonString,
+                        ] as [String: any Sendable],
+                    ] as [String: any Sendable]
+                },
+            ]
+        case .toolOutput(let output):
+            return [
+                "role": "tool",
+                "content": render(output.segments),
+                "tool_call_id": output.id,
+            ]
         }
-        if let toolCallID = message.toolCallID {
-            result["tool_call_id"] = toolCallID
-        }
-        if let calls = message.toolCalls, !calls.isEmpty {
-            result["tool_calls"] = calls.map { call in
-                [
-                    "id": call.id,
-                    "type": call.type,
-                    "function": [
-                        "name": call.function.name,
-                        "arguments": call.function.arguments,
-                    ] as [String: any Sendable],
-                ] as [String: any Sendable]
+    }
+
+    private func render(_ segments: [Transcript.Segment]) -> String {
+        segments.map { segment in
+            switch segment {
+            case .text(let text): return text.content
+            case .structure(let structure): return structure.content.jsonString
+            case .image: return "[image]"
             }
-        }
-        return result
+        }.joined(separator: "\n")
     }
 
     private func tool(_ tool: ToolDefinition) -> [String: any Sendable] {

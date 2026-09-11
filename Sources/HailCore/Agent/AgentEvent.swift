@@ -1,3 +1,5 @@
+import AnyLanguageModel
+
 #if canImport(FoundationEssentials)
     import FoundationEssentials
 #else
@@ -16,20 +18,15 @@ public enum AgentEvent: Codable, Sendable {
     /// The exact assistant message sent before executing a tool round. Keeping
     /// narration, provider reasoning, and calls together matters for model
     /// protocols that require reasoning to accompany tool calls.
-    case assistantToolRound(
-        content: String,
-        thinking: String?,
-        calls: [ToolCall],
-        at: Date
-    )
+    case assistantToolRound(round: ModelToolRound, at: Date)
     case toolResult(ToolResult, at: Date?)
     /// The oldest `archivedCount` thread entries were compacted into
     /// `summary`, which replaces ``AgentState/contextSummary`` (rolling
     /// summary). One atomic event: the summary is a non-deterministic fold
     /// of the archived prefix, so it must be journaled with the boundary —
     /// a snapshot-less replay cannot reproduce it otherwise.
-    case conversationCompacted(archivedCount: Int, summary: String)
-    case responseReceived(sender: String, payload: Data, at: Date)
+    case conversationCompacted(archivedCount: Int, content: GeneratedContent)
+    case responseReceived(sender: String, content: GeneratedContent, at: Date)
     case turnFailed(error: AgentRuntimeError, at: Date)
     case turnCompleted(at: Date?)
     /// Durable per-request accounting. Providers may report only a subset of
@@ -70,15 +67,10 @@ public enum AgentEvent: Codable, Sendable {
 /// at the boundary by comparing the sender with the agent being addressed.
 public enum ChatMessage: Codable, Sendable, Equatable {
     case text(sender: String, content: String, timestamp: Date)
-    case response(sender: String, payload: Data, timestamp: Date)
+    case response(sender: String, content: GeneratedContent, timestamp: Date)
     case toolCall(calls: [ToolCall], timestamp: Date)
-    case assistantToolCall(
-        content: String,
-        thinking: String?,
-        calls: [ToolCall],
-        timestamp: Date
-    )
-    case toolResult(id: String, content: String, timestamp: Date)
+    case assistantToolCall(round: ModelToolRound, timestamp: Date)
+    case toolResult(id: String, name: String, output: ToolOutput, timestamp: Date)
     /// A turn that failed (model error, rate limit, ...). Journaled so the
     /// failure stays visible in the transcript after a reload; prompt
     /// assembly skips it — the model never sees its own turn failures.
@@ -97,8 +89,8 @@ public enum ChatMessage: Codable, Sendable, Equatable {
     public var timestamp: Date {
         switch self {
         case .text(_, _, let timestamp), .response(_, _, let timestamp), .toolCall(_, let timestamp),
-            .assistantToolCall(_, _, _, let timestamp),
-            .toolResult(_, _, let timestamp), .failure(_, let timestamp),
+            .assistantToolCall(_, let timestamp),
+            .toolResult(_, _, _, let timestamp), .failure(_, let timestamp),
             .decisionRequest(_, _, _, let timestamp), .decisionResolved(_, _, _, _, let timestamp):
             return timestamp
         }
@@ -132,9 +124,11 @@ public struct ChatDecisionOption: Codable, Sendable, Equatable, Hashable {
 public struct ToolCall: Codable, Sendable, Equatable {
     public let id: String
     public let name: String
-    public let arguments: ToolArguments
+    /// Provider-native generated arguments. Hail does not round-trip a tool
+    /// call through a JSON string before authorizing or executing it.
+    public let arguments: GeneratedContent
 
-    public init(id: String, name: String, arguments: ToolArguments) {
+    public init(id: String, name: String, arguments: GeneratedContent) {
         self.id = id
         self.name = name
         self.arguments = arguments
@@ -155,7 +149,7 @@ public enum ToolFailureKind: String, Codable, Sendable, Equatable {
 public struct ToolResult: Codable, Sendable, Equatable {
     public let toolCallID: String
     public let name: String
-    public let output: String
+    public let output: ToolOutput
     public let failureKind: ToolFailureKind?
 
     public var isError: Bool { failureKind != nil }
@@ -163,7 +157,7 @@ public struct ToolResult: Codable, Sendable, Equatable {
     public init(
         toolCallID: String,
         name: String,
-        output: String,
+        output: ToolOutput,
         failureKind: ToolFailureKind? = nil
     ) {
         self.toolCallID = toolCallID

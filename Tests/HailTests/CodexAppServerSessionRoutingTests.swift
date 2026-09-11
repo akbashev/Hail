@@ -1,3 +1,5 @@
+import AnyLanguageModel
+import HailCore
 import ScopedEffect
 import Testing
 
@@ -11,6 +13,18 @@ import Testing
 
 @Suite("Codex App Server session routing")
 struct CodexAppServerSessionRoutingTests {
+    private func instruction(_ content: String) -> Transcript.Entry {
+        .instructions(.init(segments: [.text(.init(content: content))], toolDefinitions: []))
+    }
+
+    private func prompt(_ content: String) -> Transcript.Entry {
+        .prompt(.init(segments: [.text(.init(content: content))]))
+    }
+
+    private func response(_ content: String) -> Transcript.Entry {
+        .response(.init(assetIDs: [], segments: [.text(.init(content: content))]))
+    }
+
     @Test("native wire omits JSON-RPC header and encodes approval decisions")
     func nativeWireShape() throws {
         let request = CodexRPCRequest(
@@ -105,41 +119,43 @@ struct CodexAppServerSessionRoutingTests {
             reasoningEffort: .xhigh
         )
 
-        func turn(_ messages: [LLMMessage], _ delta: [LLMMessage], _ identity: String) async -> (
+        func turn(_ messages: [Transcript.Entry], _ delta: [Transcript.Entry], _ identity: String) async -> (
             String?, Bool
         ) {
             var output: String?
             var sawThinking = false
             for await event in endpoint.stream(
-                input: ModelInput(messages: messages),
+                input: "",
+                entries: messages,
                 delta: TurnDelta(
-                    currentMessages: delta, sessionIdentity: SessionIdentity(identity)),
+                    currentEntries: delta, sessionIdentity: SessionIdentity(identity)),
                 authority: FullAuthority(),
-                tools: nil,
-                responseType: String.self
+                tools: [],
+                generating: String.self,
+                purpose: .generation
             ) {
                 if case .generated(let value) = event { output = value }
-                if case .thinking = event { sawThinking = true }
+                if case .activity(.reasoningDelta) = event { sawThinking = true }
             }
             return (output, sawThinking)
         }
 
         let firstMessages = [
-            LLMMessage(role: .system, content: "SYSTEM"),
-            LLMMessage(role: .user, content: "FIRST"),
+            instruction("SYSTEM"),
+            prompt("FIRST"),
         ]
         let firstTurn = await turn(firstMessages, firstMessages, "identity-A")
         #expect(firstTurn.0 == "OK")
         #expect(firstTurn.1)
         let secondTurn = await turn(
             firstMessages + [
-                LLMMessage(role: .assistant, content: "OK"),
-                LLMMessage(role: .user, content: "SECOND"),
-            ], [LLMMessage(role: .user, content: "SECOND")], "identity-A")
+                response("OK"),
+                prompt("SECOND"),
+            ], [prompt("SECOND")], "identity-A")
         #expect(secondTurn.0 == "OK")
         let thirdTurn = await turn(
             firstMessages,
-            [LLMMessage(role: .user, content: "THIRD")],
+            [prompt("THIRD")],
             "identity-B"
         )
         #expect(thirdTurn.0 == "OK")
@@ -238,19 +254,21 @@ struct CodexAppServerSessionRoutingTests {
             workingDirectory: directory.path,
             executablePath: stub.path
         )
-        let messages = [LLMMessage(role: .user, content: "WORK")]
+        let messages = [prompt("WORK")]
 
         func turn(authority: any Authority) async -> String? {
             var output: String?
             for await event in endpoint.stream(
-                input: ModelInput(messages: messages),
+                input: "",
+                entries: messages,
                 delta: TurnDelta(
-                    currentMessages: messages,
+                    currentEntries: messages,
                     sessionIdentity: SessionIdentity("authority-test")
                 ),
                 authority: authority,
-                tools: nil,
-                responseType: String.self
+                tools: [],
+                generating: String.self,
+                purpose: .generation
             ) {
                 if case .generated(let value) = event { output = value }
             }

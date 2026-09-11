@@ -9,7 +9,7 @@ import HailCore
 /// effect token with the supplied authority.
 struct AuthorizedAnyLanguageModelTool: AnyLanguageModel.Tool {
     typealias Arguments = GeneratedContent
-    typealias Output = String
+    typealias Output = GeneratedContent
 
     private let tool: AnyTool
     private let authority: any Authority
@@ -23,10 +23,10 @@ struct AuthorizedAnyLanguageModelTool: AnyLanguageModel.Tool {
     var description: String { tool.description }
     var parameters: GenerationSchema { tool.schema.parameters }
 
-    func call(arguments: GeneratedContent) async throws -> String {
-        try await tool.run(
+    func call(arguments: GeneratedContent) async throws -> GeneratedContent {
+        try await tool.runOutput(
             generatedContent: arguments,
             authority: authority
-        )
+        ).modelContent()
     }
 }

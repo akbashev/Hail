@@ -16,6 +16,15 @@ struct OllamaHTTPResponse: Sendable {
 
 typealias OllamaTransport = @Sendable (Data) async throws -> OllamaHTTPResponse
 
+private enum OllamaEvent: Sendable {
+    case activity(ModelActivity)
+    case toolsRequested(ModelToolRound)
+    case usage(ModelUsage)
+    case contextUsage(ContextUsage)
+    case generated(GeneratedContent)
+    case failed(ModelEndpointError)
+}
+
 /// A small native Ollama `/api/chat` endpoint.
 ///
 /// AnyLanguageModel remains the default abstraction for providers whose
@@ -42,8 +51,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         numContext: Int? = nil,
         think: Bool? = nil,
         requestTimeout: TimeInterval = 3_600,
-        countTokens: (@Sendable ([LLMMessage], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
-        countInputTokens: (@Sendable (ModelInput, [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil
+        countTokens: (@Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil
     ) {
         self.init(
             model: model,
@@ -52,7 +60,6 @@ public struct OllamaEndpoint: ModelEndpoint {
             numContext: numContext,
             think: think,
             countTokens: countTokens,
-            countInputTokens: countInputTokens,
             transport: Self.makeTransport(
                 baseURL: baseURL.appendingPathComponent("api/chat"),
                 requestTimeout: requestTimeout
@@ -66,8 +73,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         temperature: Double,
         numContext: Int? = nil,
         think: Bool? = nil,
-        countTokens: (@Sendable ([LLMMessage], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
-        countInputTokens: (@Sendable (ModelInput, [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
+        countTokens: (@Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
         transport: @escaping OllamaTransport
     ) {
         self.model = model
@@ -76,103 +82,92 @@ public struct OllamaEndpoint: ModelEndpoint {
         self.think = think
         self.transport = transport
         self.effectiveContextWindow = numContext
-        if let countInputTokens {
-            self.tokenCounting = .availableInput(countInputTokens)
-        } else {
-            self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
-        }
+        self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
     }
 
-    public func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?
-    ) -> AsyncStream<ModelEvent<String>> {
-        stream(input: input, tools: tools, purpose: .generation)
-    }
-
-    public func stream(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
+    /// Requests the declared generated value directly. Plain text uses
+    /// Ollama's normal content field; structured values use Ollama's native
+    /// JSON-schema `format` field.
+    public func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
+        tools: [AnyTool],
+        authority: any Authority,
+        generating outputType: Output.Type,
         purpose: ModelRequestPurpose
-    ) -> AsyncStream<ModelEvent<String>> {
-        streamRaw(input: input, tools: tools, purpose: purpose)
-    }
-
-    /// Uses Ollama's portable text/report-tool contract rather than assuming
-    /// that the selected Ollama runner implements native JSON-schema constraints.
-    public func stream<T: AgentOutput>(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        streamContract(
+    ) -> AsyncStream<ModelEvent<Output>>
+    where
+        Input: Sendable,
+        Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
+    {
+        stream(
             input: input,
+            entries: entries,
+            reasoningRounds: [],
             tools: tools,
-            responseType: T.self
+            authority: authority,
+            generating: outputType,
+            purpose: purpose
         )
     }
 
-    private func streamContract<T: AgentOutput>(
-        input: ModelInput,
-        tools: [ToolDefinition]?,
-        responseType: T.Type
-    ) -> AsyncStream<ModelEvent<T>> {
-        let reportTool: (name: String, schema: ToolDefinition)?
-        switch T.outputContract {
-        case .plainText:
-            reportTool = nil
-        case .reportTool(let name, let schema):
-            reportTool = (name, schema)
-        }
+    public func stream<Input, Output>(
+        input: Input,
+        entries: [Transcript.Entry],
+        reasoningRounds: [[Transcript.Segment]],
+        tools: [AnyTool],
+        authority: any Authority,
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where
+        Input: Sendable,
+        Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable
+    {
+        streamContract(
+            entries: entries,
+            reasoningRounds: reasoningRounds,
+            tools: tools.map(\.schema),
+            generating: outputType,
+            purpose: purpose
+        )
+    }
 
-        let requestTools: [ToolDefinition]?
-        if let reportTool {
-            var result = tools ?? []
-            if !result.contains(where: { $0.name == reportTool.name }) {
-                result.append(reportTool.schema)
-            }
-            requestTools = result
-        } else {
-            requestTools = tools
-        }
-
-        return AsyncStream(ModelEvent<T>.self) { continuation in
+    private func streamContract<Output>(
+        entries: [Transcript.Entry],
+        reasoningRounds: [[Transcript.Segment]],
+        tools: [ToolDefinition],
+        generating outputType: Output.Type,
+        purpose: ModelRequestPurpose
+    ) -> AsyncStream<ModelEvent<Output>>
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendable {
+        return AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
-                var sawToolCall = false
+                let outputFormat: AnyCodableValue?
+                do {
+                    outputFormat = Output.self == String.self ? nil : try Self.outputSchema(for: Output.self)
+                } catch {
+                    continuation.yield(.failed(.invalidRequest("Could not encode Ollama output schema: \(error)")))
+                    continuation.finish()
+                    return
+                }
+                var sawToolRound = false
                 var completed = false
 
                 for await event in self.streamRaw(
-                    input: input,
-                    tools: requestTools,
-                    purpose: .generation
+                    entries: entries,
+                    reasoningRounds: reasoningRounds,
+                    tools: tools,
+                    purpose: purpose,
+                    format: outputFormat
                 ) {
                     switch event {
-                    case .text(let text):
-                        continuation.yield(.text(text))
-                    case .thinking(let text):
-                        continuation.yield(.thinking(text))
-                    case .status(let status):
-                        continuation.yield(.status(status))
-                    case .toolCall(let call):
-                        sawToolCall = true
+                    case .activity(let activity):
+                        continuation.yield(.activity(activity))
+                    case .toolsRequested(let round):
+                        sawToolRound = true
                         guard !completed else { continue }
-                        if let reportTool, call.name == reportTool.name {
-                            do {
-                                let value = try T(GeneratedContent(json: call.arguments.json))
-                                continuation.yield(.status("Outcome received."))
-                                continuation.yield(.generated(value))
-                                completed = true
-                            } catch {
-                                continuation.yield(
-                                    .failed(
-                                        .decodingError(
-                                            "Ollama report tool \(reportTool.name) returned invalid output: \(error)"
-                                        )))
-                                completed = true
-                            }
-                        } else {
-                            continuation.yield(.toolCall(call))
-                        }
+                        continuation.yield(.toolsRequested(round))
                     case .usage(let usage):
                         continuation.yield(.usage(usage))
                     case .contextUsage(let usage):
@@ -181,23 +176,13 @@ public struct OllamaEndpoint: ModelEndpoint {
                         guard !completed else { continue }
                         continuation.yield(.failed(error))
                         completed = true
-                    case .partialUpdated:
-                        break
-                    case .generated(let text):
+                    case .generated(let content):
                         guard !completed else { continue }
-                        if let reportTool {
-                            continuation.yield(
-                                .failed(
-                                    .invalidResponse(
-                                        "Ollama finished without calling \(reportTool.name)."
-                                    )))
-                        } else {
-                            do {
-                                let value = try Self.decodePlainText(text, as: T.self)
-                                continuation.yield(.generated(value))
-                            } catch {
-                                continuation.yield(.failed(.decodingError(String(describing: error))))
-                            }
+                        do {
+                            let value = try Self.decodeOutput(content.jsonString, as: Output.self)
+                            continuation.yield(.generated(value))
+                        } catch {
+                            continuation.yield(.failed(.decodingError(String(describing: error))))
                         }
                         completed = true
                     }
@@ -205,7 +190,7 @@ public struct OllamaEndpoint: ModelEndpoint {
 
                 // A regular tool round intentionally has no terminal output;
                 // the reasoning loop executes the calls and asks the model again.
-                if !completed && !sawToolCall {
+                if !completed && !sawToolRound {
                     continuation.yield(.failed(.invalidResponse("Ollama returned no output")))
                 }
                 continuation.finish()
@@ -215,17 +200,20 @@ public struct OllamaEndpoint: ModelEndpoint {
     }
 
     private func streamRaw(
-        input: ModelInput,
+        entries: [Transcript.Entry],
+        reasoningRounds: [[Transcript.Segment]],
         tools: [ToolDefinition]?,
-        purpose: ModelRequestPurpose
-    ) -> AsyncStream<ModelEvent<String>> {
-        AsyncStream(ModelEvent<String>.self) { continuation in
+        purpose: ModelRequestPurpose,
+        format: AnyCodableValue? = nil
+    ) -> AsyncStream<OllamaEvent> {
+        AsyncStream(OllamaEvent.self) { continuation in
             let task = Task {
                 do {
-                    continuation.yield(.status("Generating..."))
+                    continuation.yield(.activity(.status(GeneratedContent("Generating..."))))
                     let body = try Self.requestBody(
                         model: model,
-                        input: input,
+                        entries: entries,
+                        reasoningRounds: reasoningRounds,
                         tools: tools ?? [],
                         temperature: temperature,
                         numContext: numContext,
@@ -233,7 +221,8 @@ public struct OllamaEndpoint: ModelEndpoint {
                         // Compaction is a bounded summarization operation, not
                         // an agent decision. Do not let a reasoning-capable
                         // model spend its normal hidden-token budget on it.
-                        think: Self.thinkingSetting(for: purpose, configured: think)
+                        think: Self.thinkingSetting(for: purpose, configured: think),
+                        format: format
                     )
                     let response = try await transport(body)
                     guard (200..<300).contains(response.statusCode) else {
@@ -251,6 +240,9 @@ public struct OllamaEndpoint: ModelEndpoint {
 
                     var text = ""
                     var emittedToolCalls = Set<String>()
+                    var toolCalls: [ToolCall] = []
+                    var narrationSegments: [Transcript.Segment] = []
+                    var reasoningSegments: [Transcript.Segment] = []
                     var sawDone = false
                     var doneReason: String?
                     for try await line in response.lines {
@@ -266,26 +258,29 @@ public struct OllamaEndpoint: ModelEndpoint {
                         }
 
                         if let thought = chunk.message?.thinking, !thought.isEmpty {
-                            continuation.yield(.thinking(thought))
+                            reasoningSegments.append(.text(.init(content: thought)))
+                            continuation.yield(.activity(.reasoningDelta(GeneratedContent(thought))))
                         }
 
                         if let fragment = chunk.message?.content, !fragment.isEmpty {
                             text += fragment
-                            continuation.yield(.text(fragment))
+                            narrationSegments.append(.text(.init(content: fragment)))
+                            continuation.yield(.activity(.narrationDelta(GeneratedContent(fragment))))
                         }
 
                         if let calls = chunk.message?.toolCalls {
                             for (index, call) in calls.enumerated() {
                                 let id = call.id ?? "\(call.function.name)-\(index)"
                                 guard emittedToolCalls.insert(id).inserted else { continue }
-                                continuation.yield(
-                                    .toolCall(
-                                        ToolCall(
-                                            id: id,
-                                            name: call.function.name,
-                                            arguments: ToolArguments(
-                                                json: try Self.argumentsJSON(call.function.arguments))
-                                        )))
+                                toolCalls.append(
+                                    ToolCall(
+                                        id: id,
+                                        name: call.function.name,
+                                        arguments: try GeneratedContent(
+                                            json: Self.argumentsJSON(call.function.arguments)
+                                        )
+                                    )
+                                )
                             }
                         }
 
@@ -311,7 +306,22 @@ public struct OllamaEndpoint: ModelEndpoint {
 
                     // A tool-call response is continued by Hail's tool loop;
                     // only plain responses terminate the turn with output.
-                    if emittedToolCalls.isEmpty {
+                    if !toolCalls.isEmpty {
+                        let narration =
+                            narrationSegments.isEmpty
+                            ? nil
+                            : Transcript.Response(
+                                assetIDs: [],
+                                segments: narrationSegments
+                            )
+                        continuation.yield(
+                            .toolsRequested(
+                                ModelToolRound(
+                                    narration: narration,
+                                    reasoning: reasoningSegments,
+                                    calls: toolCalls
+                                )))
+                    } else {
                         if !sawDone {
                             // The HTTP body ended without Ollama's terminal
                             // chunk: the connection died mid-generation and
@@ -332,7 +342,25 @@ public struct OllamaEndpoint: ModelEndpoint {
                                         "Ollama stopped before finishing (done_reason: \(doneReason))"
                                     )))
                         } else {
-                            continuation.yield(.generated(text))
+                            // A thinking-only completion is not a successful
+                            // plain-text response. Do not turn it into
+                            // GeneratedContent(""): that would make the
+                            // reasoning loop journal an empty response and
+                            // leave the channel to reject it much later.
+                            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                                continuation.yield(
+                                    .failed(
+                                        .invalidResponse(
+                                            "Ollama completed without visible output or tool calls"
+                                        )))
+                                continuation.finish()
+                                return
+                            }
+                            let generated =
+                                format == nil
+                                ? GeneratedContent(text)
+                                : try GeneratedContent(json: text)
+                            continuation.yield(.generated(generated))
                         }
                     }
                     continuation.finish()
@@ -445,17 +473,23 @@ public struct OllamaEndpoint: ModelEndpoint {
 
     private static func requestBody(
         model: String,
-        input: ModelInput,
+        entries: [Transcript.Entry],
+        reasoningRounds: [[Transcript.Segment]],
         tools: [ToolDefinition],
         temperature: Double,
         numContext: Int?,
         numPredict: Int?,
-        think: Bool?
+        think: Bool?,
+        format: AnyCodableValue?
     ) throws -> Data {
         let request = ChatRequest(
             model: model,
-            messages: try input.entries.map(RequestMessage.init),
+            messages: try RequestMessage.messages(
+                from: entries,
+                reasoningRounds: reasoningRounds
+            ),
             tools: tools.isEmpty ? nil : try tools.map(RequestTool.init),
+            format: format,
             options: RequestOptions(
                 temperature: temperature,
                 numContext: numContext,
@@ -473,11 +507,17 @@ public struct OllamaEndpoint: ModelEndpoint {
         return try encoder.encode(request)
     }
 
-    private static func decodePlainText<T: AgentOutput>(_ text: String, as type: T.Type) throws -> T {
-        if let value = text as? T {
-            return value
-        }
-        return try T(GeneratedContent(kind: .string(text)))
+    private static func decodeOutput<T>(
+        _ text: String,
+        as type: T.Type
+    ) throws -> T where T: Codable & Sendable & Generable {
+        return try T(GeneratedContent(json: text))
+    }
+
+    private static func outputSchema<T>(for type: T.Type) throws -> AnyCodableValue
+    where T: Codable & Sendable & Generable {
+        let data = try JSONEncoder().encode(T.generationSchema)
+        return try JSONDecoder().decode(AnyCodableValue.self, from: data)
     }
 
     private static func isContextLengthError(_ message: String) -> Bool {
@@ -505,6 +545,7 @@ private struct ChatRequest: Encodable, Sendable {
     let model: String
     let messages: [RequestMessage]
     let tools: [RequestTool]?
+    let format: AnyCodableValue?
     let options: RequestOptions
     let stream: Bool
     let think: Bool?
@@ -520,43 +561,134 @@ private struct RequestMessage: Encodable, Sendable {
     let toolCallID: String?
     let images: [String]?
 
-    init(_ entry: ModelInput.Entry) throws {
-        switch entry {
-        case .message(let message):
-            self.role = message.role.rawValue
-            self.content = message.content
-            self.thinking = message.thinking
-            self.name = message.name
-            self.toolName = nil
-            self.toolCalls = try message.toolCalls?.map { try RequestToolCall($0) }
-            self.toolCallID = message.toolCallID
-            self.images = nil
+    /// Ollama expects an assistant tool round as one assistant message whose
+    /// `tool_calls` accompany its content. Hail's provider-neutral transcript
+    /// can represent those as adjacent response/tool-call entries, so merge
+    /// that pair at this transport boundary.
+    static func messages(
+        from entries: [Transcript.Entry],
+        reasoningRounds: [[Transcript.Segment]]
+    ) throws -> [RequestMessage] {
+        var messages: [RequestMessage] = []
+        var index = 0
+        var reasoningIndex = 0
 
-        case .toolOutput(let callID, let name, let output):
-            self.role = LLMMessage.Role.tool.rawValue
+        while index < entries.count {
+            if case .response(let response) = entries[index],
+                index + 1 < entries.count,
+                case .toolCalls(let calls) = entries[index + 1]
+            {
+                let reasoning =
+                    reasoningIndex < reasoningRounds.count
+                    ? reasoningRounds[reasoningIndex]
+                    : []
+                reasoningIndex += 1
+                messages.append(
+                    try RequestMessage(
+                        response: response,
+                        toolCalls: calls,
+                        reasoning: reasoning
+                    )
+                )
+                index += 2
+            } else if case .toolCalls(let calls) = entries[index] {
+                let reasoning =
+                    reasoningIndex < reasoningRounds.count
+                    ? reasoningRounds[reasoningIndex]
+                    : []
+                reasoningIndex += 1
+                messages.append(
+                    try RequestMessage(
+                        toolCalls: calls,
+                        reasoning: reasoning
+                    )
+                )
+                index += 1
+            } else {
+                messages.append(try RequestMessage(entries[index]))
+                index += 1
+            }
+        }
+
+        return messages
+    }
+
+    init(
+        response: Transcript.Response,
+        toolCalls: Transcript.ToolCalls,
+        reasoning: [Transcript.Segment]
+    ) throws {
+        self.role = "assistant"
+        self.content = Self.render(response.segments)
+        self.thinking = Self.render(reasoning)
+        self.name = nil
+        self.toolName = nil
+        self.toolCalls = try Self.decodeToolCalls(toolCalls)
+        self.toolCallID = nil
+        self.images = try Self.encodedImages(response.segments)
+    }
+
+    init(
+        toolCalls: Transcript.ToolCalls,
+        reasoning: [Transcript.Segment]
+    ) throws {
+        self.role = "assistant"
+        self.content = ""
+        self.thinking = Self.render(reasoning)
+        self.name = nil
+        self.toolName = nil
+        self.toolCalls = try Self.decodeToolCalls(toolCalls)
+        self.toolCallID = nil
+        self.images = nil
+    }
+
+    init(_ entry: Transcript.Entry) throws {
+        switch entry {
+        case .instructions(let instructions):
+            self.role = "system"
+            self.content = Self.render(instructions.segments)
             self.thinking = nil
             self.name = nil
-            self.toolName = name
+            self.toolName = nil
             self.toolCalls = nil
-            self.toolCallID = callID
-            switch output {
-            case .text(let text):
-                self.content = text
-                self.images = nil
-            case .data(let data):
-                let contentType = data.normalizedContentType
-                if data.isTextLike {
-                    self.content = String(decoding: data.body, as: UTF8.self)
-                    self.images = nil
-                } else if contentType.hasPrefix("image/") {
-                    self.content = output.transcript
-                    self.images = [data.body.base64EncodedString()]
-                } else {
-                    throw ModelEndpointError.invalidRequest(
-                        "Ollama cannot map tool data with content type \(contentType); the provider adapter does not support this media type."
-                    )
-                }
-            }
+            self.toolCallID = nil
+            self.images = try Self.encodedImages(instructions.segments)
+        case .prompt(let prompt):
+            self.role = "user"
+            self.content = Self.render(prompt.segments)
+            self.thinking = nil
+            self.name = nil
+            self.toolName = nil
+            self.toolCalls = nil
+            self.toolCallID = nil
+            self.images = try Self.encodedImages(prompt.segments)
+        case .response(let response):
+            self.role = "assistant"
+            self.content = Self.render(response.segments)
+            self.thinking = nil
+            self.name = nil
+            self.toolName = nil
+            self.toolCalls = nil
+            self.toolCallID = nil
+            self.images = try Self.encodedImages(response.segments)
+        case .toolCalls(let calls):
+            self.role = "assistant"
+            self.content = ""
+            self.thinking = nil
+            self.name = nil
+            self.toolName = nil
+            self.toolCalls = try Self.decodeToolCalls(calls)
+            self.toolCallID = nil
+            self.images = nil
+        case .toolOutput(let output):
+            self.role = "tool"
+            self.content = Self.render(output.segments)
+            self.thinking = nil
+            self.name = output.toolName
+            self.toolName = output.toolName
+            self.toolCalls = nil
+            self.toolCallID = output.id
+            self.images = try Self.encodedImages(output.segments)
         }
     }
 
@@ -567,6 +699,49 @@ private struct RequestMessage: Encodable, Sendable {
         case toolCallID = "tool_call_id"
         case images
     }
+
+    private static func render(_ segments: [Transcript.Segment]) -> String {
+        segments.map { segment in
+            switch segment {
+            case .text(let text): return text.content
+            case .structure(let value): return value.content.jsonString
+            case .image: return "[image]"
+            }
+        }.joined(separator: "\n")
+    }
+
+    private static func encodedImages(_ segments: [Transcript.Segment]) throws -> [String]? {
+        let images = try segments.compactMap { segment -> String? in
+            guard case .image(let image) = segment else { return nil }
+            switch image.source {
+            case .data(let data, _):
+                return data.base64EncodedString()
+            case .url(let url):
+                throw ModelEndpointError.invalidRequest(
+                    "Ollama requires image bytes; it cannot load image URL \(url.absoluteString)."
+                )
+            }
+        }
+        return images.isEmpty ? nil : images
+    }
+
+    private static func decodeToolCalls(_ calls: Transcript.ToolCalls) throws -> [RequestToolCall] {
+        let data = try JSONEncoder().encode(calls)
+        let payload = try JSONDecoder().decode(TranscriptToolCalls.self, from: data)
+        return try payload.calls.map { try RequestToolCall($0) }
+    }
+}
+
+private struct TranscriptToolCalls: Codable {
+    let id: String
+    let calls: [TranscriptToolCall]
+}
+
+private struct TranscriptToolCall: Codable {
+    let id: String
+    let toolName: String
+    let arguments: GeneratedContent
+
 }
 
 private struct RequestToolCall: Encodable, Sendable {
@@ -574,10 +749,13 @@ private struct RequestToolCall: Encodable, Sendable {
     let type: String
     let function: RequestFunctionCall
 
-    init(_ call: LLMToolCall) throws {
+    init(_ call: TranscriptToolCall) throws {
         self.id = call.id
-        self.type = call.type
-        self.function = try RequestFunctionCall(call.function)
+        self.type = "function"
+        self.function = try RequestFunctionCall(
+            name: call.toolName,
+            arguments: call.arguments.jsonString
+        )
     }
 }
 
@@ -585,18 +763,12 @@ private struct RequestFunctionCall: Encodable, Sendable {
     let name: String
     let arguments: AnyCodableValue
 
-    init(_ call: LLMToolCall.FunctionCall) throws {
-        self.name = call.name
-        guard let data = call.arguments.data(using: .utf8) else {
-            throw ModelEndpointError.invalidRequest("Tool \(call.name) returned non-UTF8 arguments")
+    init(name: String, arguments: String) throws {
+        self.name = name
+        guard let data = arguments.data(using: .utf8) else {
+            throw ModelEndpointError.invalidRequest("Tool \(name) returned non-UTF8 arguments")
         }
-        do {
-            self.arguments = try JSONDecoder().decode(AnyCodableValue.self, from: data)
-        } catch {
-            throw ModelEndpointError.invalidRequest(
-                "Tool \(call.name) returned invalid JSON arguments: \(error)"
-            )
-        }
+        self.arguments = try JSONDecoder().decode(AnyCodableValue.self, from: data)
     }
 }
 

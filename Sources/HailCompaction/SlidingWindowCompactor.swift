@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import HailAgentRuntime
 import HailCore
 
@@ -14,9 +15,10 @@ import HailCore
 /// Boundary rules:
 /// - the newest `keepRecent` messages are preferred verbatim, but the
 ///   preference can be relaxed when that suffix cannot fit;
-/// - a cut never splits a ``ChatMessage/toolCall`` from its
-///   ``ChatMessage/toolResult``(s): a trailing tool call in the archived
-///   prefix backs the cut off until the prefix ends cleanly;
+/// - a cut never splits a ``ChatMessage/toolCall`` or
+///   ``ChatMessage/assistantToolCall`` from its ``ChatMessage/toolResult``(s):
+///   a trailing tool call in the archived prefix backs the cut off until the
+///   prefix ends cleanly;
 /// - the existing ``PromptContext/contextSummary`` is folded into the new
 ///   summary by the summarize closure, so the window carries at most one.
 public struct SlidingWindowCompactor: ContextCompactor {
@@ -45,16 +47,16 @@ public struct SlidingWindowCompactor: ContextCompactor {
         self.toolResultReserve = max(0, toolResultReserve)
     }
 
-    public func compact(
+    public func compact<Output: Codable & Sendable & Generable>(
         context: PromptContext,
         request: PreparedRequest,
         budget: CompactionBudget,
         measurement: RequestMeasurement? = nil,
         measure: RequestMeasurer? = nil,
         assemble: PromptAssembler = assembleStandardPrompt,
-        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String,
+        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
         trigger: ContextCompactionTrigger
-    ) async throws(AgentRuntimeError) -> CompactionDecision {
+    ) async throws(AgentRuntimeError) -> CompactionDecision<Output> {
         let window = budget.contextWindow
         let thresholdTrigger = Int(Double(window) * threshold)
 
@@ -64,7 +66,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
         } else {
             requestMeasurement = RequestMeasurement(
                 tokenCount: try await estimator.estimate(
-                    messages: request.messages,
+                    messages: request.entries,
                     tools: request.tools
                 ),
                 source: .estimated
@@ -75,6 +77,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
 
         let preferredTail = max(keepRecent, 1)
         guard context.conversationThread.count > 1 else { return .unchanged }
+        guard context.conversationThread.count > preferredTail else { return .unchanged }
         guard !request.conversation.isEmpty else {
             throw AgentRuntimeError.configurationError(
                 "Context compaction requires a prepared conversation section"
@@ -114,23 +117,20 @@ public struct SlidingWindowCompactor: ContextCompactor {
             )
             let candidateContext = Self.compactedContext(
                 context,
-                summary: summary,
+                summary: summary.generatedContent,
                 archivedCount: archivedCount
             )
             let assembledCandidate = assemble(candidateContext)
                 .appending(suffix: request.suffix, tools: request.tools)
-            let candidateRequest = assembledCandidate.withInput(
-                request.input(for: assembledCandidate.messages)
-            )
             let candidateCount = try await self.measure(
-                candidateRequest,
+                assembledCandidate,
                 fallback: estimator,
                 measure: measure
             )
             guard candidateCount <= retainedTarget else { continue }
 
             return .compacted(
-                ConversationCompaction(summary: summary, archivedCount: archivedCount)
+                CompactionResult(output: summary, archivedCount: archivedCount)
             )
         }
 
@@ -149,14 +149,14 @@ public struct SlidingWindowCompactor: ContextCompactor {
     /// exceed the same model window used for generation. Each completed chunk
     /// is folded into the next chunk's prior summary, producing one rolling
     /// summary and one atomic compaction event.
-    private func summarizeInBoundedChunks(
+    private func summarizeInBoundedChunks<Output: Codable & Sendable & Generable>(
         context: PromptContext,
         archived: [ChatMessage],
         window: Int,
         outputReserve: Int,
-        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String,
+        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
         measure: RequestMeasurer?
-    ) async throws(AgentRuntimeError) -> String {
+    ) async throws(AgentRuntimeError) -> Output {
         let summaryBudget = max(1, window - outputReserve)
         var rollingSummary = context.contextSummary
         var pending: [ChatMessage] = []
@@ -169,7 +169,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
         while groupIndex < groups.count {
             let group = groups[groupIndex]
             let candidate = pending + group
-            let candidatePrompt = SummaryPrompt.messages(
+            let candidatePrompt = SummaryPrompt.entries(
                 priorSummary: rollingSummary,
                 archived: candidate,
                 agentID: context.agentID
@@ -187,9 +187,9 @@ public struct SlidingWindowCompactor: ContextCompactor {
             }
 
             if !pending.isEmpty {
-                rollingSummary = try await summarize(
+                let output = try await summarize(
                     CompactionSummaryRequest(
-                        messages: SummaryPrompt.messages(
+                        entries: SummaryPrompt.entries(
                             priorSummary: rollingSummary,
                             archived: pending,
                             agentID: context.agentID
@@ -197,6 +197,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
                         maxOutputTokens: outputReserve
                     )
                 )
+                rollingSummary = output.generatedContent
                 pending = []
                 // Re-evaluate the same group with the newly folded summary.
                 // The summary itself consumes input space too.
@@ -221,9 +222,9 @@ public struct SlidingWindowCompactor: ContextCompactor {
         guard !pending.isEmpty else {
             throw AgentRuntimeError.modelMisbehavior("Compaction produced no summary input")
         }
-        return try await summarize(
+        let output = try await summarize(
             CompactionSummaryRequest(
-                messages: SummaryPrompt.messages(
+                entries: SummaryPrompt.entries(
                     priorSummary: rollingSummary,
                     archived: pending,
                     agentID: context.agentID
@@ -231,6 +232,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 maxOutputTokens: outputReserve
             )
         )
+        return output
     }
 
     /// Breaks an oversized semantic interaction into bounded summary-only
@@ -240,7 +242,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
     private func summaryFragments(
         _ group: [ChatMessage],
         context: PromptContext,
-        priorSummary: String?,
+        priorSummary: GeneratedContent?,
         budget: Int,
         measure: RequestMeasurer?
     ) async throws(AgentRuntimeError) -> [[ChatMessage]] {
@@ -257,7 +259,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
 
             var fits = true
             for fragment in fragments {
-                let prompt = SummaryPrompt.messages(
+                let prompt = SummaryPrompt.entries(
                     priorSummary: priorSummary,
                     archived: fragment,
                     agentID: context.agentID
@@ -294,19 +296,22 @@ public struct SlidingWindowCompactor: ContextCompactor {
             }
 
         case .response(let sender, let payload, let timestamp):
-            let content = String(decoding: payload, as: UTF8.self)
+            let content = payload.jsonString
             return contentChunks(content, maximumCharacters: maximumCharacters).map {
                 .text(sender: sender, content: $0, timestamp: timestamp)
             }
 
-        case .toolResult(let id, let content, let timestamp):
+        case .toolResult(let id, let name, let output, let timestamp):
+            // Compaction input is a textual view for the summarizer. The
+            // durable thread still retains the typed ToolOutput.
+            let content = render(output.transcriptSegments)
             return contentChunks(content, maximumCharacters: maximumCharacters).map {
-                .toolResult(id: id, content: $0, timestamp: timestamp)
+                .toolResult(id: id, name: name, output: .text($0), timestamp: timestamp)
             }
 
         case .toolCall(let calls, let timestamp):
             let rendered = calls.map {
-                "\($0.name)(\($0.arguments.json))"
+                "\($0.name)(\($0.arguments.jsonString))"
             }.joined(separator: ", ")
             return contentChunks(
                 "assistant called tools: \(rendered)",
@@ -315,11 +320,12 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 .text(sender: agentID.rawValue, content: $0, timestamp: timestamp)
             }
 
-        case .assistantToolCall(let content, let thinking, let calls, let timestamp):
-            let rendered = calls.map {
-                "\($0.name)(\($0.arguments.json))"
+        case .assistantToolCall(let round, let timestamp):
+            let content = round.narration.map { render($0.segments) } ?? ""
+            let rendered = round.calls.map {
+                "\($0.name)(\($0.arguments.jsonString))"
             }.joined(separator: ", ")
-            let reasoning = thinking.map { " reasoning: \($0)" } ?? ""
+            let reasoning = round.reasoning.isEmpty ? "" : " reasoning: \(render(round.reasoning))"
             return contentChunks(
                 "assistant: \(content)\(reasoning) called tools: \(rendered)",
                 maximumCharacters: maximumCharacters
@@ -330,6 +336,16 @@ public struct SlidingWindowCompactor: ContextCompactor {
         case .failure, .decisionRequest, .decisionResolved:
             return [message]
         }
+    }
+
+    private static func render(_ segments: [Transcript.Segment]) -> String {
+        segments.map { segment in
+            switch segment {
+            case .text(let value): return value.content
+            case .structure(let value): return value.content.jsonString
+            case .image: return "[image]"
+            }
+        }.joined(separator: "\n")
     }
 
     private static func contentChunks(
@@ -365,7 +381,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
 
     private static func compactedContext(
         _ context: PromptContext,
-        summary: String,
+        summary: GeneratedContent,
         archivedCount: Int
     ) -> PromptContext {
         PromptContext(
@@ -440,7 +456,14 @@ public struct SlidingWindowCompactor: ContextCompactor {
                     pending[call.id, default: []].append(groupIndex)
                 }
 
-            case .toolResult(let id, _, _):
+            case .assistantToolCall(let round, _):
+                let groupIndex = groups.count
+                groups.append((first: index, last: index))
+                for call in round.calls {
+                    pending[call.id, default: []].append(groupIndex)
+                }
+
+            case .toolResult(let id, _, _, _):
                 if var occurrences = pending[id], !occurrences.isEmpty {
                     let groupIndex = occurrences.removeFirst()
                     pending[id] = occurrences
@@ -474,7 +497,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
     /// failure of a supported counter propagates.
     private func measure(
         context: PromptContext,
-        messages: [LLMMessage],
+        messages: [Transcript.Entry],
         tools: [ToolDefinition],
         measure: RequestMeasurer?
     ) async throws(AgentRuntimeError) -> Int {
@@ -482,7 +505,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
             PreparedRequest(
                 prefix: [],
                 conversation: messages.enumerated().map {
-                    PreparedRequest.ConversationEntry(sourceIndex: $0.offset, message: $0.element)
+                    PreparedRequest.ConversationEntry(sourceIndex: $0.offset, entry: $0.element)
                 },
                 tools: tools
             ),
@@ -495,7 +518,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
         _ request: PreparedRequest,
         fallback estimator: TokenEstimator
     ) async throws(AgentRuntimeError) -> Int {
-        try await estimator.estimate(messages: request.messages, tools: request.tools)
+        try await estimator.estimate(messages: request.entries, tools: request.tools)
     }
 
     private func measure(
@@ -510,7 +533,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
     }
 
     private func measure(
-        messages: [LLMMessage],
+        messages: [Transcript.Entry],
         tools: [ToolDefinition],
         measure: RequestMeasurer?
     ) async throws(AgentRuntimeError) -> Int {
@@ -518,7 +541,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
             PreparedRequest(
                 prefix: [],
                 conversation: messages.enumerated().map {
-                    PreparedRequest.ConversationEntry(sourceIndex: $0.offset, message: $0.element)
+                    PreparedRequest.ConversationEntry(sourceIndex: $0.offset, entry: $0.element)
                 },
                 tools: tools
             ),

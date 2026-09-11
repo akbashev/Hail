@@ -197,12 +197,11 @@ struct ReasoningLoopCancellationTests {
     @Test("repeated identical tool failures stop after one correction attempt")
     func repeatedToolFailuresAreBounded() throws {
         func result(id: String, output: String) throws -> ToolResult {
-            try JSONDecoder().decode(
-                ToolResult.self,
-                from: Data(
-                    #"{"tool_call_id":"\#(id)","name":"timer","output":"\#(output)","failure_kind":"invalidArguments"}"#
-                        .utf8
-                )
+            ToolResult(
+                toolCallID: id,
+                name: "timer",
+                output: .text(output),
+                failureKind: .invalidArguments
             )
         }
 
@@ -230,7 +229,7 @@ struct ReasoningLoopCancellationTests {
         let failure = ToolResult(
             toolCallID: "call-1",
             name: "web_search",
-            output: "Error: service unavailable",
+            output: .text("Error: service unavailable"),
             failureKind: .unavailable
         )
         var tracker = ToolFailureTracker()
@@ -265,7 +264,7 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
+        func runOutput(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
             throw CancellationError()
         }
     }
@@ -286,7 +285,7 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
+        func runOutput(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
             throw ToolError.notConfigured("test")
         }
     }
@@ -314,8 +313,8 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
-            "ok"
+        func runOutput(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
+            .text("ok")
         }
     }
 
@@ -326,7 +325,11 @@ struct ToolRegistryCancellationTests {
 
         await #expect(throws: AgentRuntimeError.cancelled) {
             _ = try await registry.execute([
-                ToolCall(id: "call-1", name: "cancellation_throwing_tool", arguments: .empty)
+                ToolCall(
+                    id: "call-1",
+                    name: "cancellation_throwing_tool",
+                    arguments: GeneratedContent(properties: [:])
+                )
             ])
         }
     }
@@ -337,14 +340,18 @@ struct ToolRegistryCancellationTests {
         await registry.register(FailingTool())
 
         let results = try await registry.execute([
-            ToolCall(id: "call-1", name: "failing_tool", arguments: .empty)
+            ToolCall(
+                id: "call-1",
+                name: "failing_tool",
+                arguments: GeneratedContent(properties: [:])
+            )
         ])
         try #require(results.count == 1)
         #expect(results[0].isError)
         #expect(results[0].failureKind == .unavailable)
     }
 
-    @Test("decoding failures include the failing argument path")
+    @Test("decoding failures are classified as invalid arguments")
     func decodingFailureIdentifiesArgumentPath() async throws {
         let registry = ToolRegistry()
         await registry.register(NestedInputTool())
@@ -353,13 +360,13 @@ struct ToolRegistryCancellationTests {
             ToolCall(
                 id: "call-1",
                 name: "nested_input_tool",
-                arguments: ToolArguments(json: #"{"trigger":"not-an-object"}"#)
+                arguments: GeneratedContent(properties: ["trigger": "not-an-object"])
             )
         ])
 
         try #require(results.count == 1)
         #expect(results[0].isError)
-        #expect(results[0].output.contains("at trigger"))
-        #expect(results[0].output.contains("found a string"))
+        #expect(results[0].failureKind == .invalidArguments)
+        #expect(results[0].output.textRepresentation.contains("expected Trigger"))
     }
 }

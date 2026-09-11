@@ -16,7 +16,8 @@ import ScopedEffect
 /// one model-facing string.
 @Tool(
     "now",
-    description: "Get the current time in an explicit IANA timezone. Always provide time_zone, for example Europe/Berlin. Never infer it from the server or from a message timestamp."
+    description:
+        "Get the current time in an explicit IANA timezone. Always provide time_zone, for example Europe/Berlin. Never infer it from the server or from a message timestamp."
 )
 public struct NowTool {
     @Generable
@@ -44,7 +45,7 @@ public struct NowTool {
         ClockEffect()
     }
 
-    public func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
+    public func runOutput(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
         let instant = try await ClockEffect.run(in: token)
         let utc = instant.ISO8601Format()
         guard let timeZone = TimeZone(identifier: input.timeZone) else {
@@ -59,6 +60,6 @@ public struct NowTool {
                 timeZone: timeZone
             )
         )
-        return "Local (\(timeZone.identifier)): \(local)\nUTC instant: \(utc)"
+        return .text("Local (\(timeZone.identifier)): \(local)\nUTC instant: \(utc)")
     }
 }

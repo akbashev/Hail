@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import HailCore
 import Testing
 
@@ -13,12 +14,12 @@ import Testing
 struct ReasoningLoopTests {
     @Test("structured partial model events reach typed stream updates")
     func forwardsStructuredPartialUpdate() {
-        let partial = ChatResponse(content: "hel")
+        let partial = "hel"
         let timestamp = Date(timeIntervalSince1970: 1)
 
         let (state, updates) = TurnReducer.reduce(
             state: .idle,
-            event: ModelEvent<ChatResponse>.partialUpdated(partial),
+            event: ModelEvent<String>.partialUpdated(partial),
             at: timestamp
         )
 
@@ -27,7 +28,7 @@ struct ReasoningLoopTests {
             return
         }
         guard updates.count == 1,
-            case .run(.event(.modelOutputPartialUpdated(let value, let at))) = updates[0]
+            case .modelOutputPartialUpdated(let value, let at) = updates[0]
         else {
             Issue.record("Expected one typed partial-output update")
             return
@@ -35,5 +36,34 @@ struct ReasoningLoopTests {
 
         #expect(value == partial)
         #expect(at == timestamp)
+    }
+
+    @Test("a completed tool round carries its content and calls together")
+    func forwardsCompletedToolRound() {
+        let round = ModelToolRound(
+            narration: Transcript.Response(
+                assetIDs: [],
+                segments: [.text(.init(content: "I will check that."))]
+            ),
+            reasoning: [.text(.init(content: "Inspecting the request."))],
+            calls: [
+                ToolCall(
+                    id: "call-1",
+                    name: "read_file",
+                    arguments: GeneratedContent(properties: [:])
+                )
+            ]
+        )
+        let (_, updates) = TurnReducer.reduce(
+            state: .idle,
+            event: ModelEvent<String>.toolsRequested(round),
+            at: Date(timeIntervalSince1970: 1)
+        )
+
+        guard case .toolRequested(let call, _) = updates.first else {
+            Issue.record("Expected the complete tool round to request its tool")
+            return
+        }
+        #expect(call == round.calls[0])
     }
 }

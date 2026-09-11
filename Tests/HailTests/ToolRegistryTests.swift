@@ -10,6 +10,35 @@ import Testing
 
 @Suite("Tool registry request stability")
 struct ToolRegistryTests {
+    @Generable
+    struct GenericReport<Summary: Generable, Memory: Generable>: Sendable {
+        let summary: Summary
+        let memories: [Memory]
+    }
+
+    @Generable
+    struct GenericSummary: Sendable {
+        let text: String
+    }
+
+    @Generable
+    struct GenericMemory: Sendable {
+        let value: String
+    }
+
+    @Test("generic generable reports synthesize")
+    func genericGenerableReport() throws {
+        let content = GeneratedContent(properties: [
+            "summary": GeneratedContent(properties: ["text": "done"]),
+            "memories": GeneratedContent(elements: [
+                GeneratedContent(properties: ["value": "Haar"])
+            ]),
+        ])
+        let report = try GenericReport<GenericSummary, GenericMemory>(content)
+        #expect(report.summary.text == "done")
+        #expect(report.memories.map { $0.value } == ["Haar"])
+    }
+
     @Test("schemas are sorted independently of registration order")
     func schemasHaveStableOrder() async {
         let registry = ToolRegistry()
@@ -34,8 +63,8 @@ struct ToolRegistryTests {
             ClockEffect()
         }
 
-        func run(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> String {
-            input.message
+        func runOutput(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
+            .text(input.message)
         }
     }
 
@@ -46,8 +75,8 @@ struct ToolRegistryTests {
             ClockEffect()
         }
 
-        func render(_ date: Date) -> String {
-            date.ISO8601Format()
+        func render(_ date: Date) -> ToolOutput {
+            .text(date.ISO8601Format())
         }
     }
 
@@ -56,22 +85,22 @@ struct ToolRegistryTests {
         let tool = ParameterlessCommands.PingTool(owner: ParameterlessCommands())
 
         #expect(tool.description == "Check that the command is reachable.")
-        let output = try await AnyTool(tool).run(
+        let output = try await AnyTool(tool).runOutput(
             generatedContent: GeneratedContent(properties: [:]),
             authority: FullAuthority()
         )
-        #expect(!output.isEmpty)
+        #expect(!output.textRepresentation.isEmpty)
     }
 
     @Test("generated arguments are decoded without a JSONDecoder round trip")
     func generatedArgumentsExecute() async throws {
         let tool = AnyTool(GeneratedInputTool())
         let generated = GeneratedContent(properties: ["message": "hello"])
-        let output = try await tool.run(
+        let output = try await tool.runOutput(
             generatedContent: generated,
             authority: FullAuthority()
         )
 
-        #expect(output == "hello")
+        #expect(output == .text("hello"))
     }
 }

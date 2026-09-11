@@ -1,12 +1,11 @@
+import AnyLanguageModel
 import ScopedEffect
 
 public struct ToolExecution: Sendable {
     public let result: ToolResult
-    public let output: ToolOutput
 
-    public init(result: ToolResult, output: ToolOutput) {
+    public init(result: ToolResult) {
         self.result = result
-        self.output = output
     }
 }
 
@@ -48,17 +47,6 @@ public actor ToolRegistry: Sendable {
             .sorted { $0.name < $1.name }
     }
 
-    public func execute(_ toolCalls: [LLMToolCall]) async throws(AgentRuntimeError) -> [ToolResult] {
-        try await execute(
-            toolCalls.map {
-                ToolCall(
-                    id: $0.id,
-                    name: $0.function.name,
-                    arguments: ToolArguments(json: $0.function.arguments)
-                )
-            })
-    }
-
     public func register(tools: [any Tool]) {
         for tool in tools {
             self.tools[tool.name] = AnyTool(tool)
@@ -86,56 +74,60 @@ public actor ToolRegistry: Sendable {
                 let result = ToolResult(
                     toolCallID: call.id,
                     name: call.name,
-                    output: "Error: unknown tool: \(call.name)",
+                    output: .text("Error: unknown tool: \(call.name)"),
                     failureKind: .rejected
                 )
-                executions.append(ToolExecution(result: result, output: .text(result.output)))
+                executions.append(ToolExecution(result: result))
                 continue
             }
 
             do {
-                let output = try await tool.runOutput(input: call.arguments, authority: authority)
+                let output = try await tool.runOutput(
+                    generatedContent: call.arguments,
+                    authority: authority
+                )
                 let result = ToolResult(
                     toolCallID: call.id,
                     name: call.name,
-                    output: output.transcript,
+                    output: output,
                     failureKind: nil
                 )
-                executions.append(ToolExecution(result: result, output: output))
+                executions.append(ToolExecution(result: result))
             } catch let denial as EffectDenied {
                 let result = ToolResult(
                     toolCallID: call.id,
                     name: call.name,
-                    output: "Error: \(denial)",
+                    output: .text("Error: \(denial)"),
                     failureKind: .rejected
                 )
-                executions.append(ToolExecution(result: result, output: .text(result.output)))
+                executions.append(ToolExecution(result: result))
             } catch let error as ToolError {
                 let result = ToolResult(
                     toolCallID: call.id,
                     name: call.name,
-                    output: Self.toolErrorMessage(error, toolName: call.name),
+                    output: .text(Self.toolErrorMessage(error, toolName: call.name)),
                     failureKind: Self.failureKind(for: error)
                 )
-                executions.append(ToolExecution(result: result, output: .text(result.output)))
+                executions.append(ToolExecution(result: result))
             } catch let error as DecodingError {
                 let result = ToolResult(
                     toolCallID: call.id,
                     name: call.name,
-                    output: "Error: tool \(call.name) received invalid arguments: \(Self.decodingMessage(error))",
+                    output: .text(
+                        "Error: tool \(call.name) received invalid arguments: \(Self.decodingMessage(error))"),
                     failureKind: .invalidArguments
                 )
-                executions.append(ToolExecution(result: result, output: .text(result.output)))
+                executions.append(ToolExecution(result: result))
             } catch is CancellationError {
                 throw AgentRuntimeError.cancelled
             } catch {
                 let result = ToolResult(
                     toolCallID: call.id,
                     name: call.name,
-                    output: "Error: \(error)",
+                    output: .text("Error: \(error)"),
                     failureKind: .failed
                 )
-                executions.append(ToolExecution(result: result, output: .text(result.output)))
+                executions.append(ToolExecution(result: result))
             }
         }
 

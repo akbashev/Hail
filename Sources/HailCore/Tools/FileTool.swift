@@ -103,7 +103,7 @@ public struct FileTool {
         return FileEffect(path: resolved, action: input.action.effectAction)
     }
 
-    public func run(input: Input, token: borrowing EffectToken<FileEffect>) async throws -> String {
+    public func runOutput(input: Input, token: borrowing EffectToken<FileEffect>) async throws -> ToolOutput {
         let path = input.path
         let fullPath = token.withConfiguration { URL(fileURLWithPath: $0.path) }
         let fileManager = FileManager.default
@@ -111,10 +111,10 @@ public struct FileTool {
         switch input.action {
         case .read:
             guard fileManager.fileExists(atPath: fullPath.path) else {
-                return "Error: File not found at \(path)"
+                return .text("Error: File not found at \(path)")
             }
             let content = try String(contentsOf: fullPath, encoding: .utf8)
-            return content
+            return .text(content)
 
         case .write:
             guard let content = input.content else {
@@ -124,7 +124,7 @@ public struct FileTool {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
 
             try content.write(to: fullPath, atomically: true, encoding: .utf8)
-            return "Wrote to \(path)"
+            return .text("Wrote to \(path)")
 
         case .replace:
             guard let oldContent = input.oldContent else {
@@ -134,7 +134,7 @@ public struct FileTool {
                 throw ToolError.missingArgument("new_content")
             }
             guard fileManager.fileExists(atPath: fullPath.path) else {
-                return "Error: File not found at \(path)"
+                return .text("Error: File not found at \(path)")
             }
             let content = try String(contentsOf: fullPath, encoding: .utf8)
             guard content.contains(oldContent) else {
@@ -142,15 +142,15 @@ public struct FileTool {
             }
             let updated = content.replacingOccurrences(of: oldContent, with: newContent)
             try updated.write(to: fullPath, atomically: true, encoding: .utf8)
-            return "Replaced text in \(path)"
+            return .text("Replaced text in \(path)")
 
         case .list:
             let contents = try fileManager.contentsOfDirectory(atPath: fullPath.path)
-            return contents.joined(separator: "\n")
+            return .text(contents.joined(separator: "\n"))
 
         case .exists:
             let exists = fileManager.fileExists(atPath: fullPath.path)
-            return exists ? "exists" : "not found"
+            return .text(exists ? "exists" : "not found")
         }
     }
 }

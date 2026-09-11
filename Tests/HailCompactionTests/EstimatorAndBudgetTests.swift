@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import HailAgentRuntime
 import HailCore
 import Testing
@@ -18,6 +19,10 @@ struct TokenEstimatorTests {
         .text(sender: "user", content: content, timestamp: Date(timeIntervalSince1970: 0))
     }
 
+    private func prompt(_ content: String) -> Transcript.Entry {
+        .prompt(.init(segments: [.text(.init(content: content))]))
+    }
+
     @Test("a text message costs its characters plus framing overhead")
     func textEstimate() {
         // 40 characters at 4 chars/token = 10 tokens + 4 overhead.
@@ -34,7 +39,7 @@ struct TokenEstimatorTests {
         let call = ToolCall(
             id: "1",
             name: "read_file",
-            arguments: ToolArguments(json: "{\"path\":\"/tmp/x\"}")
+            arguments: GeneratedContent(properties: ["path": "/tmp/x"])
         )
         let message = ChatMessage.toolCall(calls: [call], timestamp: Date(timeIntervalSince1970: 0))
         let expected = 4 + Int((Double(9 + "{\"path\":\"/tmp/x\"}".count) / 4.0).rounded(.up))
@@ -43,7 +48,7 @@ struct TokenEstimatorTests {
 
     @Test("request estimation includes serialized tool schemas")
     func requestIncludesTools() async throws {
-        let message = LLMMessage(role: .user, content: "hello")
+        let message = prompt("hello")
         let tool = TestToolDefinition.empty(
             name: "search",
             description: "Search the indexed workspace"
@@ -60,7 +65,7 @@ struct TokenEstimatorTests {
             messages.count * 100 + tools.count * 10
         })
         let count = try await estimator.estimate(
-            messages: [LLMMessage(role: .user, content: "tiny")],
+            messages: [prompt("tiny")],
             tools: []
         )
         #expect(count == 100)
@@ -69,13 +74,13 @@ struct TokenEstimatorTests {
     @Test("a configured tokenizer failure propagates")
     func exactTokenizerFailurePropagates() async {
         let estimator = TokenEstimator(exactCount: {
-            (_: [LLMMessage], _: [ToolDefinition]) async throws(AgentRuntimeError) -> Int in
+            (_: [Transcript.Entry], _: [ToolDefinition]) async throws(AgentRuntimeError) -> Int in
             throw AgentRuntimeError.infrastructureFailure("tokenizer unavailable")
         })
 
         await #expect(throws: AgentRuntimeError.infrastructureFailure("tokenizer unavailable")) {
             try await estimator.estimate(
-                messages: [LLMMessage(role: .user, content: "tiny")],
+                messages: [prompt("tiny")],
                 tools: []
             )
         }

@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import Hail
 import ScopedEffect
 import Testing
@@ -14,6 +15,18 @@ import Testing
 /// its argv and stdin (the prompt) and speaks just enough stream-json.
 @Suite("ClaudeCliEndpoint session routing")
 struct ClaudeCliSessionRoutingTests {
+    private func instruction(_ content: String) -> Transcript.Entry {
+        .instructions(.init(segments: [.text(.init(content: content))], toolDefinitions: []))
+    }
+
+    private func prompt(_ content: String) -> Transcript.Entry {
+        .prompt(.init(segments: [.text(.init(content: content))]))
+    }
+
+    private func response(_ content: String) -> Transcript.Entry {
+        .response(.init(assetIDs: [], segments: [.text(.init(content: content))]))
+    }
+
     private func makeStub(directory: URL, promptLog: String, argsLog: String) throws -> URL {
         let script = """
             #!/usr/bin/env python3
@@ -36,21 +49,22 @@ struct ClaudeCliSessionRoutingTests {
 
     private func runTurn(
         endpoint: ClaudeCliEndpoint,
-        messages: [LLMMessage],
-        delta: [LLMMessage],
-        memory: [String] = [],
+        messages: [Transcript.Entry],
+        delta: [Transcript.Entry],
         identity: String
     ) async -> String? {
         var generated: String?
         for await event in endpoint.stream(
-            input: ModelInput(messages: messages),
+            input: "",
+            entries: messages,
             delta: TurnDelta(
-                currentMessages: delta,
+                currentEntries: delta,
                 sessionIdentity: SessionIdentity(identity)
             ),
             authority: FullAuthority(),
-            tools: nil,
-            responseType: String.self
+            tools: [],
+            generating: String.self,
+            purpose: .generation
         ) {
             if case .generated(let value) = event {
                 generated = value
@@ -78,15 +92,15 @@ struct ClaudeCliSessionRoutingTests {
         )
 
         let baseMessages = [
-            LLMMessage(role: .system, content: "SYSTEM-PROMPT"),
-            LLMMessage(role: .user, content: "FIRST"),
+            instruction("SYSTEM-PROMPT"),
+            prompt("FIRST"),
         ]
 
         // Turn 1: cold — full bootstrap, no --resume.
         let first = await runTurn(
             endpoint: endpoint,
             messages: baseMessages,
-            delta: [LLMMessage(role: .user, content: "FIRST")],
+            delta: [prompt("FIRST")],
             identity: "id-A"
         )
         #expect(first == "OK")
@@ -95,10 +109,10 @@ struct ClaudeCliSessionRoutingTests {
         let second = await runTurn(
             endpoint: endpoint,
             messages: baseMessages + [
-                LLMMessage(role: .assistant, content: "OK"),
-                LLMMessage(role: .user, content: "SECOND"),
+                response("OK"),
+                prompt("SECOND"),
             ],
-            delta: [LLMMessage(role: .user, content: "SECOND")],
+            delta: [prompt("SECOND")],
             identity: "id-A"
         )
         #expect(second == "OK")
@@ -107,10 +121,10 @@ struct ClaudeCliSessionRoutingTests {
         let third = await runTurn(
             endpoint: endpoint,
             messages: baseMessages + [
-                LLMMessage(role: .assistant, content: "OK"),
-                LLMMessage(role: .user, content: "THIRD"),
+                response("OK"),
+                prompt("THIRD"),
             ],
-            delta: [LLMMessage(role: .user, content: "THIRD")],
+            delta: [prompt("THIRD")],
             identity: "id-B"
         )
         #expect(third == "OK")
@@ -159,10 +173,10 @@ struct ClaudeCliSessionRoutingTests {
         let result = await runTurn(
             endpoint: endpoint,
             messages: [
-                LLMMessage(role: .system, content: "SYSTEM-PROMPT"),
-                LLMMessage(role: .user, content: "FIRST"),
+                instruction("SYSTEM-PROMPT"),
+                prompt("FIRST"),
             ],
-            delta: [LLMMessage(role: .user, content: "FIRST")],
+            delta: [prompt("FIRST")],
             identity: "id-A"
         )
         #expect(result == "OK")
@@ -216,10 +230,10 @@ struct ClaudeCliSessionRoutingTests {
         let result = await runTurn(
             endpoint: endpoint,
             messages: [
-                LLMMessage(role: .system, content: "SYSTEM-PROMPT"),
-                LLMMessage(role: .user, content: "FIRST"),
+                instruction("SYSTEM-PROMPT"),
+                prompt("FIRST"),
             ],
-            delta: [LLMMessage(role: .user, content: "FIRST")],
+            delta: [prompt("FIRST")],
             identity: "id-A"
         )
         #expect(result == "OK")
@@ -262,14 +276,16 @@ struct ClaudeCliSessionRoutingTests {
         let start = Date()
         var failure: ModelEndpointError?
         for await event in endpoint.stream(
-            input: ModelInput(messages: [LLMMessage(role: .user, content: "HELLO")]),
+            input: "",
+            entries: [prompt("HELLO")],
             delta: TurnDelta(
-                currentMessages: [LLMMessage(role: .user, content: "HELLO")],
+                currentEntries: [prompt("HELLO")],
                 sessionIdentity: SessionIdentity("stall-ceiling")
             ),
             authority: FullAuthority(),
-            tools: nil,
-            responseType: String.self
+            tools: [],
+            generating: String.self,
+            purpose: .generation
         ) {
             if case .failed(let error) = event { failure = error }
         }

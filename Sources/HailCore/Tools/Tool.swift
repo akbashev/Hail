@@ -9,7 +9,7 @@ import ScopedEffect
 
 /// Raw content produced by a tool. It preserves transport data and metadata;
 /// interpreting the MIME type belongs to the model adapter.
-public struct ToolData: Sendable {
+public struct ToolData: Codable, Sendable, Equatable {
     public let body: Data
     public let contentType: String?
     public let source: URL?
@@ -39,11 +39,13 @@ public struct ToolData: Sendable {
     }
 }
 
-public enum ToolOutput: Sendable {
+public enum ToolOutput: Codable, Sendable, Equatable {
     case text(String)
     case data(ToolData)
 
-    public var transcript: String {
+    /// A presentation projection for adapters that can only display text.
+    /// The typed value remains available through ``ToolOutput`` itself.
+    public var textRepresentation: String {
         switch self {
         case .text(let text):
             return text
@@ -53,30 +55,50 @@ public enum ToolOutput: Sendable {
             return "Fetched \(data.body.count) bytes\(source) with content type \(type)."
         }
     }
+
+    /// Converts the typed result into the model transcript representation.
+    /// Raw data stays typed in the journal; only providers that cannot carry a
+    /// particular media type receive its explicit textual description.
+    public var transcriptSegments: [Transcript.Segment] {
+        switch self {
+        case .text(let text):
+            return [.text(.init(content: text))]
+
+        case .data(let data):
+            if data.isTextLike {
+                return [.text(.init(content: String(decoding: data.body, as: UTF8.self)))]
+            }
+            if data.normalizedContentType.hasPrefix("image/") {
+                return [
+                    .text(.init(content: textRepresentation)),
+                    .image(.init(data: data.body, mimeType: data.normalizedContentType)),
+                ]
+            }
+            return [.text(.init(content: textRepresentation))]
+        }
+    }
+
+    /// The representation accepted by AnyLanguageModel's tool-output
+    /// boundary. Text and textual data remain generated content; opaque
+    /// binary data is rejected instead of being silently replaced with a
+    /// description that the model could mistake for the actual result.
+    public func modelContent() throws -> GeneratedContent {
+        switch self {
+        case .text(let text):
+            return GeneratedContent(text)
+        case .data(let data):
+            guard data.isTextLike else {
+                throw ToolOutputError.binaryDataNotRepresentable
+            }
+            return try GeneratedContent(
+                json: String(decoding: data.body, as: UTF8.self)
+            )
+        }
+    }
 }
 
-public struct ToolArguments: Codable, Sendable, Equatable, CustomStringConvertible {
-    public let json: String
-
-    public init(json: String) {
-        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.json = trimmed.isEmpty ? "{}" : trimmed
-    }
-
-    public init<T: Encodable>(_ value: T) throws {
-        let data = try JSONEncoder().encode(value)
-        self.json = String(data: data, encoding: .utf8) ?? "{}"
-    }
-
-    public static let empty = ToolArguments(json: "{}")
-
-    public var data: Data {
-        Data(json.utf8)
-    }
-
-    public var description: String {
-        json
-    }
+public enum ToolOutputError: Error, Equatable, Sendable {
+    case binaryDataNotRepresentable
 }
 
 /// The model input for a tool command that takes no arguments.
@@ -117,33 +139,15 @@ public protocol Tool<Input>: Sendable {
     func effect(for input: Input) throws -> Effect
 
     /// Runs only after the registry has authorized the effect and vended its
-    /// non-escapable token.
-    func run(input: Input, token: borrowing EffectToken<Effect>) async throws -> String
-
+    /// non-escapable token. The typed ToolOutput is the authoritative result;
+    /// text is one possible provider representation, not the tool contract.
     func runOutput(input: Input, token: borrowing EffectToken<Effect>) async throws -> ToolOutput
 }
 
 extension Tool {
-    public func runOutput(
-        input: Input,
-        token: borrowing EffectToken<Effect>
-    ) async throws -> ToolOutput {
-        .text(try await run(input: input, token: token))
-    }
-
     /// The only direct tool entry point: derive the concrete effect, authorize
     /// it, and invoke the token-requiring implementation.
-    public func run(input: Input, authority: any Authority) async throws -> String {
-        let effect = try effect(for: input)
-        return try await withEffect(effect, authority: authority) { token in
-            try await run(input: input, token: token)
-        }
-    }
-
-    public func runOutput(
-        input: Input,
-        authority: any Authority
-    ) async throws -> ToolOutput {
+    public func runOutput(input: Input, authority: any Authority) async throws -> ToolOutput {
         let effect = try effect(for: input)
         return try await withEffect(effect, authority: authority) { token in
             try await runOutput(input: input, token: token)
@@ -158,48 +162,25 @@ extension Tool {
     }
 }
 
-/// Type-erased tool. JSON remains the transport representation at the
-/// provider boundary, while the actual argument conversion is performed by
-/// `Input.init(_:)` from AnyLanguageModel's `GeneratedContent`.
+/// Type-erased tool. Arguments remain AnyLanguageModel's generated value all
+/// the way from the provider boundary to typed `Input` decoding; there is no
+/// intermediate JSON-string representation in Hail's execution path.
 public struct AnyTool: Sendable {
     public let name: String
     public let description: String
     public let schema: ToolDefinition
     /// Type erasure closes over the concrete effect type, so only this path
     /// can manufacture the matching token and invoke the tool.
-    private let _runWithAuthority: @Sendable (ToolArguments, any Authority) async throws -> ToolOutput
     private let _runGeneratedWithAuthority: @Sendable (GeneratedContent, any Authority) async throws -> ToolOutput
 
     public init<T: Tool>(_ tool: T) {
         self.name = tool.name
         self.description = tool.description
         self.schema = tool.schema
-        self._runWithAuthority = { input, authority in
-            let generated = try GeneratedContent(json: input.json)
-            let decoded = try T.Input(generated)
-            return try await tool.runOutput(input: decoded, authority: authority)
-        }
         self._runGeneratedWithAuthority = { generated, authority in
             let decoded = try T.Input(generated)
             return try await tool.runOutput(input: decoded, authority: authority)
         }
-    }
-
-    public func run(input: ToolArguments, authority: any Authority) async throws -> String {
-        try await _runWithAuthority(input, authority).transcript
-    }
-
-    public func runOutput(input: ToolArguments, authority: any Authority) async throws -> ToolOutput {
-        try await _runWithAuthority(input, authority)
-    }
-
-    /// Executes arguments that have already been parsed by
-    /// AnyLanguageModel. No provider JSON round-trip is needed here.
-    public func run(
-        generatedContent: GeneratedContent,
-        authority: any Authority
-    ) async throws -> String {
-        try await _runGeneratedWithAuthority(generatedContent, authority).transcript
     }
 
     public func runOutput(

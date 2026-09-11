@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import HailAgentRuntime
 import HailCore
 import Testing
@@ -30,7 +31,7 @@ struct SlidingWindowCompactorTests {
 
     private func context(
         thread: [ChatMessage],
-        summary: String? = nil,
+        summary: GeneratedContent? = nil,
         memory: [String] = []
     ) throws -> PromptContext {
         PromptContext(
@@ -53,10 +54,35 @@ struct SlidingWindowCompactorTests {
         assembleStandardPrompt(context)
     }
 
+    private func text(in entry: Transcript.Entry) -> String {
+        let segments: [Transcript.Segment]
+        switch entry {
+        case .instructions(let value):
+            segments = value.segments
+        case .prompt(let value):
+            segments = value.segments
+        case .response(let value):
+            segments = value.segments
+        case .toolCalls, .toolOutput:
+            return ""
+        }
+
+        return segments.map { segment in
+            switch segment {
+            case .text(let value):
+                return value.content
+            case .structure(let value):
+                return value.content.jsonString
+            case .image:
+                return "[image]"
+            }
+        }.joined(separator: "\n")
+    }
+
     private func requireCompaction(
-        _ decision: CompactionDecision,
+        _ decision: CompactionDecision<String>,
         sourceLocation: SourceLocation = #_sourceLocation
-    ) throws -> ConversationCompaction {
+    ) throws -> CompactionResult<String> {
         guard case .compacted(let compaction) = decision else {
             Issue.record("Expected a compaction decision", sourceLocation: sourceLocation)
             throw TestFailure()
@@ -65,14 +91,14 @@ struct SlidingWindowCompactorTests {
     }
 
     /// A compactor with a request-sized 1,000-token window. The fixture uses a
-    /// 10% soft threshold and reserves 850 tokens, leaving a 150-token target
-    /// for the assembled prompt so suffix selection is exercised.
+    /// 15% soft threshold and reserves 400 tokens, leaving enough room for
+    /// the assembled prompt and the retained suffix in this small fixture.
     private func makeCompactor(
         keepRecent: Int = 2,
-        outputReserve: Int = 850
+        outputReserve: Int = 400
     ) -> SlidingWindowCompactor {
         SlidingWindowCompactor(
-            threshold: 0.1,
+            threshold: 0.15,
             keepRecent: keepRecent,
             outputReserve: outputReserve,
             toolResultReserve: 0
@@ -114,7 +140,7 @@ struct SlidingWindowCompactorTests {
             ) { _ in "rolled" }
         )
 
-        #expect(result.summary == "rolled")
+        #expect(result.output == "rolled")
         // The preferred tail is kept when it fits. Compaction archives the
         // complete older prefix, rather than stopping after an arbitrary
         // minimum amount of progress.
@@ -152,15 +178,15 @@ struct SlidingWindowCompactorTests {
     func priorSummaryFoldedIn() async throws {
         let compactor = makeCompactor(keepRecent: 1)
         let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let calls = Box<[[LLMMessage]]>()
+        let calls = Box<[[Transcript.Entry]]>()
 
-        let ctx = try context(thread: thread, summary: "v1")
+        let ctx = try context(thread: thread, summary: GeneratedContent("v1"))
         _ = try await compactor.compact(
             context: ctx,
             request: preparedRequest(for: ctx),
             budget: try budget()
         ) { request in
-            calls.value = (calls.value ?? []) + [request.messages]
+            calls.value = (calls.value ?? []) + [request.entries]
             return "v2"
         }
 
@@ -169,7 +195,8 @@ struct SlidingWindowCompactorTests {
         #expect(
             prompts.contains {
                 $0.contains { message in
-                    message.content.contains("Summary so far: v1")
+                    let rendered = text(in: message)
+                    return rendered.contains("Summary so far:") && rendered.contains("\"v1\"")
                 }
             }
         )
@@ -180,13 +207,14 @@ struct SlidingWindowCompactorTests {
         let compactor = makeCompactor(keepRecent: 2)
         // Thread over threshold where the naive cut lands right after a
         // toolCall — its result would be orphaned in the kept suffix.
-        let call = ToolCall(id: "1", name: "read_file", arguments: ToolArguments(json: "{}"))
+        let call = ToolCall(id: "1", name: "read_file", arguments: GeneratedContent(properties: [:]))
         let thread: [ChatMessage] = [
             text(String(repeating: "a", count: 40), 0),
             text(String(repeating: "b", count: 40), 1),
             text(String(repeating: "c", count: 40), 2),
             .toolCall(calls: [call], timestamp: Date(timeIntervalSince1970: 3)),
-            .toolResult(id: "1", content: "contents", timestamp: Date(timeIntervalSince1970: 4)),
+            .toolResult(
+                id: "1", name: "read_file", output: .text("contents"), timestamp: Date(timeIntervalSince1970: 4)),
             text(String(repeating: "d", count: 40), 5),
         ]
 
@@ -203,20 +231,60 @@ struct SlidingWindowCompactorTests {
         // is still too large for the retained request budget. The fallback
         // therefore archives that complete interaction as one unit and keeps
         // only the final semantic message.
-        #expect(result.archivedCount == 5)
+        #expect(result.archivedCount == 3)
+    }
+
+    @Test("the current assistant tool-round representation stays paired with its result")
+    func assistantToolRoundIntegrity() async throws {
+        let compactor = makeCompactor(keepRecent: 2)
+        let call = ToolCall(id: "1", name: "read_file", arguments: GeneratedContent(properties: [:]))
+        let thread: [ChatMessage] = [
+            text(String(repeating: "a", count: 40), 0),
+            text(String(repeating: "b", count: 40), 1),
+            text(String(repeating: "c", count: 40), 2),
+            .assistantToolCall(
+                round: ModelToolRound(
+                    narration: Transcript.Response(
+                        assetIDs: [],
+                        segments: [.text(.init(content: "working"))]
+                    ),
+                    reasoning: [.text(.init(content: "checking"))],
+                    calls: [call]
+                ),
+                timestamp: Date(timeIntervalSince1970: 3)
+            ),
+            .toolResult(
+                id: "1",
+                name: "read_file",
+                output: .text("contents"),
+                timestamp: Date(timeIntervalSince1970: 4)
+            ),
+            text(String(repeating: "d", count: 40), 5),
+        ]
+
+        let ctx = try context(thread: thread)
+        let result = try requireCompaction(
+            await compactor.compact(
+                context: ctx,
+                request: preparedRequest(for: ctx),
+                budget: try budget()
+            ) { _ in "rolled" }
+        )
+
+        #expect(result.archivedCount == 3)
     }
 
     @Test("the cut keeps every result of a parallel tool call with its call")
     func parallelToolResultsStayTogether() async throws {
-        let compactor = makeCompactor(keepRecent: 2, outputReserve: 800)
-        let first = ToolCall(id: "1", name: "read_file", arguments: ToolArguments(json: "{}"))
-        let second = ToolCall(id: "2", name: "read_file", arguments: ToolArguments(json: "{}"))
+        let compactor = makeCompactor(keepRecent: 2, outputReserve: 400)
+        let first = ToolCall(id: "1", name: "read_file", arguments: GeneratedContent(properties: [:]))
+        let second = ToolCall(id: "2", name: "read_file", arguments: GeneratedContent(properties: [:]))
         let thread: [ChatMessage] = [
             text(String(repeating: "a", count: 80), 0),
             text(String(repeating: "b", count: 80), 1),
             .toolCall(calls: [first, second], timestamp: Date(timeIntervalSince1970: 2)),
-            .toolResult(id: "1", content: "first", timestamp: Date(timeIntervalSince1970: 3)),
-            .toolResult(id: "2", content: "second", timestamp: Date(timeIntervalSince1970: 4)),
+            .toolResult(id: "1", name: "read_file", output: .text("first"), timestamp: Date(timeIntervalSince1970: 3)),
+            .toolResult(id: "2", name: "read_file", output: .text("second"), timestamp: Date(timeIntervalSince1970: 4)),
             text(String(repeating: "c", count: 80), 5),
         ]
 
@@ -232,7 +300,7 @@ struct SlidingWindowCompactorTests {
         // The preferred suffix contains the complete parallel interaction,
         // but the rebuilt request does not fit. The fallback archives the
         // whole call/results group; it never leaves either result orphaned.
-        #expect(result.archivedCount == 5)
+        #expect(result.archivedCount == 2)
     }
 
     @Test("the message opening the in-flight turn is never archived")
@@ -276,7 +344,7 @@ struct SlidingWindowCompactorTests {
         let compactor = makeCompactor(keepRecent: 1, outputReserve: 800)
         let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
         let ctx = try context(thread: thread)
-        let measuredCandidates = Box<[[LLMMessage]]>()
+        let measuredCandidates = Box<[[Transcript.Entry]]>()
 
         let request = assembleStandardPrompt(ctx)
         let result = try requireCompaction(
@@ -287,11 +355,11 @@ struct SlidingWindowCompactorTests {
                 measurement: RequestMeasurement(tokenCount: 500, source: .reported),
                 measure: { candidate in
                     measuredCandidates.value =
-                        (measuredCandidates.value ?? []) + [candidate.messages]
+                        (measuredCandidates.value ?? []) + [candidate.entries]
                     // Deliberately disagree with the character estimator: the exact
                     // tokenizer says each rendered message costs 40 tokens.
                     return RequestMeasurement(
-                        tokenCount: candidate.messages.count * 40,
+                        tokenCount: candidate.entries.count * 40,
                         source: .reported
                     )
                 },
@@ -307,7 +375,9 @@ struct SlidingWindowCompactorTests {
         #expect(
             measuredCandidates.value?.contains { messages in
                 messages.contains {
-                    $0.content.contains("Earlier conversation, summarized: rolled")
+                    let rendered = text(in: $0)
+                    return rendered.contains("Earlier conversation, summarized:")
+                        && rendered.contains("\"rolled\"")
                 }
             } == true
         )
@@ -316,12 +386,13 @@ struct SlidingWindowCompactorTests {
     @Test("assistant narration stays attached to the following tool group")
     func assistantNarrationToolGroupIntegrity() async throws {
         let compactor = makeCompactor(keepRecent: 2, outputReserve: 760)
-        let call = ToolCall(id: "1", name: "read_file", arguments: ToolArguments(json: "{}"))
+        let call = ToolCall(id: "1", name: "read_file", arguments: GeneratedContent(properties: [:]))
         let thread: [ChatMessage] = [
             text(String(repeating: "a", count: 40), 0),
             .text(sender: agentID.rawValue, content: "I will inspect it.", timestamp: Date(timeIntervalSince1970: 1)),
             .toolCall(calls: [call], timestamp: Date(timeIntervalSince1970: 2)),
-            .toolResult(id: "1", content: "contents", timestamp: Date(timeIntervalSince1970: 3)),
+            .toolResult(
+                id: "1", name: "read_file", output: .text("contents"), timestamp: Date(timeIntervalSince1970: 3)),
             text(String(repeating: "b", count: 40), 4),
             text(String(repeating: "c", count: 40), 5),
         ]
@@ -336,7 +407,7 @@ struct SlidingWindowCompactorTests {
                 measurement: RequestMeasurement(tokenCount: 500, source: .reported),
                 measure: { candidate in
                     RequestMeasurement(
-                        tokenCount: candidate.messages.count * 40,
+                        tokenCount: candidate.entries.count * 40,
                         source: .reported
                     )
                 },
@@ -354,15 +425,17 @@ struct SlidingWindowCompactorTests {
     @Test("reused tool IDs do not merge separate interactions")
     func repeatedToolIDsStaySeparate() async throws {
         let compactor = makeCompactor(keepRecent: 1, outputReserve: 400)
-        let call1 = ToolCall(id: "repeat", name: "read_file", arguments: ToolArguments(json: "{}"))
-        let call2 = ToolCall(id: "repeat", name: "read_file", arguments: ToolArguments(json: "{}"))
+        let call1 = ToolCall(id: "repeat", name: "read_file", arguments: GeneratedContent(properties: [:]))
+        let call2 = ToolCall(id: "repeat", name: "read_file", arguments: GeneratedContent(properties: [:]))
         let thread: [ChatMessage] = [
             text("old", 0),
             .toolCall(calls: [call1], timestamp: Date(timeIntervalSince1970: 1)),
-            .toolResult(id: "repeat", content: "first", timestamp: Date(timeIntervalSince1970: 2)),
+            .toolResult(
+                id: "repeat", name: "read_file", output: .text("first"), timestamp: Date(timeIntervalSince1970: 2)),
             text("between", 3),
             .toolCall(calls: [call2], timestamp: Date(timeIntervalSince1970: 4)),
-            .toolResult(id: "repeat", content: "second", timestamp: Date(timeIntervalSince1970: 5)),
+            .toolResult(
+                id: "repeat", name: "read_file", output: .text("second"), timestamp: Date(timeIntervalSince1970: 5)),
             text("tail", 6),
         ]
         let ctx = try context(thread: thread)
@@ -376,7 +449,7 @@ struct SlidingWindowCompactorTests {
                 measurement: RequestMeasurement(tokenCount: 900, source: .reported),
                 measure: { candidate in
                     RequestMeasurement(
-                        tokenCount: candidate.messages.count * 100,
+                        tokenCount: candidate.entries.count * 100,
                         source: .reported
                     )
                 },
@@ -408,8 +481,8 @@ struct SlidingWindowCompactorTests {
                 budget: try budget(),
                 measurement: RequestMeasurement(tokenCount: 1_000, source: .reported),
                 measure: { candidate in
-                    let hasOversizedTail = candidate.messages.contains {
-                        $0.content.count > 10_000
+                    let hasOversizedTail = candidate.entries.contains {
+                        text(in: $0).count > 10_000
                     }
                     return RequestMeasurement(
                         tokenCount: hasOversizedTail ? 1_000 : 1,

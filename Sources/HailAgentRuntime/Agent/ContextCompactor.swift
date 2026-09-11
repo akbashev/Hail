@@ -1,24 +1,14 @@
+import AnyLanguageModel
 import HailCore
-
-/// A completed conversation compaction: the oldest `archivedCount` thread entries
-/// were folded into `summary`, which REPLACES the previous rolling summary
-/// (the compactor folds ``PromptContext/contextSummary`` into the new one).
-public struct ConversationCompaction: Sendable, Equatable {
-    public var summary: String
-    public var archivedCount: Int
-
-    public init(summary: String, archivedCount: Int) {
-        self.summary = summary
-        self.archivedCount = archivedCount
-    }
-}
 
 /// Explicit domain decision returned by a context compactor. “No work” is a
 /// valid decision rather than absence of a result or a suppressed failure.
-public enum CompactionDecision: Sendable, Equatable {
+public enum CompactionDecision<Output: Codable & Sendable & Generable>: Sendable {
     case unchanged
-    case compacted(ConversationCompaction)
+    case compacted(CompactionResult<Output>)
 }
+
+extension CompactionDecision: Equatable where Output: Equatable {}
 
 /// Explains why a compactor was asked to make a decision. A provider-reported
 /// context failure is different from the normal occupancy threshold: it must
@@ -65,11 +55,11 @@ public struct CompactionBudget: Sendable, Equatable {
 
 /// The exact input and output allowance for one summarization request.
 public struct CompactionSummaryRequest: Sendable {
-    public let messages: [LLMMessage]
+    public let entries: [Transcript.Entry]
     public let maxOutputTokens: Int
 
-    public init(messages: [LLMMessage], maxOutputTokens: Int) {
-        self.messages = messages
+    public init(entries: [Transcript.Entry], maxOutputTokens: Int) {
+        self.entries = entries
         self.maxOutputTokens = maxOutputTokens
     }
 }
@@ -101,40 +91,33 @@ public struct PreparedRequest: Sendable {
     public struct ConversationEntry: Sendable {
         /// Index of the source ``ChatMessage`` in ``PromptContext``.
         public let sourceIndex: Int
-        public let message: LLMMessage
+        public let entry: Transcript.Entry
 
-        public init(sourceIndex: Int, message: LLMMessage) {
+        public init(sourceIndex: Int, entry: Transcript.Entry) {
             self.sourceIndex = sourceIndex
-            self.message = message
+            self.entry = entry
         }
     }
 
-    public let prefix: [LLMMessage]
+    public let prefix: [Transcript.Entry]
     public let conversation: [ConversationEntry]
-    public let suffix: [LLMMessage]
+    public let suffix: [Transcript.Entry]
     public let tools: [ToolDefinition]
-    /// Rich request input for provider-aware token counting. Ordinary prompt
-    /// assembly leaves this nil; the reasoning loop supplies it after a tool
-    /// round so artifact bodies are included in the budget.
-    public let input: ModelInput?
-
     public init(
-        prefix: [LLMMessage],
+        prefix: [Transcript.Entry],
         conversation: [ConversationEntry],
-        suffix: [LLMMessage] = [],
-        tools: [ToolDefinition] = [],
-        input: ModelInput? = nil
+        suffix: [Transcript.Entry] = [],
+        tools: [ToolDefinition] = []
     ) {
         self.prefix = prefix
         self.conversation = conversation
         self.suffix = suffix
         self.tools = tools
-        self.input = input
     }
 
     /// The full request in provider order.
-    public var messages: [LLMMessage] {
-        prefix + conversation.map(\.message) + suffix
+    public var entries: [Transcript.Entry] {
+        prefix + conversation.map(\.entry) + suffix
     }
 
     /// Finds the provider-message position corresponding to one durable
@@ -154,52 +137,15 @@ public struct PreparedRequest: Sendable {
     /// Adds request-local messages and tool schemas without changing the
     /// policy-owned prefix or conversation mapping.
     public func appending(
-        suffix additionalMessages: [LLMMessage],
+        suffix additionalMessages: [Transcript.Entry],
         tools additionalTools: [ToolDefinition]
     ) -> PreparedRequest {
         PreparedRequest(
             prefix: prefix,
             conversation: conversation,
             suffix: suffix + additionalMessages,
-            tools: tools + additionalTools,
-            input: input
+            tools: tools + additionalTools
         )
-    }
-
-    public func withInput(_ input: ModelInput?) -> PreparedRequest {
-        PreparedRequest(
-            prefix: prefix,
-            conversation: conversation,
-            suffix: suffix,
-            tools: tools,
-            input: input
-        )
-    }
-
-    /// Rebuilds rich input for a candidate whose semantic conversation has
-    /// been trimmed by a compactor. This method is called on the source
-    /// request, so it can distinguish archived tool results from live outputs
-    /// that have not entered the durable conversation yet.
-    public func input(for messages: [LLMMessage]) -> ModelInput {
-        guard let input else { return ModelInput(messages: messages) }
-
-        // A live tool output can exist in `input` before its semantic result
-        // has reached the durable conversation thread. Keep those entries in
-        // the request, but do not resurrect an output whose tool-result
-        // message was deliberately archived from this request.
-        let representedToolResultCounts = self.messages.reduce(into: [String: Int]()) {
-            counts, message in
-            guard message.role == .tool, let callID = message.toolCallID else { return }
-            counts[callID, default: 0] += 1
-        }
-        var consumedToolResultCounts: [String: Int] = [:]
-        let liveOutputs = input.richOutputMessages.filter { message in
-            guard let callID = message.toolCallID else { return true }
-            let consumed = consumedToolResultCounts[callID, default: 0]
-            consumedToolResultCounts[callID] = consumed + 1
-            return consumed >= representedToolResultCounts[callID, default: 0]
-        }
-        return input.rebased(on: messages + liveOutputs)
     }
 }
 
@@ -226,16 +172,16 @@ public protocol ContextCompactor: Sendable {
     /// the conversation section carrying source indices back to
     /// `PromptContext.conversationThread`. A compactor must preserve the
     /// prefix and suffix while replacing only that conversation section.
-    func compact(
+    func compact<Output: Codable & Sendable & Generable>(
         context: PromptContext,
         request: PreparedRequest,
         budget: CompactionBudget,
         measurement: RequestMeasurement?,
         measure: RequestMeasurer?,
         assemble: PromptAssembler,
-        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String,
+        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
         trigger: ContextCompactionTrigger
-    ) async throws(AgentRuntimeError) -> CompactionDecision
+    ) async throws(AgentRuntimeError) -> CompactionDecision<Output>
 }
 
 extension ContextCompactor {
@@ -243,12 +189,12 @@ extension ContextCompactor {
     /// token counters or an overflow trigger. The runtime uses the full
     /// request-aware operation above; this helper keeps direct policy tests and
     /// simple hosts small.
-    public func compact(
+    public func compact<Output: Codable & Sendable & Generable>(
         context: PromptContext,
         request: PreparedRequest,
         budget: CompactionBudget,
-        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> String
-    ) async throws(AgentRuntimeError) -> CompactionDecision {
+        summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
+    ) async throws(AgentRuntimeError) -> CompactionDecision<Output> {
         try await compact(
             context: context,
             request: request,

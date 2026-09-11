@@ -55,8 +55,6 @@ Tools are model-facing workflows dispatched by `ToolRegistry` under the turn's a
 - ``ModelCatalog``
 - ``AgentModel``
 - ``AgentModelProvider``
-- ``LLMMessage``
-- ``LLMToolCall``
 - ``ModelUsage``
 - ``ContextUsage``
 - ``TurnID``

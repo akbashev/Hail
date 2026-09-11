@@ -49,10 +49,15 @@ let scout: Agent = try await system.virtualActors.getActor(
 
 ### Talk to it
 
-`respond` sends a message instead of calling a process-local loop and waits for a typed result. Replace `ChatResponse` with your own `Codable` output type when the domain needs a stronger contract.
+`respond` sends a message instead of calling a process-local loop and waits for a typed result. The output type belongs to the application:
 
 ```swift
-let reply: ChatResponse = try await scout.respond(
+@Generable
+struct ChatReply: Codable, Sendable {
+    let content: String
+}
+
+let reply: ChatReply = try await scout.respond(
     "Survey the area and report anything unusual."
 )
 print(reply.content)
@@ -68,8 +73,8 @@ distributed actor Navigator {
     let brain: Agent
     let scout: Agent
 
-    func investigate() async throws -> ChatResponse {
-        let report: ChatResponse = try await scout.respond(
+    func investigate() async throws -> ChatReply {
+        let report: ChatReply = try await scout.respond(
             "Inspect the signal and report your findings."
         )
         return try await brain.respond(
@@ -82,10 +87,10 @@ Navigator addresses the scout by its virtual-actor reference, then sends the res
 
 ### Stream a turn
 
-`AgentStream<ChatResponse>` exposes the typed turn lifecycle while it runs. It lets a UI or another agent observe progress without taking ownership of the agent's loop or state.
+`AgentStream<ChatReply>` exposes the typed turn lifecycle while it runs. It lets a UI or another agent observe progress without taking ownership of the agent's loop or state.
 
 ```swift
-let stream = AgentStream<ChatResponse>(actorSystem: system)
+let stream = AgentStream<ChatReply>(actorSystem: system)
 let updates = Task {
     for await update in stream.updates {
         switch update {
@@ -132,8 +137,10 @@ let authority = CompositeAuthority()
         decide: FileEffect.pathPolicy(scopedTo: projectRoot)
     )
 let file = AnyTool(FileTool(projectRoot: URL(fileURLWithPath: projectRoot)))
-let contents = try await file.execute(
-    input: ToolArguments(json: #"{"action":"read","path":"README.md"}"#),
+let contents = try await file.run(
+    generatedContent: try GeneratedContent(
+        json: #"{"action":"read","path":"README.md","content":null,"old_content":null,"new_content":null}"#
+    ),
     authority: authority
 )
 print(contents)

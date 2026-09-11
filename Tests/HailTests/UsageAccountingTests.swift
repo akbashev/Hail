@@ -286,6 +286,75 @@ struct UsageAccountingTests {
             })
     }
 
+    @Generable
+    struct SalvagedReport: Codable, Sendable {
+        let keyPoints: [String]
+    }
+
+    @Test("a compaction length finish with headroom salvages the truncated report")
+    func ollamaCompactionLengthFinishSalvagesReport() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://salvage.test",
+            numContext: 100_000,
+            lines: [
+                #"{"message":{"role":"assistant","content":"{\"keyPoints\":[\"alpha\",\"beta\",\"gam"},"done":false}"#,
+                #"{"message":{"role":"assistant","content":"ma\",\"delta\""},"done":true,"done_reason":"length","prompt_eval_count":500,"eval_count":40}"#,
+            ]
+        )
+
+        var events: [ModelEvent<SalvagedReport>] = []
+        for await event in endpoint.stream(
+            request: ModelRequest(input: "hello", entries: [prompt("hello")]),
+            tools: [],
+            authority: FullAuthority(),
+            generating: SalvagedReport.self,
+            purpose: .compaction(maxOutputTokens: 40)
+        ) {
+            events.append(event)
+        }
+
+        #expect(
+            events.contains {
+                if case .generated(let report) = $0 {
+                    report.keyPoints == ["alpha", "beta", "gamma", "delta"]
+                } else {
+                    false
+                }
+            })
+    }
+
+    @Test("a generation length finish with headroom stays a plain failure")
+    func ollamaGenerationLengthFinishWithHeadroomStillFails() async throws {
+        let endpoint = ollamaEndpoint(
+            baseURL: "http://capped.test",
+            numContext: 100_000,
+            lines: [
+                #"{"message":{"role":"assistant","content":"{\"keyPoints\":[\"alpha\",\"beta\",\"gam"},"done":false}"#,
+                #"{"message":{"role":"assistant","content":"ma\",\"delta\""},"done":true,"done_reason":"length","prompt_eval_count":500,"eval_count":40}"#,
+            ]
+        )
+
+        var events: [ModelEvent<SalvagedReport>] = []
+        for await event in endpoint.stream(
+            request: ModelRequest(input: "hello", entries: [prompt("hello")]),
+            tools: [],
+            authority: FullAuthority(),
+            generating: SalvagedReport.self,
+            purpose: .generation
+        ) {
+            events.append(event)
+        }
+
+        #expect(
+            events.contains {
+                if case .failed(.requestFailed(let message)) = $0 {
+                    message.contains("done_reason: length")
+                } else {
+                    false
+                }
+            })
+    }
+
     @Test("Ollama keeps an assistant tool round in one provider message")
     func ollamaCombinesAssistantToolRound() async throws {
         let capture = RequestCapture()

@@ -91,12 +91,23 @@ enum SummaryPrompt {
         priorSummary: GeneratedContent?,
         archived: [ChatMessage],
         agentID: AgentID,
-        task: String
+        task: String,
+        outputBudget: Int? = nil
     ) -> [Transcript.Entry] {
         var transcript: [String] = []
         if let priorSummary { transcript.append("Summary so far:\n\(priorSummary.jsonString)") }
         for message in archived {
             transcript.append(render(message, agentID: agentID))
+        }
+
+        var taskText = task
+        if let outputBudget, outputBudget > 0 {
+            taskText += """
+
+                The report must fit within \(outputBudget) tokens. Keep entries few \
+                and short: a concise report that fits is worth far more than a \
+                complete one that does not.
+                """
         }
 
         return [
@@ -105,7 +116,7 @@ enum SummaryPrompt {
                     segments: [
                         .text(
                             .init(
-                                content: task
+                                content: taskText
                             ))
                     ],
                     toolDefinitions: []

@@ -651,6 +651,7 @@ struct SlidingWindowCompactorTests {
         let instruction = entries.first.map(text(in:)) ?? ""
         #expect(instruction.contains("The test report task, authored on the type itself."))
         #expect(instruction.contains("compacting an agent's conversation history"))
+        #expect(instruction.contains("fit within"))
     }
 
     @Test("report types without a description keep the plain-text summary task")

@@ -24,6 +24,7 @@ let package = Package(
             traits: ["AsyncHTTPClient"]
         ),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),
+        .package(url: "https://github.com/mattt/PartialJSONDecoder.git", from: "1.0.0"),
         .package(url: "https://github.com/wiedymi/swift-acp.git", branch: "main"),
         .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
@@ -65,6 +66,7 @@ let package = Package(
                 .product(name: "Subprocess", package: "swift-subprocess"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                .product(name: "PartialJSONDecoder", package: "PartialJSONDecoder"),
             ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")

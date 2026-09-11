@@ -2,6 +2,7 @@ import AnyLanguageModel
 import AsyncHTTPClient
 import HailCore
 import NIOCore
+import PartialJSONDecoder
 
 #if canImport(FoundationEssentials)
     import FoundationEssentials
@@ -158,7 +159,11 @@ private struct OllamaStreamState: Sendable {
         return (next, events)
     }
 
-    func finishing(format: AnyCodableValue?, contextWindow: Int?) throws -> [OllamaEvent] {
+    func finishing(
+        format: AnyCodableValue?,
+        contextWindow: Int?,
+        purpose: ModelRequestPurpose
+    ) throws -> [OllamaEvent] {
         if let doneReason, doneReason == "length",
             Self.consumedContextFillsWindow(
                 promptTokens: promptEvalCount,
@@ -172,6 +177,21 @@ private struct OllamaStreamState: Sendable {
             // the typed overflow so the runtime's context recovery runs
             // instead of failing the turn as generic model misbehavior.
             return [.failed(.contextLengthExceeded)]
+        }
+        if let doneReason, doneReason == "length",
+            case .compaction = purpose,
+            !text.isEmpty
+        {
+            // The summarizer was invited to emit at most num_predict tokens
+            // and reached that cap with window headroom left: a truncated
+            // report, not misbehavior. Complete the JSON at its last whole
+            // value and use the salvaged prefix; the host's context
+            // projection fits it deterministically from here.
+            if let completed = try? JSONCompleter().complete(text),
+                let salvaged = try? GeneratedContent(json: completed)
+            {
+                return [.generated(salvaged)]
+            }
         }
         if !toolCalls.isEmpty {
             let narration =
@@ -454,7 +474,8 @@ public struct OllamaEndpoint: ModelEndpoint {
                     }
                     for event in try state.finishing(
                         format: format,
-                        contextWindow: effectiveContextWindow
+                        contextWindow: effectiveContextWindow,
+                        purpose: purpose
                     ) {
                         continuation.yield(event)
                     }

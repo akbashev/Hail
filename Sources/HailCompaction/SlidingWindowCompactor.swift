@@ -121,7 +121,8 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 priorSummary: context.contextSummary,
                 archived: Array(context.conversationThread.prefix(count)),
                 agentID: context.agentID,
-                task: CompactionTask.instructions(for: Output.self)
+                task: CompactionTask.instructions(for: Output.self),
+                outputBudget: summaryBudget
             )
             // The summary room is a preference among fitting cuts, never a
             // dead end: a deeper cut with real room always wins, but the

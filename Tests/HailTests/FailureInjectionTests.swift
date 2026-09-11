@@ -12,9 +12,8 @@ import Testing
 
 #if canImport(FoundationEssentials)
     import FoundationEssentials
-#else
-    import Foundation
 #endif
+import Foundation
 
 /// Failure-injection coverage for Hail-owned failure modes: harness process
 /// death mid-turn, protocol-violating harnesses, repeated crash recovery at
@@ -680,5 +679,44 @@ struct CorruptedJournalTests {
         // The journaled session identity the resume path reads is intact.
         #expect(state.modelSession?.id == SessionID("session-1"))
         #expect(state.modelSession?.identity == SessionIdentity("fp-A"))
+    }
+
+    @Test("conversationCompacted written before typed reports still replays")
+    func legacyCompactionEventWithoutOutputReplays() throws {
+        let agentID = AgentID(role: Role("coder"), contextID: AgentContextID("T-2"))
+        var state = AgentState(agentID: agentID)
+        state.apply(
+            .messageReceived(
+                .text(sender: "user", content: "hello", timestamp: Date(timeIntervalSince1970: 2))
+            ))
+        state.apply(
+            .messageReceived(
+                .text(sender: "user", content: "world", timestamp: Date(timeIntervalSince1970: 3))
+            ))
+
+        let line = try encode(
+            .conversationCompacted(
+                archivedCount: 1,
+                content: GeneratedContent("the rolling summary"),
+                output: GeneratedContent("the typed report")
+            )
+        )
+
+        // A journal written before typed compaction reports has no `output`
+        // key in the payload; replay must tolerate its absence.
+        var envelope = try #require(
+            JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        )
+        var payload = try #require(envelope["conversationCompacted"] as? [String: Any])
+        payload["output"] = nil
+        envelope["conversationCompacted"] = payload
+        let legacy = try JSONSerialization.data(withJSONObject: envelope)
+
+        let decoded = try JSONDecoder().decode(AgentEvent.self, from: legacy)
+        state.apply(decoded)
+
+        #expect(state.contextSummary == GeneratedContent("the rolling summary"))
+        #expect(state.conversationThread.count == 1)
+        #expect(state.latestCompactionOutput == nil)
     }
 }

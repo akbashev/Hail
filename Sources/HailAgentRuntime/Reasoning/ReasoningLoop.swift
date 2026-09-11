@@ -207,6 +207,11 @@ struct TurnContext: Sendable {
     /// The journaled harness session (id + identity) from previous runs, used
     /// to resume after a restart and to detect when the id changes.
     let modelSession: ModelSessionResume?
+    /// Occupancy the provider reported for the most recent request. The next
+    /// request strictly grows on it, so it is a floor for threshold decisions
+    /// when no preflight token counter exists. Consumed (cleared) once
+    /// compaction acts on it.
+    var latestContextUsage: ContextUsage? = nil
 }
 
 /// The prompt for one live reasoning turn.
@@ -657,6 +662,22 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
 
     // MARK: - Compaction
 
+    /// The provider-reported occupancy floor for a threshold decision when
+    /// no preflight token counter exists. Returns nil when there is no
+    /// report, when the report's window does not match the endpoint's
+    /// effective window, or when it reports no usage: in every such case the
+    /// floor is not trustworthy evidence. The count is used only as the
+    /// trigger measurement; the compactor's own threshold still decides.
+    static func reportedFloorMeasurement(
+        usage: ContextUsage?,
+        window: Int
+    ) -> RequestMeasurement? {
+        guard let usage, usage.limitTokens == window, usage.usedTokens > 0 else {
+            return nil
+        }
+        return RequestMeasurement(tokenCount: usage.usedTokens, source: .reported)
+    }
+
     /// Offers the turn's context to the compactor and journals the result.
     ///
     /// Session-owning harnesses manage their own context server-side and are
@@ -715,14 +736,27 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             // Hail's serialized transcript and tool schemas, while Ollama
             // counts its own rendered chat template; using that estimate here
             // can compact a request that is nowhere near the provider limit.
-            // Provider-reported usage remains available to diagnostics, but
-            // it is not reused as a measurement for another request: the
-            // next request may have a different prompt, tool set, or purpose.
+            // Provider-reported occupancy is different in kind: within a
+            // conversation the next request strictly grows on the previous
+            // one, so the last report is a guaranteed floor, never a stale
+            // guess. When a floor exists it is offered as the trigger
+            // measurement and the compactor's own threshold still decides;
+            // candidate fitting stays on the estimator, with the
+            // post-generation guard and the typed overflow recovery as nets.
             // A provider-reported overflow remains an explicit recovery
-            // trigger, so it still reaches the compactor below.
-            guard trigger == .contextLengthExceeded else { return turnContext }
-            measurement = nil
-            measure = nil
+            // trigger either way.
+            if trigger == .contextLengthExceeded {
+                measurement = nil
+                measure = nil
+            } else if let floor = Self.reportedFloorMeasurement(
+                usage: turnContext.latestContextUsage,
+                window: contextWindow
+            ) {
+                measurement = floor
+                measure = nil
+            } else {
+                return turnContext
+            }
         case .available(let count):
             measurement = RequestMeasurement(
                 tokenCount: try await count(request.entries, request.tools),
@@ -800,7 +834,11 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 output: result.output.generatedContent
             )
         )
-        return try await rebuildContext(turnContext)
+        var rebuilt = try await rebuildContext(turnContext)
+        // The floor described the pre-compaction occupancy; keeping it would
+        // re-trigger compaction on the next check.
+        rebuilt.latestContextUsage = nil
+        return rebuilt
     }
 
     /// Runs the summarization prompt through the turn's own endpoint as a

@@ -226,7 +226,7 @@ public struct AgentState: Codable, Sendable {
             currentToolName = nil
         case .conversationCompacted(let archivedCount, let content, let output):
             contextSummary = content
-            latestCompactionOutput = output
+            if let output { latestCompactionOutput = output }
             if archivedCount > 0 && archivedCount <= conversationThread.count {
                 conversationThread.removeFirst(archivedCount)
             }

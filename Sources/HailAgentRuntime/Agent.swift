@@ -731,7 +731,8 @@ public distributed actor Agent: AsyncSequence {
             preparedRequest: assemblePrompt(promptContext),
             promptContext: promptContext,
             sessionIdentity: sessionIdentity,
-            modelSession: modelSession
+            modelSession: modelSession,
+            latestContextUsage: state.latestContextUsage
         )
     }
 

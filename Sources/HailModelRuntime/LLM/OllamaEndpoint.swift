@@ -630,10 +630,17 @@ public struct OllamaEndpoint: ModelEndpoint {
         return try T(GeneratedContent(json: text))
     }
 
+    /// Encodes the declared output type's generation schema for Ollama's
+    /// `format` field. The schema is inlined first: Ollama's grammar builder
+    /// resolves a `$ref` only at the document root and silently drops the
+    /// constraint on inner references. Schemas that cannot be inlined
+    /// (missing definitions, cycles) fail here as `invalidRequest` instead
+    /// of reaching the provider unconstrained.
     private static func outputSchema<T>(for type: T.Type) throws -> AnyCodableValue
     where T: Codable & Sendable & Generable {
         let data = try JSONEncoder().encode(T.generationSchema)
-        return try JSONDecoder().decode(AnyCodableValue.self, from: data)
+        let schema = try JSONDecoder().decode(AnyCodableValue.self, from: data)
+        return try inlineSchemaRefs(schema)
     }
 
     /// Why a schema could not be inlined for Ollama's grammar builder. Every

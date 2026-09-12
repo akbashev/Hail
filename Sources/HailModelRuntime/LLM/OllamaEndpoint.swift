@@ -630,10 +630,86 @@ public struct OllamaEndpoint: ModelEndpoint {
         return try T(GeneratedContent(json: text))
     }
 
-    private static func outputSchema<T>(for type: T.Type) throws -> AnyCodableValue
+    /// Encodes the declared output type's generation schema for Ollama's
+    /// `format` field. `@Generable` schemas address nested types through
+    /// `$defs`/`$ref`; Ollama's grammar builder resolves a root `$ref` but
+    /// silently drops the whole `format` constraint when a `$ref` appears
+    /// inside `properties`, falling back to unconstrained sampling. The
+    /// schema is fully inlined first so the constraint actually holds
+    /// (``inlineSchemaRefs(_:)``).
+    static func outputSchema<T>(for type: T.Type) throws -> AnyCodableValue
     where T: Codable & Sendable & Generable {
         let data = try JSONEncoder().encode(T.generationSchema)
-        return try JSONDecoder().decode(AnyCodableValue.self, from: data)
+        let schema = try JSONDecoder().decode(AnyCodableValue.self, from: data)
+        return try inlineSchemaRefs(schema)
+    }
+
+    /// Why a schema could not be inlined for Ollama's grammar builder.
+    /// Every case is rejected loudly: sending the schema anyway would
+    /// repeat the silent unconstrained fallback this inlining exists to
+    /// prevent.
+    enum SchemaInliningError: Error, Equatable {
+        /// A `$ref` pointing outside the document's own `$defs`.
+        case externalReference(String)
+        /// A `$ref` whose definition is absent from the root `$defs`.
+        case missingDefinition(String)
+        /// Definitions that reference each other recursively; inlining
+        /// them would never terminate.
+        case referenceCycle([String])
+    }
+
+    /// Resolves every local `$ref` against the root `$defs` and returns a
+    /// single self-contained schema. Repeated references are inlined at
+    /// each use site; the emitted `$defs` block is dropped once nothing
+    /// references it.
+    static func inlineSchemaRefs(_ schema: AnyCodableValue) throws -> AnyCodableValue {
+        guard case .object(let root) = schema else { return schema }
+        let defs: [String: AnyCodableValue]
+        if case .object(let defsObject)? = root["$defs"] {
+            defs = defsObject
+        } else {
+            defs = [:]
+        }
+
+        func resolving(
+            _ value: AnyCodableValue,
+            active: Set<String>
+        ) throws -> AnyCodableValue {
+            switch value {
+            case .object(let object):
+                if case .string(let pointer)? = object["$ref"] {
+                    guard pointer.hasPrefix("#/$defs/") else {
+                        throw SchemaInliningError.externalReference(pointer)
+                    }
+                    let key = String(pointer.dropFirst("#/$defs/".count))
+                    guard let target = defs[key] else {
+                        throw SchemaInliningError.missingDefinition(key)
+                    }
+                    var branch = active
+                    guard branch.insert(key).inserted else {
+                        throw SchemaInliningError.referenceCycle(active.sorted() + [key])
+                    }
+                    // Siblings of the $ref (e.g. an overriding description)
+                    // win over the referenced definition's own keys.
+                    var resolved = target
+                    if object.count > 1, case .object(let targetObject) = target {
+                        var siblings = object
+                        siblings["$ref"] = nil
+                        resolved = .object(targetObject.merging(siblings) { _, new in new })
+                    }
+                    return try resolving(resolved, active: branch)
+                }
+                return .object(try object.mapValues { try resolving($0, active: active) })
+            case .array(let values):
+                return .array(try values.map { try resolving($0, active: active) })
+            default:
+                return value
+            }
+        }
+
+        var rootWithoutDefs = root
+        rootWithoutDefs["$defs"] = nil
+        return try resolving(.object(rootWithoutDefs), active: [])
     }
 
     static func isContextLengthError(_ message: String) -> Bool {
@@ -1100,8 +1176,10 @@ private struct ChunkFunction: Decodable, Sendable {
     let arguments: AnyCodableValue?
 }
 
-/// A JSON value used only for preserving Ollama's arbitrary tool arguments.
-private enum AnyCodableValue: Codable, Equatable, Sendable {
+/// A JSON value used for Ollama's arbitrary tool arguments and for the
+/// `format` schema, whose local `$ref`s are inlined before the request is
+/// sent (see ``OllamaEndpoint/inlineSchemaRefs(_:)``).
+enum AnyCodableValue: Codable, Equatable, Sendable {
     case object([String: AnyCodableValue])
     case array([AnyCodableValue])
     case string(String)

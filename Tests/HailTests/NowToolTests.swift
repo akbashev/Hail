@@ -77,7 +77,7 @@ struct NowToolTests {
     @Test("decodes the generated timezone value")
     func decodesGeneratedTimezone() throws {
         let content = GeneratedContent(properties: ["timeZone": "Europe/Berlin"])
-        let input = try NowTool.Input(content)
+        let input = try NowToolInput(content)
 
         #expect(input.timeZone == "Europe/Berlin")
     }

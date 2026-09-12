@@ -13,12 +13,6 @@ import VirtualActors
 
 @Tool
 public struct AgentTool {
-    @Generable
-    public enum Action: String, Codable, Sendable {
-        case send
-        case listAgents = "list_agents"
-    }
-
     public struct MessageTarget: RawRepresentable, Codable, Hashable, Sendable, CustomStringConvertible {
         public let rawValue: String
 
@@ -31,16 +25,6 @@ public struct AgentTool {
         }
 
         public var description: String { rawValue }
-    }
-
-    @Generable
-    public struct Input: Sendable {
-        public let action: Action
-        /// Agent IDs are opaque model-provided identifiers. Keep them as a
-        /// string in generated content and validate them at the effect
-        /// boundary instead of exposing a wrapper-shaped object to the model.
-        public let target: String?
-        public let message: String?
     }
 
     public let name = "agent"
@@ -99,11 +83,11 @@ public struct AgentTool {
         self.agentDirectoryID = agentDirectoryID
     }
 
-    public func effect(for input: Input) throws -> CoordinationEffect {
+    public func effect(for input: AgentToolInput) throws -> CoordinationEffect {
         CoordinationEffect(subsystem: "agent", action: input.action.rawValue)
     }
 
-    public func runOutput(input: Input, token: borrowing EffectToken<CoordinationEffect>) async throws -> ToolOutput {
+    public func runOutput(input: AgentToolInput, token: borrowing EffectToken<CoordinationEffect>) async throws -> ToolOutput {
         _ = token
         switch input.action {
         case .listAgents:
@@ -183,4 +167,20 @@ public struct AgentTool {
             )
         }
     }
+}
+
+@Generable
+public enum AgentToolAction: String, Codable, Sendable {
+    case send
+    case listAgents = "list_agents"
+}
+
+@Generable
+public struct AgentToolInput: Sendable {
+    public let action: AgentToolAction
+    /// Agent IDs are opaque model-provided identifiers. Keep them as a
+    /// string in generated content and validate them at the effect
+    /// boundary instead of exposing a wrapper-shaped object to the model.
+    public let target: String?
+    public let message: String?
 }

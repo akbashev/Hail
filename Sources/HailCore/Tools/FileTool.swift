@@ -12,35 +12,6 @@ import ScopedEffect
     description: "Read and write files in the project. Use this to read code, write new files, or edit existing ones."
 )
 public struct FileTool {
-    @Generable
-    public enum Action: String, Codable, Sendable {
-        case read, write, replace, list, exists
-
-        /// The effect-domain action this tool action funnels into.
-        var effectAction: FileEffect.Action {
-            switch self {
-            case .read, .exists: .read
-            case .write, .replace: .write
-            case .list: .list
-            }
-        }
-    }
-
-    @Generable
-    public struct Input: Sendable {
-        public let action: Action
-        public let path: String
-        public let content: String?
-        public let oldContent: String?
-        public let newContent: String?
-
-        enum CodingKeys: String, CodingKey {
-            case action, path, content
-            case oldContent = "old_content"
-            case newContent = "new_content"
-        }
-    }
-
     public var schema: ToolDefinition {
         ToolDefinition(
             name: name,
@@ -95,7 +66,7 @@ public struct FileTool {
     /// the effect configuration. Whether the resolved path is allowed is the
     /// authority's decision (see `FileEffect.pathPolicy(scopedTo:)`), not the
     /// tool's.
-    public func effect(for input: Input) throws -> FileEffect {
+    public func effect(for input: FileToolInput) throws -> FileEffect {
         let resolved =
             input.path.hasPrefix("/")
             ? EffectPath.normalize(input.path)
@@ -103,7 +74,7 @@ public struct FileTool {
         return FileEffect(path: resolved, action: input.action.effectAction)
     }
 
-    public func runOutput(input: Input, token: borrowing EffectToken<FileEffect>) async throws -> ToolOutput {
+    public func runOutput(input: FileToolInput, token: borrowing EffectToken<FileEffect>) async throws -> ToolOutput {
         let path = input.path
         let fullPath = token.withConfiguration { URL(fileURLWithPath: $0.path) }
         let fileManager = FileManager.default
@@ -152,5 +123,34 @@ public struct FileTool {
             let exists = fileManager.fileExists(atPath: fullPath.path)
             return .text(exists ? "exists" : "not found")
         }
+    }
+}
+
+@Generable
+public enum FileToolAction: String, Codable, Sendable {
+    case read, write, replace, list, exists
+
+    /// The effect-domain action this tool action funnels into.
+    var effectAction: FileEffect.Action {
+        switch self {
+        case .read, .exists: .read
+        case .write, .replace: .write
+        case .list: .list
+        }
+    }
+}
+
+@Generable
+public struct FileToolInput: Sendable {
+    public let action: FileToolAction
+    public let path: String
+    public let content: String?
+    public let oldContent: String?
+    public let newContent: String?
+
+    enum CodingKeys: String, CodingKey {
+        case action, path, content
+        case oldContent = "old_content"
+        case newContent = "new_content"
     }
 }

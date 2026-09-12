@@ -16,13 +16,6 @@ import VirtualActors
 /// resolved through the virtual actors API per call.
 @Tool
 public struct ReportStatusTool {
-    @Generable
-    public struct Input: Sendable {
-        public let contextID: String
-        public let message: String
-        public let timestamp: String?
-    }
-
     public let name = "report_status"
     public let description =
         "Report a short ephemeral status update for the current context (e.g., 'Reading files', 'Running tests')."
@@ -58,11 +51,11 @@ public struct ReportStatusTool {
         self.system = system
     }
 
-    public func effect(for input: Input) throws -> CoordinationEffect {
+    public func effect(for input: ReportStatusToolInput) throws -> CoordinationEffect {
         CoordinationEffect(subsystem: "agent", action: "report_status")
     }
 
-    public func runOutput(input: Input, token: borrowing EffectToken<CoordinationEffect>) async throws -> ToolOutput {
+    public func runOutput(input: ReportStatusToolInput, token: borrowing EffectToken<CoordinationEffect>) async throws -> ToolOutput {
         _ = token
         guard
             let entry = try await system.agentRuntime.entry(forAgentID: sourceAgentID),
@@ -80,4 +73,11 @@ public struct ReportStatusTool {
         try await agent.recordStatusActivity(input.message, at: timestamp)
         return .text("Status reported.")
     }
+}
+
+@Generable
+public struct ReportStatusToolInput: Sendable {
+    public let contextID: String
+    public let message: String
+    public let timestamp: String?
 }

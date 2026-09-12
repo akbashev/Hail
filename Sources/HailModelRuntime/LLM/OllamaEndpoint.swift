@@ -636,6 +636,74 @@ public struct OllamaEndpoint: ModelEndpoint {
         return try JSONDecoder().decode(AnyCodableValue.self, from: data)
     }
 
+    /// Why a schema could not be inlined for Ollama's grammar builder. Every
+    /// case is rejected loudly: sending the schema anyway would repeat the
+    /// silent unconstrained-sampling failure this exists to prevent.
+    enum SchemaInliningError: Error, Equatable {
+        /// A `$ref` pointing outside the document's own `$defs`.
+        case externalReference(String)
+        /// A `$ref` whose definition is absent from the root `$defs`.
+        case missingDefinition(String)
+        /// Definitions that reference each other recursively; inlining them
+        /// would never terminate.
+        case referenceCycle([String])
+    }
+
+    /// Resolves every local `$ref` against the root `$defs` and returns a
+    /// single self-contained schema. Ollama's grammar builder follows a `$ref`
+    /// only at the document root; an inner reference makes it silently drop
+    /// the constraint. Repeated definitions inline at each use site; the
+    /// emitted `$defs` block is dropped once nothing references it.
+    static func inlineSchemaRefs(_ schema: AnyCodableValue) throws -> AnyCodableValue {
+        guard case .object(let root) = schema else { return schema }
+        let defs: [String: AnyCodableValue]
+        if case .object(let defsObject)? = root["$defs"] {
+            defs = defsObject
+        } else {
+            defs = [:]
+        }
+
+        func resolving(
+            _ value: AnyCodableValue,
+            active: Set<String>
+        ) throws -> AnyCodableValue {
+            switch value {
+            case .object(let object):
+                if case .string(let pointer)? = object["$ref"] {
+                    guard pointer.hasPrefix("#/$defs/") else {
+                        throw SchemaInliningError.externalReference(pointer)
+                    }
+                    let key = String(pointer.dropFirst("#/$defs/".count))
+                    guard let target = defs[key] else {
+                        throw SchemaInliningError.missingDefinition(key)
+                    }
+                    var branch = active
+                    guard branch.insert(key).inserted else {
+                        throw SchemaInliningError.referenceCycle(active.sorted() + [key])
+                    }
+                    // Siblings of the $ref (e.g. an overriding description)
+                    // win over the referenced definition's own keys.
+                    var resolved = target
+                    if object.count > 1, case .object(let targetObject) = target {
+                        var siblings = object
+                        siblings["$ref"] = nil
+                        resolved = .object(targetObject.merging(siblings) { _, new in new })
+                    }
+                    return try resolving(resolved, active: branch)
+                }
+                return .object(try object.mapValues { try resolving($0, active: active) })
+            case .array(let values):
+                return .array(try values.map { try resolving($0, active: active) })
+            default:
+                return value
+            }
+        }
+
+        var rootWithoutDefs = root
+        rootWithoutDefs["$defs"] = nil
+        return try resolving(.object(rootWithoutDefs), active: [])
+    }
+
     static func isContextLengthError(_ message: String) -> Bool {
         let normalized = message.lowercased()
         return normalized.contains("context length")
@@ -919,10 +987,17 @@ private enum OllamaToolSchema {
     static func parameters(from schema: GenerationSchema) throws -> AnyCodableValue {
         let data = try JSONEncoder().encode(schema)
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
-        guard case .object = value else {
+        // Ollama builds its sampling grammar from the parameters schema but,
+        // as with the `format` field, only resolves a `$ref` at the root. An
+        // inner reference silently disables the whole constraint, which is
+        // how models emit "days": "1" against a declared integer. Inlining
+        // every local reference makes the declared argument types real: the
+        // grammar rejects mistyped tokens at sampling time.
+        let inlined = try OllamaEndpoint.inlineSchemaRefs(value)
+        guard case .object = inlined else {
             throw ModelEndpointError.invalidRequest("Ollama tool parameters must be an object schema")
         }
-        return value
+        return inlined
     }
 }
 
@@ -998,8 +1073,9 @@ private struct ChunkFunction: Decodable, Sendable {
     let arguments: AnyCodableValue?
 }
 
-/// A JSON value used only for preserving Ollama's arbitrary tool arguments.
-private enum AnyCodableValue: Codable, Equatable, Sendable {
+/// A JSON value used for Ollama's arbitrary tool arguments and for schema
+/// inlining (see OllamaEndpoint/inlineSchemaRefs(_:)).
+enum AnyCodableValue: Codable, Equatable, Sendable {
     case object([String: AnyCodableValue])
     case array([AnyCodableValue])
     case string(String)

@@ -178,7 +178,11 @@ public struct AnyTool: Sendable {
         self.description = tool.description
         self.schema = tool.schema
         self._runGeneratedWithAuthority = { generated, authority in
-            let decoded = try T.Input(generated)
+            let coerced = ToolArgumentCoercion.coerce(
+                generated,
+                as: T.Input.generationSchema
+            )
+            let decoded = try T.Input(coerced)
             return try await tool.runOutput(input: decoded, authority: authority)
         }
     }

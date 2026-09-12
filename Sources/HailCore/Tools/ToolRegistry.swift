@@ -118,6 +118,16 @@ public actor ToolRegistry: Sendable {
                     failureKind: .invalidArguments
                 )
                 executions.append(ToolExecution(result: result))
+            } catch let error as GeneratedContentConversionError {
+                let result = ToolResult(
+                    toolCallID: call.id,
+                    name: call.name,
+                    output: .text(
+                        "Error: tool \(call.name) received invalid arguments: a value had the wrong JSON type; numbers and booleans must be unquoted (\(error))."
+                    ),
+                    failureKind: .invalidArguments
+                )
+                executions.append(ToolExecution(result: result))
             } catch is CancellationError {
                 throw AgentRuntimeError.cancelled
             } catch {

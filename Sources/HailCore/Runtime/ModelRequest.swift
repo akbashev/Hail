@@ -191,7 +191,6 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
     public let recentModelRequestCount: Int
     public let conversationMessageCount: Int
     public let hasContextSummary: Bool
-    public let latestCompactionOutput: GeneratedContent?
 
     public init(
         agentID: AgentID,
@@ -204,8 +203,7 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
         usageSummary: AgentUsageSummary = .init(),
         recentModelRequestCount: Int = 0,
         conversationMessageCount: Int = 0,
-        hasContextSummary: Bool = false,
-        latestCompactionOutput: GeneratedContent? = nil
+        hasContextSummary: Bool = false
     ) {
         self.agentID = agentID
         self.phase = phase
@@ -218,7 +216,6 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
         self.recentModelRequestCount = recentModelRequestCount
         self.conversationMessageCount = conversationMessageCount
         self.hasContextSummary = hasContextSummary
-        self.latestCompactionOutput = latestCompactionOutput
     }
 }
 

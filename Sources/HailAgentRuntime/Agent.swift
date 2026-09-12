@@ -338,8 +338,7 @@ public distributed actor Agent: AsyncSequence {
             usageSummary: state.usageSummary,
             recentModelRequestCount: state.modelRequests.count,
             conversationMessageCount: state.conversationThread.count,
-            hasContextSummary: state.contextSummary != nil,
-            latestCompactionOutput: state.latestCompactionOutput
+            hasContextSummary: state.contextSummary != nil
         )
     }
 

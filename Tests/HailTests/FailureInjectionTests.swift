@@ -717,6 +717,5 @@ struct CorruptedJournalTests {
 
         #expect(state.contextSummary == GeneratedContent("the rolling summary"))
         #expect(state.conversationThread.count == 1)
-        #expect(state.latestCompactionOutput == nil)
     }
 }

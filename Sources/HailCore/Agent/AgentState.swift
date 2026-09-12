@@ -22,9 +22,6 @@ public struct AgentState: Codable, Sendable {
     /// old one in), so the window carries at most one summary no matter how
     /// many compactions ran.
     public private(set) var contextSummary: GeneratedContent? = nil
-    /// The complete report from the latest compaction. Hosts may reconcile
-    /// application-owned fields after a restart without rerunning the model.
-    public private(set) var latestCompactionOutput: GeneratedContent?
 
     /// The turn currently in flight, if any. Set by `turnStarted`, cleared by
     /// `turnCompleted`. `opening` is the message that opened the turn (once
@@ -112,7 +109,7 @@ public struct AgentState: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case agentID, conversationThread, contextSummary, latestCompactionOutput, activeTurn,
+        case agentID, conversationThread, contextSummary, activeTurn,
             pendingTurnRerun, modelSession, usageSummary,
             latestContextUsage, modelRequests, phase, currentToolName
     }
@@ -122,7 +119,6 @@ public struct AgentState: Codable, Sendable {
         agentID = try container.decode(AgentID.self, forKey: .agentID)
         conversationThread = try container.decode([ChatMessage].self, forKey: .conversationThread)
         contextSummary = try container.decodeIfPresent(GeneratedContent.self, forKey: .contextSummary)
-        latestCompactionOutput = try container.decodeIfPresent(GeneratedContent.self, forKey: .latestCompactionOutput)
         activeTurn = try container.decodeIfPresent(ActiveTurn.self, forKey: .activeTurn)
         pendingTurnRerun = try container.decodeIfPresent(ChatMessage.self, forKey: .pendingTurnRerun)
         modelSession = try container.decodeIfPresent(ModelSessionResume.self, forKey: .modelSession)
@@ -141,7 +137,6 @@ public struct AgentState: Codable, Sendable {
         try container.encode(agentID, forKey: .agentID)
         try container.encode(conversationThread, forKey: .conversationThread)
         try container.encodeIfPresent(contextSummary, forKey: .contextSummary)
-        try container.encodeIfPresent(latestCompactionOutput, forKey: .latestCompactionOutput)
         try container.encodeIfPresent(activeTurn, forKey: .activeTurn)
         try container.encodeIfPresent(pendingTurnRerun, forKey: .pendingTurnRerun)
         try container.encodeIfPresent(modelSession, forKey: .modelSession)
@@ -224,9 +219,8 @@ public struct AgentState: Codable, Sendable {
             )
             phase = .generating
             currentToolName = nil
-        case .conversationCompacted(let archivedCount, let content, let output):
+        case .conversationCompacted(let archivedCount, let content, _):
             contextSummary = content
-            if let output { latestCompactionOutput = output }
             if archivedCount > 0 && archivedCount <= conversationThread.count {
                 conversationThread.removeFirst(archivedCount)
             }

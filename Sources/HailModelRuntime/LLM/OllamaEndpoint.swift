@@ -911,120 +911,18 @@ private struct RequestTool: Encodable, Sendable {
 /// Adapts the canonical schema to Ollama's tool-call parser contract.
 ///
 /// Ollama's Qwen-compatible parser determines the type of an XML parameter
-/// from the function's direct root `properties`. It does not resolve a root
-/// `$ref`/`anyOf` before doing that lookup. We therefore inline references and
-/// expose the union of object properties at the root. Hail still decodes the
-/// returned arguments against the original typed schema, so this adaptation
-/// only affects provider guidance and never weakens execution validation.
+/// from the function's direct root `properties`. Hail passes the tool
+/// schema through as emitted and decodes the returned arguments against
+/// the original typed schema, so this adaptation only requires an object
+/// root and never weakens execution validation.
 private enum OllamaToolSchema {
     static func parameters(from schema: GenerationSchema) throws -> AnyCodableValue {
         let data = try JSONEncoder().encode(schema)
         let value = try JSONDecoder().decode(AnyCodableValue.self, from: data)
-        guard case .object(let root) = value else {
+        guard case .object = value else {
             throw ModelEndpointError.invalidRequest("Ollama tool parameters must be an object schema")
         }
-
-        let definitions: [String: AnyCodableValue]
-        if case .object(let defs) = root["$defs"] {
-            definitions = defs
-        } else {
-            definitions = [:]
-        }
-
-        let rootNode = resolve(.object(root), definitions: definitions)
-        guard case .object(let resolvedRoot) = rootNode else {
-            throw ModelEndpointError.invalidRequest(
-                "Ollama tool parameters must resolve to an object schema"
-            )
-        }
-        let normalized = try normalizeRoot(resolvedRoot, definitions: definitions)
-        guard !containsUnresolvedReference(normalized, definitions: definitions) else {
-            throw ModelEndpointError.invalidRequest(
-                "Ollama tool schema contains an unresolved reference"
-            )
-        }
-        return normalized
-    }
-
-    private static func resolve(
-        _ value: AnyCodableValue,
-        definitions: [String: AnyCodableValue]
-    ) -> AnyCodableValue {
-        guard case .object(let object) = value,
-            case .string(let reference)? = object["$ref"],
-            let name = reference.split(separator: "/").last.map(String.init),
-            let definition = definitions[name]
-        else {
-            return value
-        }
-        return resolve(definition, definitions: definitions)
-    }
-
-    private static func normalizeRoot(
-        _ object: [String: AnyCodableValue],
-        definitions: [String: AnyCodableValue]
-    ) throws -> AnyCodableValue {
-        if object["anyOf"] != nil {
-            throw ModelEndpointError.invalidRequest(
-                "Ollama tool parameters cannot use a root union; expose each variant as a separate tool"
-            )
-        }
-        return normalizeObject(object, definitions: definitions)
-    }
-
-    private static func normalizeObject(
-        _ object: [String: AnyCodableValue],
-        definitions: [String: AnyCodableValue]
-    ) -> AnyCodableValue {
-        var result = object.filter { $0.key != "$defs" && $0.key != "$ref" }
-        if case .object(let properties)? = object["properties"] {
-            result["properties"] = .object(
-                properties.mapValues { normalize($0, definitions: definitions) }
-            )
-        }
-        if let items = object["items"] {
-            result["items"] = normalize(items, definitions: definitions)
-        }
-        return .object(result)
-    }
-
-    private static func normalize(
-        _ value: AnyCodableValue,
-        definitions: [String: AnyCodableValue]
-    ) -> AnyCodableValue {
-        let resolved = resolve(value, definitions: definitions)
-        guard case .object(let object) = resolved else { return resolved }
-
-        if case .array(let choices)? = object["anyOf"] {
-            return .objectUnion(
-                choices.map { normalize($0, definitions: definitions) }
-            )
-        }
-        return normalizeObject(object, definitions: definitions)
-    }
-
-    private static func containsUnresolvedReference(
-        _ value: AnyCodableValue,
-        definitions: [String: AnyCodableValue]
-    ) -> Bool {
-        switch value {
-        case .object(let object):
-            if case .string(let reference)? = object["$ref"],
-                let name = reference.split(separator: "/").last.map(String.init),
-                definitions[name] == nil
-            {
-                return true
-            }
-            return object.values.contains {
-                containsUnresolvedReference($0, definitions: definitions)
-            }
-        case .array(let values):
-            return values.contains {
-                containsUnresolvedReference($0, definitions: definitions)
-            }
-        case .string, .number, .bool, .null:
-            return false
-        }
+        return value
     }
 }
 
@@ -1108,10 +1006,6 @@ private enum AnyCodableValue: Codable, Equatable, Sendable {
     case number(Double)
     case bool(Bool)
     case null
-
-    static func objectUnion(_ values: [AnyCodableValue]) -> AnyCodableValue {
-        .object(["anyOf": .array(values)])
-    }
 
     init(from decoder: Decoder) throws {
         if let container = try? decoder.container(keyedBy: DynamicKey.self) {

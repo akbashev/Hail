@@ -630,8 +630,8 @@ struct SlidingWindowCompactorTests {
         let note: String
     }
 
-    @Test("the report type's own description drives the task instruction")
-    func reportDescriptionDrivesTaskInstruction() async throws {
+    @Test("the task instruction is the built-in summary task, not the type description")
+    func taskInstructionIsTheBuiltInSummaryTask() async throws {
         let compactor = makeCompactor(keepRecent: 1)
         let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
         let ctx = try context(thread: thread)
@@ -649,8 +649,11 @@ struct SlidingWindowCompactorTests {
 
         let entries = try #require(captured.value?.first)
         let instruction = entries.first.map(text(in:)) ?? ""
-        #expect(instruction.contains("The test report task, authored on the type itself."))
-        #expect(instruction.contains("compacting an agent's conversation history"))
+        // Recovering the type-level description would require resolving
+        // `$defs`/`$ref` shapes here; Hail leaves that to the schema's
+        // owner, so the built-in task is used even for described reports.
+        #expect(instruction.contains("Update the running summary"))
+        #expect(!instruction.contains("The test report task, authored on the type itself."))
         #expect(instruction.contains("fit within"))
     }
 

@@ -17,10 +17,11 @@ import HailCore
 public enum CompactionTask {
     /// The built-in plain-text rolling summary task.
     private static let plainTextSummary = """
-        You are compacting an agent's conversation history. Update the \
-        running summary so it still covers everything the agent must \
-        remember: decisions, user preferences, tasks in flight, and \
-        important facts. Be concise; drop small talk and superseded details.
+        You are compacting an agent's conversation history. Rewrite the \
+        running summary to reflect the CURRENT state of the conversation: \
+        what the user is trying to do now, decisions made, preferences \
+        revealed, and tasks in flight. Drop topics that are no longer \
+        active and details superseded by newer messages. Be concise.
         """
 
     public static func instructions<Report: Generable>(for type: Report.Type) -> String {
@@ -45,7 +46,9 @@ enum SummaryPrompt {
         var transcript: [String] = []
         if let priorSummary { transcript.append("Summary so far:\n\(priorSummary.jsonString)") }
         for message in archived {
-            transcript.append(render(message, agentID: agentID))
+            if let rendered = render(message, agentID: agentID) {
+                transcript.append(rendered)
+            }
         }
 
         var taskText = task
@@ -73,7 +76,7 @@ enum SummaryPrompt {
         ]
     }
 
-    private static func render(_ message: ChatMessage, agentID: AgentID) -> String {
+    private static func render(_ message: ChatMessage, agentID: AgentID) -> String? {
         switch message {
         case .text(let sender, let content, _):
             return "\(label(for: sender, agentID: agentID)): \(content)"
@@ -94,8 +97,9 @@ enum SummaryPrompt {
                 ? String(text.prefix(Self.maximumToolResultCharacters)) + " …[truncated]"
                 : text
             return "\(name) result: \(bounded)"
-        case .failure(let error, _):
-            return "turn failed: \(error)"
+        case .failure:
+            // Display-only; never summary material.
+            return nil
         case .decisionRequest(_, let question, _, _):
             return "decision requested: \(question)"
         case .decisionResolved(_, let question, let resolution, _, _):

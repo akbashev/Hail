@@ -652,7 +652,7 @@ struct SlidingWindowCompactorTests {
         // Recovering the type-level description would require resolving
         // `$defs`/`$ref` shapes here; Hail leaves that to the schema's
         // owner, so the built-in task is used even for described reports.
-        #expect(instruction.contains("Update the running summary"))
+        #expect(instruction.contains("Rewrite the"))
         #expect(!instruction.contains("The test report task, authored on the type itself."))
         #expect(instruction.contains("fit within"))
     }
@@ -676,7 +676,7 @@ struct SlidingWindowCompactorTests {
 
         let entries = try #require(captured.value?.first)
         let instruction = entries.first.map(text(in:)) ?? ""
-        #expect(instruction.contains("Update the running summary"))
+        #expect(instruction.contains("Rewrite the"))
         #expect(!instruction.contains("described below"))
     }
 

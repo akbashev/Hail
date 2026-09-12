@@ -228,8 +228,10 @@ public struct AgentState: Codable, Sendable {
         case .responseReceived(let sender, let content, let timestamp):
             conversationThread.append(.response(sender: sender, content: content, timestamp: timestamp))
             activeTurn?.responded = true
-        case .turnFailed(let error, let at):
-            conversationThread.append(.failure(error: error, timestamp: at))
+        case .turnFailed(_, _):
+            // Failures are status, not conversation: they never enter the
+            // model-facing thread (PromptAssembler already excludes them),
+            // so they can never be archived into a compaction summary.
             phase = .failed
             currentToolName = nil
         case .turnCompleted:

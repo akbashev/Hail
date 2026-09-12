@@ -681,13 +681,17 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// Offers the turn's context to the compactor and journals the result.
     ///
     /// Session-owning harnesses manage their own context server-side and are
-    /// never offered compaction. Compactor and summarizer failures propagate:
-    /// sending the known-oversized request would hide the actual failure and
-    /// violate the budget decision. A successful compaction is journaled as
-    /// one atomic `conversationCompacted` event and the event-sourced part of
-    /// this turn is rebuilt so it already sees the trimmed window. External
-    /// context inputs remain those captured for the turn. Internal (not
-    /// private) for direct testing.
+    /// never offered compaction. A failure during a `.threshold` pass is
+    /// logged and the turn continues un-compacted: the threshold predicts the
+    /// request will soon exhaust the window, it does not know the request is
+    /// already over, and the provider remains the authority on overflow — its
+    /// report starts the `.contextLengthExceeded` recovery pass, whose
+    /// failures still propagate because there the request is known not to
+    /// fit. A successful compaction is journaled as one atomic
+    /// `conversationCompacted` event and the event-sourced part of this turn
+    /// is rebuilt so it already sees the trimmed window. External context
+    /// inputs remain those captured for the turn. Internal (not private) for
+    /// direct testing.
     func compactIfNeeded(
         turnContext: TurnContext,
         endpoint: any ModelEndpoint,
@@ -802,17 +806,32 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 } else {
                     { @Sendable value, _ in value.generatedContent }
                 }
-        let decision = try await compactor.compact(
-            context: turnContext.promptContext,
-            request: request,
-            budget: budget,
-            measurement: measurement,
-            measure: measure,
-            assemble: assemblePrompt,
-            summarize: summarize,
-            contextProjection: contextProjection,
-            trigger: trigger
-        )
+        let decision: CompactionDecision<GeneratedContent>
+        do {
+            decision = try await compactor.compact(
+                context: turnContext.promptContext,
+                request: request,
+                budget: budget,
+                measurement: measurement,
+                measure: measure,
+                assemble: assemblePrompt,
+                summarize: summarize,
+                contextProjection: contextProjection,
+                trigger: trigger
+            )
+        } catch {
+            if case .contextLengthExceeded = trigger {
+                throw error
+            }
+            logger.warning(
+                "Context compaction failed; continuing without compacting",
+                metadata: [
+                    "agentID": .string(agentID.rawValue),
+                    "error": .string(String(describing: error)),
+                ]
+            )
+            return turnContext
+        }
         guard case .compacted(let result) = decision else { return turnContext }
         await recordActivity(
             .turn(.progress(.status(GeneratedContent("Compacting conversation context."))), at: Date()))

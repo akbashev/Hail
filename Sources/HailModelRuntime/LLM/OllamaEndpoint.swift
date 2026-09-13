@@ -90,11 +90,21 @@ private struct OllamaStreamState: Sendable {
             events.append(.activity(.reasoningDelta(GeneratedContent(thought))))
         }
         if let fragment = chunk.message?.content, !fragment.isEmpty {
+            // Coalesce consecutive text fragments into one segment, matching
+            // how `text` accumulates. Per-chunk segments would render as
+            // word-per-line when a transcript entry is rebuilt for a later
+            // request, and models reliably mimic that formatting.
+            var narration = next.narration
+            if case .text(let last)? = narration.last {
+                narration[narration.count - 1] = .text(.init(content: last.content + fragment))
+            } else {
+                narration.append(.text(.init(content: fragment)))
+            }
             next = Self(
                 text: next.text + fragment,
                 toolCalls: next.toolCalls,
                 emittedToolCallIDs: next.emittedToolCallIDs,
-                narration: next.narration + [.text(.init(content: fragment))],
+                narration: narration,
                 reasoning: next.reasoning,
                 sawDone: next.sawDone,
                 doneReason: next.doneReason,

@@ -43,6 +43,31 @@ public struct FullAuthority: Authority {
     }
 }
 
+/// An authority that requires every member authority to grant an effect.
+///
+/// This is useful when a broad host/lane policy must be narrowed by a more
+/// specific policy, such as a workflow or tool policy. A narrower authority
+/// can never widen the permissions of the authorities it is intersected with.
+public struct IntersectingAuthority: Authority {
+    public let authorities: [any Authority]
+
+    public init(_ authorities: [any Authority]) {
+        self.authorities = authorities
+    }
+
+    public func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision {
+        var denials: [String] = []
+        for authority in authorities {
+            if case .denied(let reason) = authority.decision(on: effect) {
+                denials.append(reason)
+            }
+        }
+        return denials.isEmpty
+            ? .granted
+            : .denied(denials.joined(separator: "; "))
+    }
+}
+
 /// An authority assembled from per-domain decision closures, as a value.
 ///
 /// ```swift

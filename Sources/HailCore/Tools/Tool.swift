@@ -135,6 +135,10 @@ public protocol Tool<Input>: Sendable {
     var name: String { get }
     var description: String { get }
     var schema: ToolDefinition { get }
+    /// An optional tool-owned restriction. The host intersects it with the
+    /// lane authority before minting any effect token. Tools never receive
+    /// the lane authority itself and therefore cannot widen it.
+    var authorityRestriction: (any Authority)? { get }
     /// Pure: decoded model input to the concrete effect being requested.
     func effect(for input: Input) throws -> Effect
 
@@ -145,15 +149,22 @@ public protocol Tool<Input>: Sendable {
 }
 
 extension Tool {
+    public var authorityRestriction: (any Authority)? { nil }
+
     /// The only direct tool entry point: derive the concrete effect, authorize
     /// it, and invoke the token-requiring implementation.
     public func runOutput(input: Input, authority: any Authority) async throws -> ToolOutput {
         let effect = try effect(for: input)
-        return try await withEffect(effect, authority: authority) { token in
+        let effectiveAuthority: any Authority
+        if let restriction = authorityRestriction {
+            effectiveAuthority = IntersectingAuthority([authority, restriction])
+        } else {
+            effectiveAuthority = authority
+        }
+        return try await withEffect(effect, authority: effectiveAuthority) { token in
             try await runOutput(input: input, token: token)
         }
     }
-
 }
 
 extension Tool {

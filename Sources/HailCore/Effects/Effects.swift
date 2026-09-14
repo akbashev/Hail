@@ -1,4 +1,11 @@
 import ScopedEffect
+import Subprocess
+
+#if canImport(System)
+    import System
+#else
+    import SystemPackage
+#endif
 
 #if canImport(FoundationNetworking)
     import FoundationNetworking
@@ -57,14 +64,44 @@ public struct TerminalEffect: ScopedEffect, Sendable {
 public struct ProcessEffect: ScopedEffect, Sendable {
 
     public let name = "process"
+    /// Optional caller-defined operation identity for policy and audit
+    /// decisions. It does not affect process execution.
+    public let operation: String?
     public let executable: String
     public let arguments: [String]
     public let cwd: String?
+    /// Optional bytes written to the child process's standard input after it
+    /// starts. The process effect remains unbounded in time; callers own
+    /// cancellation and lifecycle policy.
+    public let standardInput: Data?
+    /// `nil` inherits the host environment; a value replaces it exactly.
+    public let environment: [String: String]?
+    /// Maximum bytes collected from each output stream. `nil` preserves
+    /// unbounded collection for callers that need it.
+    public let maximumOutputBytes: Int?
+    /// Optional operating-system sandbox policy. `nil` preserves the
+    /// historical raw-process behavior; a non-nil policy is enforced by the
+    /// live process dependency before the child is launched.
+    public let sandbox: ProcessSandboxPolicy?
 
-    public init(executable: String, arguments: [String], cwd: String?) {
+    public init(
+        executable: String,
+        arguments: [String],
+        cwd: String?,
+        standardInput: Data? = nil,
+        environment: [String: String]? = nil,
+        sandbox: ProcessSandboxPolicy? = nil,
+        maximumOutputBytes: Int? = nil,
+        operation: String? = nil
+    ) {
+        self.operation = operation
         self.executable = executable
         self.arguments = arguments
         self.cwd = cwd
+        self.standardInput = standardInput
+        self.environment = environment
+        self.sandbox = sandbox
+        self.maximumOutputBytes = maximumOutputBytes
     }
 }
 
@@ -86,17 +123,46 @@ public struct NetworkEffect: ScopedEffect, Sendable {
     }
 }
 
+public enum ProcessTermination: Sendable, Equatable {
+    case exited(Int32)
+    case signaled(Int32)
+}
+
+public enum ProcessDependencyError: Error, Equatable, Sendable {
+    case invalidOutputLimit(Int)
+}
+
 public struct ProcessResult: Sendable, Equatable {
-    public let exitCode: Int32
+    public let termination: ProcessTermination
     public let standardOutput: Data
     public let standardError: Data
+
+    /// Compatibility accessor for existing callers. Signal termination is
+    /// represented losslessly by `termination`; this returns the historical
+    /// negative-signal convention for callers that only need an integer.
+    public var exitCode: Int32 {
+        switch termination {
+        case .exited(let code): return code
+        case .signaled(let signal): return -signal
+        }
+    }
 
     public init(
         exitCode: Int32,
         standardOutput: Data = Data(),
         standardError: Data = Data()
     ) {
-        self.exitCode = exitCode
+        self.termination = .exited(exitCode)
+        self.standardOutput = standardOutput
+        self.standardError = standardError
+    }
+
+    public init(
+        termination: ProcessTermination,
+        standardOutput: Data = Data(),
+        standardError: Data = Data()
+    ) {
+        self.termination = termination
         self.standardOutput = standardOutput
         self.standardError = standardError
     }
@@ -106,15 +172,27 @@ public struct ProcessRequest: Sendable, Equatable {
     public let executable: String
     public let arguments: [String]
     public let workingDirectory: String?
+    public let standardInput: Data?
+    public let environment: [String: String]?
+    public let sandbox: ProcessSandboxPolicy?
+    public let maximumOutputBytes: Int?
 
     public init(
         executable: String,
         arguments: [String] = [],
-        workingDirectory: String? = nil
+        workingDirectory: String? = nil,
+        standardInput: Data? = nil,
+        environment: [String: String]? = nil,
+        sandbox: ProcessSandboxPolicy? = nil,
+        maximumOutputBytes: Int? = nil
     ) {
         self.executable = executable
         self.arguments = arguments
         self.workingDirectory = workingDirectory
+        self.standardInput = standardInput
+        self.environment = environment
+        self.sandbox = sandbox
+        self.maximumOutputBytes = maximumOutputBytes
     }
 }
 
@@ -128,30 +206,78 @@ public struct ProcessDependency: Sendable {
     }
 
     public static let live = Self { request in
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            let standardOutput = Pipe()
-            let standardError = Pipe()
-            process.executableURL = URL(fileURLWithPath: request.executable)
-            process.arguments = request.arguments
-            process.currentDirectoryURL = request.workingDirectory.map(URL.init(fileURLWithPath:))
-            process.standardOutput = standardOutput
-            process.standardError = standardError
-            process.terminationHandler = { process in
-                continuation.resume(
-                    returning: ProcessResult(
-                        exitCode: process.terminationStatus,
-                        standardOutput: standardOutput.fileHandleForReading.readDataToEndOfFile(),
-                        standardError: standardError.fileHandleForReading.readDataToEndOfFile()
-                    )
-                )
-            }
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: error)
-            }
+        if let maximumOutputBytes = request.maximumOutputBytes,
+            maximumOutputBytes < 0
+        {
+            throw ProcessDependencyError.invalidOutputLimit(maximumOutputBytes)
         }
+        let launchRequest = try ProcessSandboxLauncher.prepare(request)
+        let environment: Environment
+        if let values = launchRequest.environment {
+            environment = .custom(
+                values.reduce(into: [Environment.Key: String]()) { result, item in
+                    guard let key = Environment.Key(rawValue: item.key) else { return }
+                    result[key] = item.value
+                })
+        } else {
+            environment = .inherit
+        }
+        let executable: Executable = .path(FilePath(launchRequest.executable))
+        let arguments = Arguments(launchRequest.arguments)
+        let workingDirectory = launchRequest.workingDirectory.map { FilePath($0) }
+        let output: BytesOutput = .bytes(limit: request.maximumOutputBytes ?? .max)
+        let error: BytesOutput = .bytes(limit: request.maximumOutputBytes ?? .max)
+        var platformOptions = PlatformOptions()
+        #if os(macOS) || os(Linux)
+            // Give the launcher and everything it starts a private session. The
+            // group-targeted teardown then cleans up shell grandchildren when the
+            // caller cancels this operation.
+            platformOptions.createSession = true
+            platformOptions.teardownSequence = [
+                .gracefulShutDown(
+                    toProcessGroup: true,
+                    allowedDurationToNextStep: .zero
+                )
+            ]
+        #endif
+        let result: ExecutionResult<Void, BytesOutput, BytesOutput>
+        if let standardInput = launchRequest.standardInput {
+            let input: ArrayInput = .array(Array(standardInput))
+            result = try await Subprocess.run(
+                executable,
+                arguments: arguments,
+                environment: environment,
+                workingDirectory: workingDirectory,
+                platformOptions: platformOptions,
+                input: input,
+                output: output,
+                error: error
+            )
+        } else {
+            let input: NoInput = .none
+            result = try await Subprocess.run(
+                executable,
+                arguments: arguments,
+                environment: environment,
+                workingDirectory: workingDirectory,
+                platformOptions: platformOptions,
+                input: input,
+                output: output,
+                error: error
+            )
+        }
+        let termination: ProcessTermination
+        switch result.terminationStatus {
+        case .exited(let code):
+            termination = .exited(Int32(code))
+        case .signaled(let signal):
+            termination = .signaled(Int32(signal))
+        }
+        return ProcessResult(
+            termination: termination,
+            standardOutput: Data(result.standardOutput),
+            standardError: Data(result.standardError)
+        )
     }
 }
 
@@ -162,19 +288,24 @@ public struct NetworkRequest: Sendable, Equatable {
     public let headers: [String: String]
     public let body: Data?
     public let maximumResponseBytes: Int
+    /// When present, redirects are allowed only to these normalized hosts.
+    /// nil preserves ordinary URLSession redirect behavior.
+    public let allowedHosts: Set<String>?
 
     public init(
         url: String,
         method: String = "GET",
         headers: [String: String] = [:],
         body: Data? = nil,
-        maximumResponseBytes: Int = 16 * 1024 * 1024
+        maximumResponseBytes: Int = 16 * 1024 * 1024,
+        allowedHosts: Set<String>? = nil
     ) {
         self.url = url
         self.method = method
         self.headers = headers
         self.body = body
         self.maximumResponseBytes = maximumResponseBytes
+        self.allowedHosts = allowedHosts
     }
 
     public var host: String? {
@@ -232,7 +363,14 @@ public struct NetworkDependency: Sendable {
             urlRequest.setValue(value, forHTTPHeaderField: name)
         }
 
-        let (body, response) = try await URLSession.shared.data(for: urlRequest)
+        let redirectPolicy = NetworkRedirectPolicy(allowedHosts: request.allowedHosts)
+        let session = URLSession(
+            configuration: .default,
+            delegate: redirectPolicy,
+            delegateQueue: nil
+        )
+        defer { session.finishTasksAndInvalidate() }
+        let (body, response) = try await session.data(for: urlRequest)
         guard let response = response as? HTTPURLResponse else {
             throw NetworkDependencyError.invalidResponse
         }
@@ -249,6 +387,39 @@ public struct NetworkDependency: Sendable {
             headers: headers,
             body: body
         )
+    }
+}
+
+private final class NetworkRedirectPolicy: NSObject, URLSessionTaskDelegate {
+    private let allowedHosts: Set<String>?
+
+    init(allowedHosts: Set<String>?) {
+        self.allowedHosts = allowedHosts?.map { Self.normalize($0) }
+            .reduce(into: Set<String>()) { $0.insert($1) }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let allowedHosts else {
+            completionHandler(request)
+            return
+        }
+        guard let host = request.url?.host,
+            allowedHosts.contains(Self.normalize(host))
+        else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+
+    private static func normalize(_ host: String) -> String {
+        host.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
     }
 }
 
@@ -410,7 +581,11 @@ extension ProcessEffect {
             ProcessRequest(
                 executable: effect.executable,
                 arguments: effect.arguments,
-                workingDirectory: effect.cwd
+                workingDirectory: effect.cwd,
+                standardInput: effect.standardInput,
+                environment: effect.environment,
+                sandbox: effect.sandbox,
+                maximumOutputBytes: effect.maximumOutputBytes
             )
         }
         return try await HailDependencyScope.values.process.run(request)

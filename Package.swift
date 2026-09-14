@@ -27,6 +27,7 @@ let package = Package(
         .package(url: "https://github.com/mattt/PartialJSONDecoder.git", from: "1.0.0"),
         .package(url: "https://github.com/wiedymi/swift-acp.git", branch: "main"),
         .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-system.git", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.21.0"),
     ],
@@ -51,6 +52,8 @@ let package = Package(
                 "ScopedEffect",
                 "HailMacros",
                 .product(name: "AnyLanguageModel", package: "AnyLanguageModel"),
+                .product(name: "Subprocess", package: "swift-subprocess"),
+                .product(name: "SystemPackage", package: "swift-system"),
             ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")

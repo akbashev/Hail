@@ -414,6 +414,43 @@ struct UsageAccountingTests {
         #expect(messages.filter { $0["role"] as? String == "tool" }.isEmpty)
     }
 
+    @Test("Ollama applies the request-level reasoning override")
+    func ollamaAppliesRequestReasoningOverride() async throws {
+        let capture = RequestCapture()
+        let endpoint = OllamaEndpoint(
+            model: "qwen3.5:9b",
+            baseURL: URL(string: "http://capture.test")!,
+            temperature: 0.2,
+            transport: { body in
+                await capture.store(body)
+                return OllamaHTTPResponse(
+                    statusCode: 200,
+                    lines: Self.stubLines([
+                        #"{"message":{"role":"assistant","content":"Done."},"done":true}"#
+                    ])
+                )
+            }
+        )
+
+        for await _ in endpoint.stream(
+            request: ModelRequest(
+                input: "show the weather",
+                entries: [prompt("show the weather")],
+                reasoning: .disabled
+            ),
+            tools: [],
+            authority: FullAuthority(),
+            generating: String.self,
+            purpose: .generation
+        ) {}
+
+        let body = try #require(await capture.value())
+        let object = try #require(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        #expect(object["think"] as? Bool == false)
+    }
+
     private func ollamaEndpoint(
         baseURL: String,
         numContext: Int? = nil,

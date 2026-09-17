@@ -440,6 +440,11 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// Resolves the model endpoint for this turn.
     let endpoint: @Sendable () async throws(AgentRuntimeError) -> ModelEndpoint
 
+    /// Selects a request-scoped reasoning override without requiring the
+    /// endpoint to classify prompt text. The default preserves provider
+    /// behavior.
+    let modelReasoningPolicy: ModelReasoningPolicy
+
     /// Optional context compactor, consulted before each request for
     /// non-session-owning endpoints. See ``ContextCompactor``.
     let compactor: (any ContextCompactor)?
@@ -562,6 +567,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         context: @escaping @Sendable () async throws(AgentRuntimeError) -> TurnContext,
         rebuildContext: @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> TurnContext,
         endpoint: @escaping @Sendable () async throws(AgentRuntimeError) -> ModelEndpoint,
+        modelReasoningPolicy: @escaping ModelReasoningPolicy = { _ in .providerDefault },
         tools: @escaping @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry,
         emit: @escaping @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void,
         recordActivity: @escaping @Sendable (AgentActivity) async -> Void,
@@ -578,6 +584,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         self.context = context
         self.rebuildContext = rebuildContext
         self.endpoint = endpoint
+        self.modelReasoningPolicy = modelReasoningPolicy
         self.tools = tools
         self.emit = emit
         self.recordActivity = recordActivity
@@ -1010,6 +1017,25 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         // approximation assembled from AgentState fields. This includes the
         // per-turn delta and tool schemas as well as assembled prompt output.
         let schemas = await registry.schemas()
+        var promptMetadata: [String: Logger.MetadataValue] = [
+            "agentID": .string(agentID.rawValue),
+            "historyEntries": .string("\(turnContext.preparedRequest.entries.count)"),
+            "referenceEntries": .string("\(turnContextEntries.count)"),
+            "toolCount": .string("\(schemas.count)"),
+            "contextWindow": .string("\(endpoint.effectiveContextWindow ?? 0)"),
+        ]
+        if case .available(let count) = endpoint.tokenCounting {
+            promptMetadata["historyTokens"] = .string(
+                "\(try await count(turnContext.preparedRequest.entries, []))"
+            )
+            promptMetadata["referenceTokens"] = .string(
+                "\(try await count(turnContextEntries, []))"
+            )
+            promptMetadata["toolSchemaTokens"] = .string("\(try await count([], schemas))")
+        } else {
+            promptMetadata["tokenCounts"] = .string("unavailable")
+        }
+        logger.info("Prompt composition", metadata: promptMetadata)
         turnContext = try await compactIfNeeded(
             turnContext: turnContext,
             endpoint: endpoint,
@@ -1235,7 +1261,15 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let request = ModelRequest(
             input: input.current.value,
             entries: input.entries,
-            reasoningRounds: input.reasoningRounds
+            reasoningRounds: input.reasoningRounds,
+            reasoning: modelReasoningPolicy(
+                ModelReasoningContext(
+                    model: endpoint.model,
+                    purpose: .generation,
+                    hasTools: !modelTools.isEmpty,
+                    completedToolRounds: input.reasoningRounds.count
+                )
+            )
         )
         if let sessionEndpoint = endpoint as? SessionOwningEndpoint {
             stream = sessionEndpoint.stream(

@@ -1,6 +1,7 @@
 import AnyLanguageModel
 import HailAgentRuntime
 import HailCore
+import Synchronization
 import Testing
 
 @testable import HailCompaction
@@ -821,8 +822,13 @@ struct SlidingWindowCompactorTests {
 }
 
 /// A tiny sendable box to capture closure outputs from the summarize hook.
-private final class Box<Value>: @unchecked Sendable {
-    var value: Value?
+private final class Box<Value: Sendable>: Sendable {
+    private let storage = Mutex<Value?>(nil)
+
+    var value: Value? {
+        get { storage.withLock { $0 } }
+        set { storage.withLock { $0 = newValue } }
+    }
 }
 
 private struct TestFailure: Error {}

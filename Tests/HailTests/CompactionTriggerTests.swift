@@ -67,7 +67,8 @@ struct CompactionFailurePolicyTests {
             measure: RequestMeasurer?,
             assemble: PromptAssembler,
             summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
-            contextProjection: @Sendable (Output, ContextProjectionBudget) throws(AgentRuntimeError)
+            contextProjection:
+                @Sendable (Output, ContextProjectionBudget) throws(AgentRuntimeError)
                 -> GeneratedContent,
             trigger: ContextCompactionTrigger
         ) async throws(AgentRuntimeError) -> CompactionDecision<Output> {
@@ -206,12 +207,13 @@ struct CompactionFailurePolicyTests {
         #expect(returned.promptContext.conversationThread == turnContext.promptContext.conversationThread)
         #expect(returned.preparedRequest.entries == turnContext.preparedRequest.entries)
         let recorded = await events.events
-        #expect(!recorded.contains { event in
-            if case .conversationCompacted = event {
-                return true
-            }
-            return false
-        })
+        #expect(
+            !recorded.contains { event in
+                if case .conversationCompacted = event {
+                    return true
+                }
+                return false
+            })
     }
 
     @Test("a recovery-triggered compaction failure still fails the request")

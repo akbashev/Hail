@@ -38,4 +38,4 @@ public struct ModelEndpointRequest: Sendable {
 
 /// Host-owned extension point for model providers not built into Hail.
 public typealias ModelEndpointProvider =
-    @Sendable (ModelEndpointRequest) -> (any ModelEndpoint)?
+    @Sendable (ModelEndpointRequest) async -> (any ModelEndpoint)?

@@ -1,8 +1,11 @@
 import AnyLanguageModel
 import AsyncHTTPClient
+import CryptoKit
 import HailCore
+import Logging
 import NIOCore
 import PartialJSONDecoder
+import Synchronization
 
 #if canImport(FoundationEssentials)
     import FoundationEssentials
@@ -16,6 +19,28 @@ struct OllamaHTTPResponse: Sendable {
 }
 
 typealias OllamaTransport = @Sendable (Data) async throws -> OllamaHTTPResponse
+
+private let ollamaLogger = Logger(label: "hail.ollama")
+
+/// Keeps only the previous request body per model/purpose so diagnostics can
+/// report how much of a consecutive prompt is reusable by Ollama's cache.
+/// The body itself is never logged or retained beyond the next request.
+private final class OllamaRequestDiagnostics: Sendable {
+    private let previous = Mutex<[String: Data]>([:])
+
+    func record(_ body: Data, key: String) -> Int? {
+        previous.withLock { state in
+            let prior = state.updateValue(body, forKey: key)
+            guard let prior else { return nil }
+            let limit = min(prior.count, body.count)
+            var index = 0
+            while index < limit, prior[index] == body[index] { index += 1 }
+            return index
+        }
+    }
+}
+
+private let ollamaRequestDiagnostics = OllamaRequestDiagnostics()
 
 private enum OllamaEvent: Sendable {
     case activity(ModelActivity)
@@ -269,6 +294,8 @@ public struct OllamaEndpoint: ModelEndpoint {
 
     private let temperature: Double
     private let numContext: Int?
+    /// Ollama runner residency, such as `10m` or `0`.
+    private let keepAlive: String?
     /// Ollama's `think` switch for reasoning-capable models. `nil` leaves the
     /// model's default untouched; `false` requests non-thinking generation.
     private let think: Bool?
@@ -279,6 +306,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         baseURL: URL,
         temperature: Double,
         numContext: Int? = nil,
+        keepAlive: String? = nil,
         think: Bool? = nil,
         requestTimeout: TimeInterval = 3_600,
         countTokens: (@Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil
@@ -288,6 +316,7 @@ public struct OllamaEndpoint: ModelEndpoint {
             baseURL: baseURL,
             temperature: temperature,
             numContext: numContext,
+            keepAlive: keepAlive,
             think: think,
             countTokens: countTokens,
             transport: Self.makeTransport(
@@ -302,6 +331,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         baseURL: URL,
         temperature: Double,
         numContext: Int? = nil,
+        keepAlive: String? = nil,
         think: Bool? = nil,
         countTokens: (@Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)? = nil,
         transport: @escaping OllamaTransport
@@ -309,6 +339,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         self.model = model
         self.temperature = temperature
         self.numContext = numContext
+        self.keepAlive = keepAlive
         self.think = think
         self.transport = transport
         self.effectiveContextWindow = numContext
@@ -353,6 +384,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         streamContract(
             entries: request.entries,
             reasoningRounds: request.reasoningRounds,
+            reasoningOverride: request.reasoning,
             tools: tools.map(\.schema),
             generating: outputType,
             purpose: purpose
@@ -362,6 +394,7 @@ public struct OllamaEndpoint: ModelEndpoint {
     private func streamContract<Output>(
         entries: [Transcript.Entry],
         reasoningRounds: [[Transcript.Segment]],
+        reasoningOverride: ModelReasoningOverride,
         tools: [ToolDefinition],
         generating outputType: Output.Type,
         purpose: ModelRequestPurpose
@@ -383,6 +416,7 @@ public struct OllamaEndpoint: ModelEndpoint {
                 for await event in self.streamRaw(
                     entries: entries,
                     reasoningRounds: reasoningRounds,
+                    reasoningOverride: reasoningOverride,
                     tools: tools,
                     purpose: purpose,
                     format: outputFormat
@@ -428,6 +462,7 @@ public struct OllamaEndpoint: ModelEndpoint {
     private func streamRaw(
         entries: [Transcript.Entry],
         reasoningRounds: [[Transcript.Segment]],
+        reasoningOverride: ModelReasoningOverride,
         tools: [ToolDefinition]?,
         purpose: ModelRequestPurpose,
         format: AnyCodableValue? = nil
@@ -443,13 +478,35 @@ public struct OllamaEndpoint: ModelEndpoint {
                         tools: tools ?? [],
                         temperature: temperature,
                         numContext: numContext,
+                        keepAlive: keepAlive,
                         numPredict: Self.compactionOutputLimit(for: purpose),
                         // Compaction is a bounded summarization operation, not
                         // an agent decision. Do not let a reasoning-capable
                         // model spend its normal hidden-token budget on it.
-                        think: Self.thinkingSetting(for: purpose, configured: think),
+                        think: Self.thinkingSetting(
+                            for: purpose,
+                            configured: think,
+                            override: reasoningOverride
+                        ),
                         format: format
                     )
+                    ollamaLogger.info(
+                        "Ollama request measured",
+                        metadata: [
+                            "model": .string(model),
+                            "requestBytes": .string("\(body.count)"),
+                            "requestHash": .string(Self.requestHash(body)),
+                            "toolSchemaHash": .string(Self.toolSchemaHash(tools ?? [])),
+                            "toolSchemaBytes": .string("\(Self.toolSchemaBytes(tools ?? []))"),
+                            "toolSchemaSizes": .string(Self.toolSchemaSizes(tools ?? [])),
+                            "prefixBytes": .string(
+                                "\(ollamaRequestDiagnostics.record(body, key: "\(model)|\(purpose)" ) ?? 0)"),
+                            "messageEntries": .string("\(entries.count)"),
+                            "toolSchemas": .string("\((tools ?? []).count)"),
+                            "purpose": .string(String(describing: purpose)),
+                        ]
+                    )
+                    let startedAt = Date()
                     let response = try await transport(body)
                     guard (200..<300).contains(response.statusCode) else {
                         var errorBody = ""
@@ -482,6 +539,17 @@ public struct OllamaEndpoint: ModelEndpoint {
                             break
                         }
                     }
+                    let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1_000)
+                    ollamaLogger.info(
+                        "Ollama response measured",
+                        metadata: [
+                            "model": .string(model),
+                            "purpose": .string(String(describing: purpose)),
+                            "durationMs": .string("\(elapsedMs)"),
+                            "promptEvalTokens": .string("\(state.promptEvalCount ?? 0)"),
+                            "evalTokens": .string("\(state.evalCount ?? 0)"),
+                        ]
+                    )
                     for event in try state.finishing(
                         format: format,
                         contextWindow: effectiveContextWindow,
@@ -591,10 +659,18 @@ public struct OllamaEndpoint: ModelEndpoint {
 
     private static func thinkingSetting(
         for purpose: ModelRequestPurpose,
-        configured: Bool?
+        configured: Bool?,
+        override: ModelReasoningOverride
     ) -> Bool? {
-        guard case .compaction = purpose else { return configured }
-        return false
+        guard case .generation = purpose else { return false }
+        switch override {
+        case .providerDefault:
+            return configured
+        case .enabled:
+            return true
+        case .disabled:
+            return false
+        }
     }
 
     private static func requestBody(
@@ -604,6 +680,7 @@ public struct OllamaEndpoint: ModelEndpoint {
         tools: [ToolDefinition],
         temperature: Double,
         numContext: Int?,
+        keepAlive: String?,
         numPredict: Int?,
         think: Bool?,
         format: AnyCodableValue?
@@ -622,7 +699,8 @@ public struct OllamaEndpoint: ModelEndpoint {
                 numPredict: numPredict
             ),
             stream: true,
-            think: think
+            think: think,
+            keepAlive: keepAlive
         )
         let encoder = JSONEncoder()
         // Tool schemas contain dictionaries for object properties. Stable
@@ -638,6 +716,36 @@ public struct OllamaEndpoint: ModelEndpoint {
         as type: T.Type
     ) throws -> T where T: Codable & Sendable & Generable {
         return try T(GeneratedContent(json: text))
+    }
+
+    private static func requestHash(_ body: Data) -> String {
+        SHA256.hash(data: body).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func toolSchemaHash(_ tools: [ToolDefinition]) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(tools.compactMap { try? RequestTool($0) }) else {
+            return "unavailable"
+        }
+        return requestHash(data)
+    }
+
+    private static func toolSchemaBytes(_ tools: [ToolDefinition]) -> Int {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return (try? encoder.encode(tools.compactMap { try? RequestTool($0) }).count) ?? 0
+    }
+
+    private static func toolSchemaSizes(_ tools: [ToolDefinition]) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return tools.compactMap { tool in
+            guard let requestTool = try? RequestTool(tool),
+                let data = try? encoder.encode(requestTool)
+            else { return nil }
+            return "\(tool.name):\(data.count)"
+        }.joined(separator: ",")
     }
 
     /// Encodes the declared output type's generation schema for Ollama's
@@ -750,6 +858,12 @@ private struct ChatRequest: Encodable, Sendable {
     let options: RequestOptions
     let stream: Bool
     let think: Bool?
+    let keepAlive: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case model, messages, tools, format, options, stream, think
+        case keepAlive = "keep_alive"
+    }
 }
 
 private struct RequestMessage: Encodable, Sendable {
@@ -1011,10 +1125,39 @@ private enum OllamaToolSchema {
         // every local reference makes the declared argument types real: the
         // grammar rejects mistyped tokens at sampling time.
         let inlined = try OllamaEndpoint.inlineSchemaRefs(value)
-        guard case .object = inlined else {
+        let normalized = normalizeRequiredOrdering(inlined)
+        guard case .object = normalized else {
             throw ModelEndpointError.invalidRequest("Ollama tool parameters must be an object schema")
         }
-        return inlined
+        return normalized
+    }
+
+    /// AnyLanguageModel stores required fields in a Set and encodes that Set
+    /// as an array with unspecified order. Normalize recursively so identical
+    /// tool schemas produce identical Ollama prompt prefixes.
+    private static func normalizeRequiredOrdering(_ value: AnyCodableValue) -> AnyCodableValue {
+        switch value {
+        case .object(let object):
+            var normalized: [String: AnyCodableValue] = [:]
+            for (key, child) in object {
+                if key == "required", case .array(let values) = child {
+                    let strings = values.compactMap { value -> String? in
+                        if case .string(let string) = value { return string }
+                        return nil
+                    }
+                    if strings.count == values.count {
+                        normalized[key] = .array(strings.sorted().map(AnyCodableValue.string))
+                        continue
+                    }
+                }
+                normalized[key] = normalizeRequiredOrdering(child)
+            }
+            return .object(normalized)
+        case .array(let values):
+            return .array(values.map(normalizeRequiredOrdering))
+        default:
+            return value
+        }
     }
 }
 

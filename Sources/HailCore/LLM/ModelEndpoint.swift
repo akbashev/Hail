@@ -136,6 +136,45 @@ public enum ModelRequestPurpose: Sendable, Equatable {
     case compaction(maxOutputTokens: Int)
 }
 
+/// An optional per-request override for a model's reasoning behavior.
+/// ``providerDefault`` preserves the endpoint's configured behavior; providers
+/// that expose an explicit switch may honor ``enabled`` or ``disabled``.
+public enum ModelReasoningOverride: Sendable, Equatable {
+    case providerDefault
+    case enabled
+    case disabled
+}
+
+/// Context supplied to a host's reasoning policy before Hail creates one
+/// model request. This deliberately contains turn structure, not prompt text:
+/// hosts can make an explicit policy decision without making Hail classify
+/// user language.
+public struct ModelReasoningContext: Sendable, Equatable {
+    public let model: String
+    public let purpose: ModelRequestPurpose
+    public let hasTools: Bool
+    /// Number of completed assistant/tool rounds already present in this
+    /// request. Zero identifies the initial generation round of a turn.
+    public let completedToolRounds: Int
+
+    public init(
+        model: String,
+        purpose: ModelRequestPurpose,
+        hasTools: Bool,
+        completedToolRounds: Int
+    ) {
+        self.model = model
+        self.purpose = purpose
+        self.hasTools = hasTools
+        self.completedToolRounds = completedToolRounds
+    }
+}
+
+/// Host policy for request-scoped reasoning controls. The default policy is
+/// to leave every provider's configured behavior unchanged.
+public typealias ModelReasoningPolicy =
+    @Sendable (_ context: ModelReasoningContext) -> ModelReasoningOverride
+
 /// Exact-token-counting capability of a model endpoint. Unsupported counting
 /// is represented as domain data; once a counter is available, failure to use
 /// it remains an error rather than being encoded as another optional value.
@@ -154,15 +193,18 @@ public struct ModelRequest<Input: Sendable>: Sendable {
     public let input: Input
     public let entries: [Transcript.Entry]
     public let reasoningRounds: [[Transcript.Segment]]
+    public let reasoning: ModelReasoningOverride
 
     public init(
         input: Input,
         entries: [Transcript.Entry],
-        reasoningRounds: [[Transcript.Segment]] = []
+        reasoningRounds: [[Transcript.Segment]] = [],
+        reasoning: ModelReasoningOverride = .providerDefault
     ) {
         self.input = input
         self.entries = entries
         self.reasoningRounds = reasoningRounds
+        self.reasoning = reasoning
     }
 }
 

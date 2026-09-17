@@ -1,5 +1,6 @@
 import ACPModel
 import AnyLanguageModel
+import Foundation
 import Hail
 import ScopedEffect
 import Testing
@@ -13,7 +14,6 @@ import Testing
 #if canImport(FoundationEssentials)
     import FoundationEssentials
 #endif
-import Foundation
 
 /// Failure-injection coverage for Hail-owned failure modes: harness process
 /// death mid-turn, protocol-violating harnesses, repeated crash recovery at

@@ -55,7 +55,9 @@ public struct ReportStatusTool {
         CoordinationEffect(subsystem: "agent", action: "report_status")
     }
 
-    public func runOutput(input: ReportStatusToolInput, token: borrowing EffectToken<CoordinationEffect>) async throws -> ToolOutput {
+    public func runOutput(input: ReportStatusToolInput, token: borrowing EffectToken<CoordinationEffect>) async throws
+        -> ToolOutput
+    {
         _ = token
         guard
             let entry = try await system.agentRuntime.entry(forAgentID: sourceAgentID),

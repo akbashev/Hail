@@ -59,7 +59,7 @@ public actor ModelRouter {
         authority: (any Authority)? = nil,
         reasoningEffort: ReasoningEffort? = nil
     ) async throws(ModelRouterError) -> any ModelEndpoint {
-        try await cachedEndpoint(
+        return try await cachedEndpoint(
             for: model,
             agentID: agentID,
             contextID: contextID,
@@ -193,7 +193,7 @@ public actor ModelRouter {
             model: model
         )
         try configuration.validate(reasoning: reasoning, for: model)
-        if let endpoint = modelEndpointProvider?(
+        if let endpoint = await modelEndpointProvider?(
             ModelEndpointRequest(
                 model: effectiveModel,
                 agentID: agentID,

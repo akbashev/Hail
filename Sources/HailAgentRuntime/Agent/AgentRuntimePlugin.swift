@@ -126,6 +126,11 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// safety policy supplied at composition time.
     public let maxToolRounds: Int
 
+    /// Host policy for per-request reasoning overrides. It receives only
+    /// structured turn state; prompt-language classification belongs to the
+    /// host, if a host chooses to add it at all.
+    public let modelReasoningPolicy: ModelReasoningPolicy
+
     /// Optional closure that returns the host's tools for one turn.
     /// Invoked once per turn after the input has been normalized to a
     /// ``AgentTurnContext``. Tool construction should be cheap and
@@ -184,7 +189,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         },
         promptInstructions: PromptAssemblyInstructions = PromptAssemblyInstructions(),
         assemblePrompt: @escaping PromptAssembler = assembleStandardPrompt,
-        defaultReasoningEffort: ReasoningEffort? = nil
+        defaultReasoningEffort: ReasoningEffort? = nil,
+        modelReasoningPolicy: @escaping ModelReasoningPolicy = { _ in .providerDefault }
     ) throws(AgentRuntimeConfigurationError) {
         guard maxToolRounds > 0 else {
             throw .invalidMaxToolRounds(maxToolRounds)
@@ -198,6 +204,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         self.defaultModel = defaultModel
         self.defaultReasoningEffort = defaultReasoningEffort
         self.maxToolRounds = maxToolRounds
+        self.modelReasoningPolicy = modelReasoningPolicy
         self.turnToolsProvider = turnToolsProvider
         self.authorityProvider = authorityProvider
         self.workspaceProvider = workspaceProvider

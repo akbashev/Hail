@@ -87,7 +87,9 @@ public struct AgentTool {
         CoordinationEffect(subsystem: "agent", action: input.action.rawValue)
     }
 
-    public func runOutput(input: AgentToolInput, token: borrowing EffectToken<CoordinationEffect>) async throws -> ToolOutput {
+    public func runOutput(input: AgentToolInput, token: borrowing EffectToken<CoordinationEffect>) async throws
+        -> ToolOutput
+    {
         _ = token
         switch input.action {
         case .listAgents:

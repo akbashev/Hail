@@ -661,6 +661,7 @@ public distributed actor Agent: AsyncSequence {
                     throw Self.mapEndpointDependencyError(error)
                 }
             },
+            modelReasoningPolicy: actorSystem.agentRuntime.modelReasoningPolicy,
             tools: { (turnContext: AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry in
                 try await self.toolRegistry(lane: lane, turnContext: turnContext)
             },

@@ -109,7 +109,7 @@ public struct EmptyToolInput: Generable, Sendable {
         guard case .structure(let properties, _) = content.kind,
             properties.isEmpty
         else {
-            throw GeneratedContentConversionError.typeMismatch
+            throw GeneratedContentError.typeMismatch
         }
     }
 

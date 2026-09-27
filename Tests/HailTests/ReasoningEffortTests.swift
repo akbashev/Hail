@@ -42,21 +42,15 @@ struct ReasoningEffortTests {
         #expect(!capabilities.supports(.xhigh))
     }
 
-    @Test("behavior persists the host-selected effort")
-    func behaviorRoundTripsEffort() throws {
-        let definition = AgentDefinition(
-            role: Role("coder"),
-            behavior: .init(
-                systemPrompt: "Code.",
-                model: try AgentModel("codex/gpt-5.6-luna"),
-                reasoningEffort: .xhigh
-            ),
+    @Test("model configuration carries the host-selected effort")
+    func modelConfigurationCarriesEffort() throws {
+        let configuration = ModelConfiguration(
+            model: try AgentModel("codex/gpt-5.6-luna"),
+            reasoningEffort: .xhigh
         )
 
-        let data = try JSONEncoder().encode(definition)
-        let decoded = try JSONDecoder().decode(AgentDefinition.self, from: data)
-
-        #expect(decoded.behavior.reasoningEffort == .xhigh)
+        #expect(configuration.model.identifier == "codex/gpt-5.6-luna")
+        #expect(configuration.reasoningEffort == .xhigh)
     }
 
     @Test("model catalogs use typed provider and model identifiers")

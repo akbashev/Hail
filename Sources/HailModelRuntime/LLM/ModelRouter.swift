@@ -8,26 +8,15 @@ import ScopedEffect
     import Foundation
 #endif
 
-/// Resolves model identifiers to reusable ``ModelEndpoint`` instances.
+/// Resolves model identifiers to ``ModelEndpoint`` instances.
 ///
-/// Endpoints are cached per (model, agentID, contextID) so that expensive
-/// long-lived connections (e.g. the local `kimi-code` ACP session) are created
-/// once and shared across agents that target the same configuration.
+/// Every endpoint is created for one execution turn. Durable conversation state
+/// and optional provider session resumption are supplied by Hail; the router
+/// does not retain provider endpoints between turns.
 public actor ModelRouter {
     private let mcpServerConfiguration: MCPServerConfiguration?
     private let modelEndpointProvider: ModelEndpointProvider?
     private let configuration: ModelRouterConfiguration
-    private var cache: [CacheKey: any ModelEndpoint] = [:]
-
-    private struct CacheKey: Hashable, Sendable {
-        let model: String
-        let reasoningEffort: ReasoningEffort?
-        let agentID: String
-        let contextID: AgentContextID?
-        let workspace: AgentWorkspace?
-        let executionPolicy: AgentExecutionPolicy
-    }
-
     public init(
         configuration: ModelRouterConfiguration,
         mcpServerConfiguration: MCPServerConfiguration? = nil,
@@ -38,124 +27,28 @@ public actor ModelRouter {
         self.modelEndpointProvider = modelEndpointProvider
     }
 
-    /// Returns the cached ``ModelEndpoint`` for the given configuration,
-    /// creating and caching it if necessary.
+    /// Returns an endpoint for the given configuration.
     ///
-    /// The caller owns the streaming effect; this router only resolves and
-    /// caches the endpoint instance. `resumeSession` and `authority` are used
-    /// only when a new endpoint is created — a cached endpoint already owns
-    /// its live session and authority. The creation authority scopes only
-    /// endpoint infrastructure (the harness spawn); a turn's lane authority
-    /// flows per-stream through ``SessionOwningEndpoint`` instead, which is
-    /// why ``CacheKey`` has no authority component (see the lane-authority
-    /// invariant in `Agent.reasoningLoop`).
+    /// The caller owns the endpoint's execution lifetime. `resumeSession` and
+    /// `authority` apply to this turn's endpoint creation.
     public func endpoint(
         for model: String,
-        agentID: String,
-        contextID: AgentContextID? = nil,
+        agentID: AgentID,
         workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         reasoningEffort: ReasoningEffort? = nil
     ) async throws(ModelRouterError) -> any ModelEndpoint {
-        return try await cachedEndpoint(
+        return try await makeEndpoint(
             for: model,
             agentID: agentID,
-            contextID: contextID,
             workspace: workspace,
             executionPolicy: executionPolicy,
             resumeSession: resumeSession,
             authority: authority,
             reasoningEffort: reasoningEffort
         )
-    }
-
-    private func cachedEndpoint(
-        for model: String,
-        agentID: String,
-        contextID: AgentContextID? = nil,
-        workspace: AgentWorkspace? = nil,
-        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
-        resumeSession: ModelSessionResume? = nil,
-        authority: (any Authority)? = nil,
-        reasoningEffort: ReasoningEffort? = nil
-    ) async throws(ModelRouterError) -> any ModelEndpoint {
-        let key = CacheKey(
-            model: model,
-            reasoningEffort: reasoningEffort,
-            agentID: agentID,
-            contextID: contextID,
-            workspace: workspace,
-            executionPolicy: executionPolicy
-        )
-
-        if let cached = cache[key] {
-            return cached
-        }
-
-        let endpoint = try await makeEndpoint(
-            for: model,
-            agentID: agentID,
-            contextID: contextID,
-            workspace: workspace,
-            executionPolicy: executionPolicy,
-            resumeSession: resumeSession,
-            authority: authority,
-            reasoningEffort: reasoningEffort
-        )
-        cache[key] = endpoint
-        return endpoint
-    }
-
-    /// Removes the cached endpoint for the given configuration, tearing down
-    /// its live harness session if it owns one (killing the subprocess).
-    ///
-    /// Called when the owning agent deactivates: the cache pins endpoints
-    /// independently of actor lifetime, so without eviction a passivated agent
-    /// would keep an idle harness process alive forever. The next
-    /// ``endpoint(for:agentID:contextID:workspace:executionPolicy:resumeSession:authority:)``
-    /// call rebuilds the endpoint cold, resuming from the journaled session.
-    public func evict(
-        for model: String,
-        agentID: String,
-        contextID: AgentContextID? = nil,
-        workspace: AgentWorkspace? = nil,
-        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
-        reasoningEffort: ReasoningEffort? = nil
-    ) async {
-        let key = CacheKey(
-            model: model,
-            reasoningEffort: reasoningEffort,
-            agentID: agentID,
-            contextID: contextID,
-            workspace: workspace,
-            executionPolicy: executionPolicy
-        )
-        guard let endpoint = cache.removeValue(forKey: key) else { return }
-        if let sessionOwning = endpoint as? SessionOwningEndpoint {
-            await sessionOwning.terminateSession()
-        }
-    }
-
-    public func register<E: ModelEndpoint>(
-        _ endpoint: E,
-        for model: String,
-        agentID: String,
-        contextID: AgentContextID? = nil,
-        workspace: AgentWorkspace? = nil,
-        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
-        reasoningEffort: ReasoningEffort? = nil
-    ) throws(ModelRouterError) {
-        let key = CacheKey(
-            model: model,
-            reasoningEffort: reasoningEffort,
-            agentID: agentID,
-            contextID: contextID,
-            workspace: workspace,
-            executionPolicy: executionPolicy
-        )
-        cache[key] = endpoint
     }
 
     /// Returns the model identifier that would be used after provider rewriting.
@@ -175,8 +68,7 @@ public actor ModelRouter {
 
     private func makeEndpoint(
         for model: String,
-        agentID: String?,
-        contextID: AgentContextID?,
+        agentID: AgentID,
         workspace: AgentWorkspace?,
         executionPolicy: AgentExecutionPolicy,
         resumeSession: ModelSessionResume? = nil,
@@ -193,23 +85,26 @@ public actor ModelRouter {
             model: model
         )
         try configuration.validate(reasoning: reasoning, for: model)
-        if let endpoint = await modelEndpointProvider?(
-            ModelEndpointRequest(
-                model: effectiveModel,
-                agentID: agentID,
-                contextID: contextID,
-                workspace: workspace,
-                executionPolicy: executionPolicy,
-                resumeSession: resumeSession,
-                authority: authority,
-                reasoning: reasoning
-            )
-        ) {
-            return endpoint
+        do {
+            if let endpoint = try await modelEndpointProvider?(
+                ModelEndpointRequest(
+                    model: effectiveModel,
+                    agentID: agentID,
+                    workspace: workspace,
+                    executionPolicy: executionPolicy,
+                    resumeSession: resumeSession,
+                    authority: authority,
+                    reasoning: reasoning
+                )
+            ) {
+                return endpoint
+            }
+        } catch {
+            throw ModelRouterError.endpointProviderFailed(model.provider, String(describing: error))
         }
         let provider = model.provider
         let modelName = model.id.rawValue
-        let providerContextLabel = contextID?.rawValue
+        let providerContextLabel = agentID.contextID.rawValue
 
         switch provider {
         case .codex:
@@ -222,7 +117,7 @@ public actor ModelRouter {
             return try CodexAppServerEndpoint(
                 model: modelName,
                 workingDirectory: workingDirectory,
-                agentID: agentID,
+                agentID: agentID.rawValue,
                 contextLabel: providerContextLabel,
                 mcpServerConfiguration: mcpServerConfiguration,
                 executionPolicy: executionPolicy,
@@ -241,7 +136,7 @@ public actor ModelRouter {
             return try KimiCodeEndpoint(
                 model: modelName,
                 workingDirectory: workingDirectory,
-                agentID: agentID,
+                agentID: agentID.rawValue,
                 contextLabel: providerContextLabel,
                 mcpServerConfiguration: mcpServerConfiguration,
                 executionPolicy: executionPolicy,
@@ -260,7 +155,7 @@ public actor ModelRouter {
             return try ClaudeCliEndpoint(
                 model: modelName,
                 workingDirectory: workingDirectory,
-                agentID: agentID,
+                agentID: agentID.rawValue,
                 contextLabel: providerContextLabel,
                 mcpServerConfiguration: mcpServerConfiguration,
                 executionPolicy: executionPolicy,
@@ -280,7 +175,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
-                effectiveContextWindow: configuration.configuredContextWindow(for: model),
+                effectiveContextWindow: await configuration.contextWindow(for: model, agentID: agentID),
                 generationOptions: try Self.generationOptions(
                     provider: provider,
                     model: modelName,
@@ -298,7 +193,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
-                effectiveContextWindow: configuration.configuredContextWindow(for: model),
+                effectiveContextWindow: await configuration.contextWindow(for: model, agentID: agentID),
                 generationOptions: try Self.generationOptions(
                     provider: provider,
                     model: modelName,
@@ -316,7 +211,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
-                effectiveContextWindow: configuration.configuredContextWindow(for: model),
+                effectiveContextWindow: await configuration.contextWindow(for: model, agentID: agentID),
                 generationOptions: try Self.generationOptions(
                     provider: provider,
                     model: modelName,
@@ -334,7 +229,7 @@ public actor ModelRouter {
                 ),
                 modelIdentifier: modelName,
                 temperature: configuration.temperature,
-                effectiveContextWindow: configuration.configuredContextWindow(for: model),
+                effectiveContextWindow: await configuration.contextWindow(for: model, agentID: agentID),
                 generationOptions: try Self.geminiGenerationOptions(
                     model: modelName,
                     temperature: configuration.temperature,
@@ -348,7 +243,8 @@ public actor ModelRouter {
             do {
                 numContext = try await configuration.contextWindowResolver.resolve(
                     for: model,
-                    baseURL: baseURL
+                    baseURL: baseURL,
+                    agentID: agentID
                 )
             } catch {
                 throw .contextWindowUnavailable(
@@ -373,11 +269,11 @@ public actor ModelRouter {
                     effort: reasoning?.effort ?? .none
                 )
             }
-            return OllamaEndpoint(
+            return AnyLanguageModelEndpoint.ollama(
                 model: modelName,
                 baseURL: baseURL,
                 temperature: configuration.temperature,
-                numContext: numContext,
+                contextWindow: numContext,
                 think: think
             )
 
@@ -392,7 +288,7 @@ public actor ModelRouter {
                     languageModel: SystemLanguageModel.default,
                     modelIdentifier: modelName,
                     temperature: configuration.temperature,
-                    effectiveContextWindow: configuration.configuredContextWindow(for: model)
+                    effectiveContextWindow: await configuration.contextWindow(for: model, agentID: agentID)
                 )
             #else
                 throw ModelRouterError.unsupportedProvider(provider.rawValue)
@@ -422,7 +318,7 @@ public actor ModelRouter {
         return workspace.rootPath
     }
 
-    private static func generationOptions(
+    public static func generationOptions(
         provider: AgentModelProvider,
         model: String,
         temperature: Double,
@@ -440,7 +336,7 @@ public actor ModelRouter {
         }
 
         switch provider {
-        case .openAI, .moonshot:
+        case .openAI, .moonshot, .openAICompatible:
             // OpenAI-compatible chat endpoints use the vendor's raw effort
             // value. Keeping this in `extraBody` preserves newer values such
             // as `xhigh` and `max` even when the client package's typed enum
@@ -466,7 +362,7 @@ public actor ModelRouter {
         return options
     }
 
-    private static func geminiGenerationOptions(
+    public static func geminiGenerationOptions(
         model: String,
         temperature: Double,
         reasoning: ReasoningEffortSelection?

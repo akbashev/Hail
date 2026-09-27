@@ -47,8 +47,9 @@ public struct SessionIdentity: RawRepresentable, Codable, Sendable, Hashable,
 ///
 /// Session-owning harnesses keep the conversation in their own session, so a
 /// warm session only needs what is genuinely new this turn; the full message
-/// list is sent once, as the cold bootstrap. The journal stays the durable
-/// source of truth — the harness session is an ephemeral cache in front of it.
+/// list is sent whenever a provider session is created or its identity changes.
+/// The journal stays the durable source of truth; the provider session is only
+/// an optional continuation handle.
 ///
 /// INVARIANT: warm deltas are order-sensitive and not self-healing, so this
 /// contract depends on strictly one in-flight turn per (agent, context)
@@ -148,8 +149,21 @@ extension SessionOwningEndpoint {
 /// edit or a model switch. It deliberately excludes per-turn instructions,
 /// memory, and the conversation thread — those ride the delta.
 public enum AgentSessionIdentity {
-    public static func fingerprint(model: String, systemPrompt: String) -> SessionIdentity {
-        let digest = SHA256.hash(data: Data((model + "\u{1F}" + systemPrompt).utf8))
+    public static func fingerprint(
+        model: String,
+        reasoningEffort: ReasoningEffort? = nil,
+        systemPrompt: String,
+        personaInstructions: String? = nil,
+        configurationIdentity: String? = nil
+    ) -> SessionIdentity {
+        let value = [
+            model,
+            reasoningEffort?.rawValue ?? "provider-default",
+            systemPrompt,
+            personaInstructions ?? "",
+            configurationIdentity ?? "",
+        ].joined(separator: "\u{1F}")
+        let digest = SHA256.hash(data: Data(value.utf8))
         return SessionIdentity(rawValue: digest.map { String(format: "%02x", $0) }.joined())
     }
 }

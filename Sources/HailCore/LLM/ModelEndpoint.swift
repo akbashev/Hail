@@ -181,7 +181,8 @@ public typealias ModelReasoningPolicy =
 public enum TokenCounting: Sendable {
     case unavailable
     case available(
-        @Sendable (_ entries: [Transcript.Entry], _ tools: [ToolDefinition]) async throws(AgentRuntimeError) -> Int
+        @Sendable (_ entries: [Transcript.Entry], _ tools: [ToolDefinition])
+            async throws(AgentRuntimeError) -> Int
     )
 }
 
@@ -274,6 +275,8 @@ public enum HailErrorFormatter {
         switch error {
         case .modelMisbehavior(let reason):
             "Model error: \(sanitizedModelOutput(reason))"
+        case .modelRequestFailed:
+            "The model request failed. Please try again."
         case .modelUnavailable:
             "The model service is currently unavailable."
         case .rateLimit:

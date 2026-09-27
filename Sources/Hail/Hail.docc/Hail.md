@@ -44,7 +44,6 @@ Tools are model-facing workflows dispatched by `ToolRegistry` under the turn's a
 - ``ClaudeCliEndpoint``
 - ``CodexAppServerEndpoint``
 - ``AnyLanguageModelEndpoint``
-- ``OllamaEndpoint``
 - ``ModelRouter``
 - ``ModelRouterConfiguration``
 - ``ReasoningEffort``

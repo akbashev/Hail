@@ -5,6 +5,10 @@ import Testing
 
 @Suite("Prompt assembly persona")
 struct PromptAssemblyPersonaTests {
+    private let testModelConfiguration = ModelConfiguration(
+        model: try! AgentModel("test/model")
+    )
+
     private func definition(
         role: String = "conversation",
         systemPrompt: String = "Chat.",
@@ -13,8 +17,7 @@ struct PromptAssemblyPersonaTests {
         AgentDefinition(
             role: Role(role),
             behavior: .init(
-                systemPrompt: systemPrompt,
-                model: try AgentModel("test/model")
+                systemPrompt: systemPrompt
             ),
             persona: persona
         )
@@ -42,6 +45,7 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: .chat),
             definition: try definition(role: "coder", systemPrompt: "Code."),
+            modelConfiguration: testModelConfiguration,
             conversationThread: [
                 .response(
                     sender: "coder-chat",
@@ -68,6 +72,7 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
             definition: try definition(),
+            modelConfiguration: testModelConfiguration,
             conversationThread: [
                 .response(
                     sender: "participant:telegram:42",
@@ -90,6 +95,7 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
             definition: try definition(),
+            modelConfiguration: testModelConfiguration,
             conversationThread: [
                 .text(
                     sender: "conversation-chat",
@@ -112,6 +118,7 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
             definition: try definition(),
+            modelConfiguration: testModelConfiguration,
             conversationThread: [
                 .toolResult(
                     id: "call-1",
@@ -141,6 +148,7 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("conversation"), contextID: .chat),
             definition: try definition(),
+            modelConfiguration: testModelConfiguration,
             conversationThread: [
                 .assistantToolCall(
                     round: ModelToolRound(
@@ -182,6 +190,7 @@ struct PromptAssemblyPersonaTests {
                     instructions: "You are calm, direct, and deeply curious about alien life."
                 )
             ),
+            modelConfiguration: testModelConfiguration,
             conversationThread: [],
             contextManifest: ContextManifest(items: [])
         )
@@ -216,6 +225,7 @@ struct PromptAssemblyPersonaTests {
         let context = PromptContext(
             agentID: AgentID(role: Role("coder"), contextID: AgentContextID("build")),
             definition: try definition(role: "coder"),
+            modelConfiguration: testModelConfiguration,
             conversationThread: [],
             contextManifest: ContextManifest(items: []),
             instructions: PromptAssemblyInstructions(

@@ -117,10 +117,10 @@ struct PrefixStabilityTests {
             definition: AgentDefinition(
                 role: agentID.role,
                 behavior: .init(
-                    systemPrompt: "sys",
-                    model: try AgentModel("test/fake")
+                    systemPrompt: "sys"
                 )
             ),
+            modelConfiguration: ModelConfiguration(model: try AgentModel("test/fake")),
             conversationThread: [
                 .text(sender: "user", content: "hello", timestamp: Date(timeIntervalSince1970: 1))
             ],

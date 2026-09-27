@@ -194,7 +194,7 @@ struct AgentStateTurnTimingTests {
 
         #expect(state.activeTurn == nil)
         #expect(state.phase == .idle)
-        #expect(state.currentToolName == nil)
+        #expect(state.runtimeState == .idle)
         #expect(state.pendingTurnRerun == opening)
         #expect(state.modelRequests.first?.outcome == .interrupted)
     }

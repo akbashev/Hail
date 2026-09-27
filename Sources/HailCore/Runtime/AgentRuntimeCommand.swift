@@ -8,6 +8,7 @@ import AnyLanguageModel
 
 public enum AgentRuntimeError: Error, Sendable, Equatable, Codable {
     case modelMisbehavior(String)
+    case modelRequestFailed(String)
     case modelUnavailable
     case rateLimit
     case contextLengthExceeded

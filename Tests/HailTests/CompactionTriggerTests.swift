@@ -116,8 +116,7 @@ struct CompactionFailurePolicyTests {
         try AgentDefinition(
             role: agentID.role,
             behavior: .init(
-                systemPrompt: "sys",
-                model: AgentModel("test/fake")
+                systemPrompt: "sys"
             )
         )
     }
@@ -130,6 +129,7 @@ struct CompactionFailurePolicyTests {
         let promptContext = PromptContext(
             agentID: agentID,
             definition: definition,
+            modelConfiguration: ModelConfiguration(model: try! AgentModel("test/fake")),
             contextSummary: nil,
             conversationThread: [
                 message("one", at: 1),
@@ -167,6 +167,7 @@ struct CompactionFailurePolicyTests {
                 let promptContext = PromptContext(
                     agentID: agentID,
                     definition: definition,
+                    modelConfiguration: ModelConfiguration(model: try! AgentModel("test/fake")),
                     contextSummary: nil,
                     conversationThread: [],
                     contextManifest: ContextManifest(items: []),
@@ -180,7 +181,7 @@ struct CompactionFailurePolicyTests {
                 )
             },
             rebuildContext: { $0 },
-            endpoint: { StubEndpoint() },
+            endpoint: { _ in StubEndpoint() },
             tools: { _ in ToolRegistry() },
             emit: { event in
                 await events.append(event)

@@ -13,7 +13,7 @@ import HailCore
 /// makes the precedence rule part of the capability instead of making the
 /// router coordinate unrelated configuration values.
 public struct ModelContextWindowResolver: Sendable {
-    public typealias Configured = @Sendable (AgentModel) -> Int?
+    public typealias Configured = @Sendable (AgentModel, AgentID) async -> Int?
     public typealias Discovered =
         @Sendable (AgentModel, URL) async throws -> Int?
 
@@ -21,22 +21,23 @@ public struct ModelContextWindowResolver: Sendable {
     private let discovered: Discovered
 
     public init(
-        configured: @escaping Configured = { _ in nil },
+        configured: @escaping Configured = { _, _ in nil },
         discovered: @escaping Discovered = { _, _ in nil }
     ) {
         self.configured = configured
         self.discovered = discovered
     }
 
-    func configuredValue(for model: AgentModel) -> Int? {
-        configured(model)
+    func configuredValue(for model: AgentModel, agentID: AgentID) async -> Int? {
+        await configured(model, agentID)
     }
 
     public func resolve(
         for model: AgentModel,
-        baseURL: URL
+        baseURL: URL,
+        agentID: AgentID
     ) async throws -> Int? {
-        if let value = configured(model) {
+        if let value = await configured(model, agentID) {
             return value
         }
         return try await discovered(model, baseURL)
@@ -111,7 +112,7 @@ public struct ModelRouterConfiguration: Sendable {
         self.contextWindowResolver =
             contextWindowResolver
             ?? ModelContextWindowResolver(
-                configured: { model in
+                configured: { model, _ in
                     modelContextWindows[model]
                         ?? contextWindows[model.provider]
                 }
@@ -133,8 +134,15 @@ public struct ModelRouterConfiguration: Sendable {
         return value
     }
 
-    func configuredContextWindow(for model: AgentModel) -> Int? {
-        contextWindowResolver.configuredValue(for: model)
+    func configuredContextWindowForAgent(
+        _ agentID: AgentID,
+        model: AgentModel
+    ) async -> Int? {
+        await contextWindowResolver.configuredValue(for: model, agentID: agentID)
+    }
+
+    func contextWindow(for model: AgentModel, agentID: AgentID) async -> Int? {
+        await configuredContextWindowForAgent(agentID, model: model)
     }
 
     func validate(
@@ -185,6 +193,7 @@ public enum ModelRouterError: Error, Sendable, Equatable {
     case unsupportedProvider(String)
     case missingAPIKey(AgentModelProvider)
     case missingProviderConfiguration(AgentModelProvider)
+    case endpointProviderFailed(AgentModelProvider, String)
     case contextWindowUnavailable(AgentModelProvider, String, String)
     /// The host capability profile rejected the level, or the selected
     /// built-in adapter has no representation for its configured encoding.

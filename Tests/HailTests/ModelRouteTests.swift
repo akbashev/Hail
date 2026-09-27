@@ -8,6 +8,25 @@ import Testing
     import Foundation
 #endif
 
+private actor ContextWindowStore {
+    private var values: [AgentID: Int] = [:]
+
+    func set(_ value: Int, for agentID: AgentID) {
+        values[agentID] = value
+    }
+
+    func value(for agentID: AgentID) -> Int? {
+        return values[agentID]
+    }
+}
+
+private func agentID(_ rawValue: String) -> AgentID {
+    guard let value = AgentID(rawValue: rawValue) else {
+        fatalError("Invalid test agent ID: \(rawValue)")
+    }
+    return value
+}
+
 @Suite("Models")
 struct ModelRouteTests {
     @Test("a model contains a typed provider and model ID")
@@ -55,7 +74,7 @@ struct ModelRouteTests {
         ) {
             try await router.endpoint(
                 for: "mystery/model",
-                agentID: "coder-main",
+                agentID: agentID("coder-main"),
                 workspace: AgentWorkspace(rootPath: "/tmp")
             )
         }
@@ -93,7 +112,7 @@ struct ModelRouteTests {
         ) {
             try await router.endpoint(
                 for: " ",
-                agentID: "coder-main",
+                agentID: agentID("coder-main"),
                 workspace: AgentWorkspace(rootPath: "/tmp")
             )
         }
@@ -108,7 +127,7 @@ struct ModelRouteTests {
         await #expect(throws: ModelRouterError.missingAPIKey(.openAI)) {
             try await router.endpoint(
                 for: "openai/gpt-test",
-                agentID: "coder-main",
+                agentID: agentID("coder-main"),
                 workspace: AgentWorkspace(rootPath: "/tmp")
             )
         }
@@ -123,7 +142,7 @@ struct ModelRouteTests {
         await #expect(throws: ModelRouterError.missingWorkingDirectory) {
             try await router.endpoint(
                 for: "codex/gpt-test",
-                agentID: "coder-main"
+                agentID: agentID("coder-main")
             )
         }
     }
@@ -162,11 +181,53 @@ struct ModelRouteTests {
 
         let endpoint = try await router.endpoint(
             for: model.rawValue,
-            agentID: "coder-main",
+            agentID: agentID("coder-main"),
             workspace: AgentWorkspace(rootPath: "/tmp")
         )
 
         #expect(endpoint.effectiveContextWindow == 131_072)
+    }
+
+    @Test("agent context windows are resolved per turn for shared models")
+    func agentContextWindowChangesApplyToTheNextTurn() async throws {
+        let model = try AgentModel("ollama/qwen3.5:9b-mlx")
+        let windows = ContextWindowStore()
+        await windows.set(8_192, for: agentID("profile-a"))
+        await windows.set(32_768, for: agentID("profile-b"))
+
+        let resolver = ModelContextWindowResolver(
+            configured: { _, agentID in
+                await windows.value(for: agentID)
+            }
+        )
+        let router = ModelRouter(
+            configuration: try ModelRouterConfiguration(
+                temperature: 0.7,
+                baseURLs: [.ollama: URL(string: "http://localhost:11434")!],
+                contextWindowResolver: resolver
+            )
+        )
+
+        let firstA = try await router.endpoint(
+            for: model.rawValue,
+            agentID: agentID("profile-a"),
+            workspace: AgentWorkspace(rootPath: "/tmp")
+        )
+        let firstB = try await router.endpoint(
+            for: model.rawValue,
+            agentID: agentID("profile-b"),
+            workspace: AgentWorkspace(rootPath: "/tmp")
+        )
+        #expect(firstA.effectiveContextWindow == 8_192)
+        #expect(firstB.effectiveContextWindow == 32_768)
+
+        await windows.set(65_536, for: agentID("profile-a"))
+        let secondA = try await router.endpoint(
+            for: model.rawValue,
+            agentID: agentID("profile-a"),
+            workspace: AgentWorkspace(rootPath: "/tmp")
+        )
+        #expect(secondA.effectiveContextWindow == 65_536)
     }
 
     @Test("invalid model context windows are rejected at construction")
@@ -205,7 +266,7 @@ struct ModelRouteTests {
         ) {
             try await router.endpoint(
                 for: model.rawValue,
-                agentID: "coder-main",
+                agentID: agentID("coder-main"),
                 workspace: AgentWorkspace(rootPath: "/tmp"),
                 reasoningEffort: .xhigh
             )
@@ -229,7 +290,7 @@ struct ModelRouteTests {
 
         let endpoint = try await router.endpoint(
             for: model.rawValue,
-            agentID: "coder-main",
+            agentID: agentID("coder-main"),
             workspace: AgentWorkspace(rootPath: "/tmp"),
             reasoningEffort: .high
         )
@@ -273,11 +334,11 @@ struct ModelRouteTests {
 
         let endpoint = try await router.endpoint(
             for: model.rawValue,
-            agentID: "memory-extractor",
+            agentID: agentID("memory-extractor"),
             workspace: AgentWorkspace(rootPath: "/tmp"),
             reasoningEffort: ReasoningEffort.none
         )
-        #expect(endpoint is OllamaEndpoint)
+        #expect(endpoint is AnyLanguageModelEndpoint)
     }
 
     @Test("Ollama rejects graded effort instead of approximating it")
@@ -299,7 +360,7 @@ struct ModelRouteTests {
         ) {
             try await router.endpoint(
                 for: model.rawValue,
-                agentID: "coder-main",
+                agentID: agentID("coder-main"),
                 workspace: AgentWorkspace(rootPath: "/tmp"),
                 reasoningEffort: .high
             )

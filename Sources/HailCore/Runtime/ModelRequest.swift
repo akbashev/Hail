@@ -102,40 +102,6 @@ public struct ModelRequestRecord: Codable, Sendable, Equatable {
         self.contentHashes = contentHashes
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case id, turnID, model, kind, startedAt, completedAt, durationMilliseconds, usage, outcome
-        case contentHashes
-    }
-
-    /// `kind` was added after request records were first journaled; old
-    /// snapshots describe ordinary generation requests by default.
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(ModelRequestID.self, forKey: .id)
-        turnID = try container.decode(TurnID.self, forKey: .turnID)
-        model = try container.decode(String.self, forKey: .model)
-        kind = try container.decodeIfPresent(ModelRequestKind.self, forKey: .kind) ?? .generation
-        startedAt = try container.decode(Date.self, forKey: .startedAt)
-        completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
-        durationMilliseconds = try container.decodeIfPresent(Int.self, forKey: .durationMilliseconds)
-        usage = try container.decodeIfPresent(ModelUsage.self, forKey: .usage)
-        outcome = try container.decode(ModelRequestOutcome.self, forKey: .outcome)
-        contentHashes = try container.decodeIfPresent([String].self, forKey: .contentHashes)
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(turnID, forKey: .turnID)
-        try container.encode(model, forKey: .model)
-        try container.encode(kind, forKey: .kind)
-        try container.encode(startedAt, forKey: .startedAt)
-        try container.encodeIfPresent(completedAt, forKey: .completedAt)
-        try container.encodeIfPresent(durationMilliseconds, forKey: .durationMilliseconds)
-        try container.encodeIfPresent(usage, forKey: .usage)
-        try container.encode(outcome, forKey: .outcome)
-        try container.encodeIfPresent(contentHashes, forKey: .contentHashes)
-    }
 }
 
 /// Coarse durable phase exposed to operators. Detailed streamed narration is
@@ -148,30 +114,28 @@ public enum AgentPhase: String, Codable, Sendable, Equatable {
     case failed
 }
 
+/// Public lifecycle state for diagnostics. Provider telemetry is kept outside
+/// this value because it may legitimately be unavailable.
+public enum AgentRuntimeState: String, Codable, Sendable, Equatable {
+    case idle
+    case generating
+    case compacting
+    case executingTool
+    case failed
+}
+
 public struct AgentStatusSnapshot: Codable, Sendable, Equatable {
     public let agentID: AgentID
-    public let phase: AgentPhase
-    public let turnID: TurnID?
-    public let activeModelRequestID: ModelRequestID?
-    public let currentToolName: String?
-    public let turnStartedAt: Date?
+    public let state: AgentRuntimeState
     public let contextUsage: ContextUsage?
 
     public init(
         agentID: AgentID,
-        phase: AgentPhase,
-        turnID: TurnID? = nil,
-        activeModelRequestID: ModelRequestID? = nil,
-        currentToolName: String? = nil,
-        turnStartedAt: Date? = nil,
+        state: AgentRuntimeState,
         contextUsage: ContextUsage? = nil
     ) {
         self.agentID = agentID
-        self.phase = phase
-        self.turnID = turnID
-        self.activeModelRequestID = activeModelRequestID
-        self.currentToolName = currentToolName
-        self.turnStartedAt = turnStartedAt
+        self.state = state
         self.contextUsage = contextUsage
     }
 }
@@ -181,11 +145,7 @@ public struct AgentStatusSnapshot: Codable, Sendable, Equatable {
 /// a model prompt.
 public struct AgentContextSnapshot: Codable, Sendable, Equatable {
     public let agentID: AgentID
-    public let phase: AgentPhase
-    public let turnID: TurnID?
-    public let activeModelRequestID: ModelRequestID?
-    public let currentToolName: String?
-    public let turnStartedAt: Date?
+    public let state: AgentRuntimeState
     public let contextUsage: ContextUsage?
     public let usageSummary: AgentUsageSummary
     public let recentModelRequestCount: Int
@@ -194,11 +154,7 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
 
     public init(
         agentID: AgentID,
-        phase: AgentPhase,
-        turnID: TurnID? = nil,
-        activeModelRequestID: ModelRequestID? = nil,
-        currentToolName: String? = nil,
-        turnStartedAt: Date? = nil,
+        state: AgentRuntimeState,
         contextUsage: ContextUsage? = nil,
         usageSummary: AgentUsageSummary = .init(),
         recentModelRequestCount: Int = 0,
@@ -206,11 +162,7 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
         hasContextSummary: Bool = false
     ) {
         self.agentID = agentID
-        self.phase = phase
-        self.turnID = turnID
-        self.activeModelRequestID = activeModelRequestID
-        self.currentToolName = currentToolName
-        self.turnStartedAt = turnStartedAt
+        self.state = state
         self.contextUsage = contextUsage
         self.usageSummary = usageSummary
         self.recentModelRequestCount = recentModelRequestCount

@@ -437,8 +437,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// stable while the model is working.
     let rebuildContext: @Sendable (TurnContext) async throws(AgentRuntimeError) -> TurnContext
 
-    /// Resolves the model endpoint for this turn.
-    let endpoint: @Sendable () async throws(AgentRuntimeError) -> ModelEndpoint
+    /// Resolves the model endpoint from the complete scoped turn context.
+    /// This includes the validated provider-session resume handle; the host
+    /// must not reread mutable agent state here.
+    let endpoint: @Sendable (TurnContext) async throws(AgentRuntimeError) -> ModelEndpoint
 
     /// Selects a request-scoped reasoning override without requiring the
     /// endpoint to classify prompt text. The default preserves provider
@@ -565,8 +567,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         logger: Logger = Logger(label: "hail.reasoning-loop"),
         authority: any Authority,
         context: @escaping @Sendable () async throws(AgentRuntimeError) -> TurnContext,
-        rebuildContext: @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> TurnContext,
-        endpoint: @escaping @Sendable () async throws(AgentRuntimeError) -> ModelEndpoint,
+        rebuildContext:
+            @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> TurnContext,
+        endpoint: @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> ModelEndpoint,
         modelReasoningPolicy: @escaping ModelReasoningPolicy = { _ in .providerDefault },
         tools: @escaping @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry,
         emit: @escaping @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void,
@@ -773,7 +776,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 tokenCount: try await count(request.entries, request.tools),
                 source: .reported
             )
-            measure = { (candidate: PreparedRequest) async throws(AgentRuntimeError) -> RequestMeasurement in
+            measure = {
+                (candidate: PreparedRequest) async throws(AgentRuntimeError) -> RequestMeasurement in
                 do {
                     return RequestMeasurement(
                         tokenCount: try await count(candidate.entries, candidate.tools),
@@ -807,12 +811,13 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
         }
         let contextProjection:
-            @Sendable (GeneratedContent, ContextProjectionBudget) throws(AgentRuntimeError) -> GeneratedContent =
-                if let operation {
-                    operation.contextProjection
-                } else {
-                    { @Sendable value, _ in value.generatedContent }
-                }
+            @Sendable (GeneratedContent, ContextProjectionBudget) throws(AgentRuntimeError) ->
+                GeneratedContent =
+                    if let operation {
+                        operation.contextProjection
+                    } else {
+                        { @Sendable value, _ in value.generatedContent }
+                    }
         let decision: CompactionDecision<GeneratedContent>
         do {
             decision = try await compactor.compact(
@@ -981,13 +986,14 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 "Turn ended",
                 metadata: [
                     "agentID": .string(agentID.rawValue),
-                    "durationMs": .string("\(Self.durationMilliseconds(since: turnStartedAt, now: clock.now))"),
+                    "durationMs": .string(
+                        "\(Self.durationMilliseconds(since: turnStartedAt, now: clock.now))"),
                 ]
             )
         }
 
-        let endpoint = try await self.endpoint()
         var turnContext = try await context()
+        let endpoint = try await self.endpoint(turnContext)
 
         // The input was journaled before `context()` ran, so the assembled
         // prompt already contains it. Request-local context is deliberately
@@ -1487,7 +1493,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         case .invalidRequest(let reason):
             return .modelMisbehavior("invalid request: \(reason)")
         case .requestFailed(let reason):
-            return .modelMisbehavior(HailErrorFormatter.sanitizedModelOutput(reason))
+            return .modelRequestFailed(HailErrorFormatter.sanitizedModelOutput(reason))
         case .invalidResponse(let reason):
             return .modelMisbehavior("invalid response: \(reason)")
         case .decodingError(let underlying):
@@ -1510,7 +1516,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         return .infrastructureFailure(String(describing: error))
     }
 
-    private static func durationMilliseconds(since start: ClockType.Instant, now: ClockType.Instant) -> Int {
+    private static func durationMilliseconds(since start: ClockType.Instant, now: ClockType.Instant)
+        -> Int
+    {
         let components = start.duration(to: now).components
         let milliseconds =
             components.seconds.multipliedReportingOverflow(by: 1_000).partialValue

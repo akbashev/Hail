@@ -30,10 +30,12 @@ public struct AgentModelProvider: RawRepresentable, Codable, Sendable, Hashable,
     public static let ollama = Self(rawValue: "ollama")
     public static let codex = Self(rawValue: "codex")
     public static let system = Self(rawValue: "system")
+    public static let openAICompatible = Self(rawValue: "openai-compatible")
+    public static let llamaCPP = Self(rawValue: "llama-cpp")
 
     public static let builtIns: [Self] = [
         .kimiCode, .claude, .moonshot, .openAI, .anthropic,
-        .gemini, .ollama, .codex, .system,
+        .gemini, .ollama, .codex, .system, .openAICompatible, .llamaCPP,
     ]
 
     public static func custom(_ rawValue: String) -> Self {
@@ -178,47 +180,20 @@ public struct AgentDefinition: Codable, Sendable {
 
     public struct Behavior: Codable, Sendable {
         public let systemPrompt: String
-        public let model: AgentModel
-        /// Optional host-selected reasoning effort. When absent, the model
-        /// provider chooses its own default for the selected model.
-        public let reasoningEffort: ReasoningEffort?
         public let execution: AgentExecutionPolicy
 
         public init(
             systemPrompt: String,
-            model: AgentModel,
-            execution: AgentExecutionPolicy = .autonomousWorkspace,
-            reasoningEffort: ReasoningEffort? = nil
+            execution: AgentExecutionPolicy = .autonomousWorkspace
         ) {
             self.systemPrompt = systemPrompt
-            self.model = model
-            self.reasoningEffort = reasoningEffort
             self.execution = execution
-        }
-
-        public init(
-            systemPrompt: String,
-            model: String,
-            execution: AgentExecutionPolicy = .autonomousWorkspace,
-            reasoningEffort: ReasoningEffort? = nil
-        ) throws(AgentModelError) {
-            self.init(
-                systemPrompt: systemPrompt,
-                model: try AgentModel(model),
-                execution: execution,
-                reasoningEffort: reasoningEffort
-            )
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.systemPrompt = try container.decode(String.self, forKey: .systemPrompt)
 
-            self.model = try container.decode(AgentModel.self, forKey: .model)
-            self.reasoningEffort = try container.decodeIfPresent(
-                ReasoningEffort.self,
-                forKey: .reasoningEffort
-            )
             self.execution =
                 try container.decodeIfPresent(AgentExecutionPolicy.self, forKey: .execution)
                 ?? .autonomousWorkspace
@@ -226,8 +201,6 @@ public struct AgentDefinition: Codable, Sendable {
 
         enum CodingKeys: String, CodingKey {
             case systemPrompt = "system_prompt"
-            case model
-            case reasoningEffort = "reasoning_effort"
             case execution
         }
     }
@@ -251,19 +224,13 @@ public struct AgentSummary: Sendable {
 
 extension AgentDefinition {
     /// Constructs the generic shape used when the host provides no definition.
-    /// The host must supply the model; Hail does not choose a provider or
-    /// model on its behalf.
     public static func defaultDefinition(
-        for role: Role,
-        model: AgentModel,
-        reasoningEffort: ReasoningEffort? = nil
+        for role: Role
     ) -> AgentDefinition {
         return AgentDefinition(
             role: role,
             behavior: .init(
-                systemPrompt: "You are the \(role) agent.",
-                model: model,
-                reasoningEffort: reasoningEffort
+                systemPrompt: "You are the \(role) agent."
             )
         )
     }

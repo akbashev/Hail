@@ -196,6 +196,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
         let keptContext = PromptContext(
             agentID: context.agentID,
             definition: context.definition,
+            modelConfiguration: context.modelConfiguration,
             contextSummary: nil,  // summary cost is added separately as outputBudget
             conversationThread: kept,
             contextManifest: context.contextManifest,
@@ -229,6 +230,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
         PromptContext(
             agentID: context.agentID,
             definition: context.definition,
+            modelConfiguration: context.modelConfiguration,
             contextSummary: summary,
             conversationThread: Array(context.conversationThread.dropFirst(archivedCount)),
             contextManifest: context.contextManifest,

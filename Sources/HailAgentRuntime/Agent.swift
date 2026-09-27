@@ -194,11 +194,7 @@ public distributed actor Agent: AsyncSequence {
     /// subscribers resume with `nil`, their iterations finish, and the
     /// references that would otherwise pin this instance are dropped.
     ///
-    /// Acceptance also evicts the cached model endpoint: the router pins the
-    /// endpoint (and its harness subprocess) independently of this actor's
-    /// lifetime, so deactivating without eviction would leak the process. The
-    /// next turn rebuilds the endpoint and resumes from the journaled session.
-    /// Acceptance also unregisters from the active-agent index, so
+    /// Acceptance unregisters from the active-agent index, so
     /// `list_agents` stops reporting a passivated agent. The index is only a
     /// discovery projection; it is not consulted when addressing an agent,
     /// and its availability never controls actor lifecycle. Both actions run
@@ -206,14 +202,6 @@ public distributed actor Agent: AsyncSequence {
     /// restores the registration.
     public func deactivationResult() async -> AgentDeactivationResult {
         guard !self.isWorking else { return .active }
-        await actorSystem.agentRuntime.evictEndpoint(
-            for: definition.behavior.model.rawValue,
-            agentID: state.agentID.rawValue,
-            contextID: state.agentID.contextID,
-            workspace: workspace,
-            executionPolicy: definition.behavior.execution,
-            reasoningEffort: definition.behavior.reasoningEffort
-        )
         do {
             try await actorSystem.agentRuntime.unregister(agentID: state.agentID)
         } catch {
@@ -296,21 +284,9 @@ public distributed actor Agent: AsyncSequence {
     /// Coarse current state for operators; streamed text and reasoning remain
     /// available through the activity sequence.
     public distributed var statusSnapshot: AgentStatusSnapshot {
-        let activeTurnID = state.activeTurn?.id
-        let activeRequest = activeTurnID.flatMap { turnID in
-            state.modelRequests.last { record in
-                guard record.turnID == turnID else { return false }
-                if case .running = record.outcome { return true }
-                return false
-            }
-        }
         return AgentStatusSnapshot(
             agentID: state.agentID,
-            phase: state.phase,
-            turnID: state.activeTurn?.id,
-            activeModelRequestID: activeRequest?.id,
-            currentToolName: state.currentToolName,
-            turnStartedAt: state.activeTurn?.startedAt,
+            state: state.runtimeState,
             contextUsage: state.latestContextUsage
         )
     }
@@ -319,21 +295,9 @@ public distributed actor Agent: AsyncSequence {
     /// operator dashboards. It is assembled inside the event-sourced actor so
     /// all values describe the same state revision.
     public distributed var contextSnapshot: AgentContextSnapshot {
-        let activeTurnID = state.activeTurn?.id
-        let activeRequest = activeTurnID.flatMap { turnID in
-            state.modelRequests.last { record in
-                guard record.turnID == turnID else { return false }
-                if case .running = record.outcome { return true }
-                return false
-            }
-        }
         return AgentContextSnapshot(
             agentID: state.agentID,
-            phase: state.phase,
-            turnID: activeTurnID,
-            activeModelRequestID: activeRequest?.id,
-            currentToolName: state.currentToolName,
-            turnStartedAt: state.activeTurn?.startedAt,
+            state: state.runtimeState,
             contextUsage: state.latestContextUsage,
             usageSummary: state.usageSummary,
             recentModelRequestCount: state.modelRequests.count,
@@ -366,9 +330,9 @@ public distributed actor Agent: AsyncSequence {
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         let previousTask = processingTask
         let turnID = TurnID()
-        let loop = reasoningLoop(lane: lane, turnID: turnID)
         let workTask = Task<Void, Error> { [input, connection] in
             await previousTask?.value
+            let loop = await self.reasoningLoop(lane: lane, turnID: turnID)
             // The turn is bracketed so a crash mid-turn is detectable on
             // replay: `turnStarted` without `turnCompleted` is re-run once
             // after activation (see `resumesInterruptedTurns`).
@@ -612,7 +576,7 @@ public distributed actor Agent: AsyncSequence {
     ///
     /// `lane` is the per-turn effect lane: its authority flows into the turn's
     /// tool registry and the session-owning endpoint's stream call. `nil`
-    /// keeps the agent's plugin-derived authority (and its cached registry).
+    /// keeps the agent's plugin-derived authority and rebuilds turn resources.
     ///
     /// LANE-AUTHORITY INVARIANT: the endpoint is deliberately resolved with
     /// the agent's default authority even for a laned turn. That creation
@@ -625,37 +589,47 @@ public distributed actor Agent: AsyncSequence {
     /// on every turn, and every session-owning endpoint honors it for
     /// *model-facing* effects (the ACP delegate's fs/terminal checks, Codex's
     /// approval decisions); Hail-side tools run through the laned registry.
-    /// Because the creation authority never varies by lane, the router's
-    /// endpoint cache key needs no authority component — a cached endpoint
-    /// can never smuggle a broader authority into a restricted lane.
-    private func reasoningLoop(lane: TurnAuthorityLane?, turnID: TurnID = TurnID()) -> ReasoningLoop<ContinuousClock> {
-        ReasoningLoop<ContinuousClock>(
+    /// Endpoint creation is scoped to the turn, so no provider resource can
+    /// carry authority or configuration across turns accidentally.
+    private func reasoningLoop(
+        lane: TurnAuthorityLane?,
+        turnID: TurnID = TurnID()
+    ) async -> ReasoningLoop<ContinuousClock> {
+        let turnAuthority: any Authority
+        if let laneAuthority = lane?.authority {
+            turnAuthority = laneAuthority
+        } else {
+            turnAuthority = await actorSystem.agentRuntime.authority(
+                for: spawnConfig,
+                workspace: workspace
+            )
+        }
+        return ReasoningLoop<ContinuousClock>(
             agentID: state.agentID,
             turnID: turnID,
             logger: actorSystem.log,
-            authority: lane?.authority ?? authority,
+            authority: turnAuthority,
             context: { () async throws(AgentRuntimeError) -> TurnContext in
                 try await self.buildTurnContext()
             },
             rebuildContext: { (snapshot: TurnContext) async throws(AgentRuntimeError) -> TurnContext in
                 try await self.buildTurnContext(reusing: snapshot)
             },
-            endpoint: { () async throws(AgentRuntimeError) -> any ModelEndpoint in
-                let resumeSession = await self.modelSessionResume
+            endpoint: { turnContext async throws(AgentRuntimeError) -> any ModelEndpoint in
+                let modelConfiguration = turnContext.promptContext.modelConfiguration
                 // Creation authority is the agent's default on purpose — it
                 // scopes only the harness spawn (see the invariant above);
                 // the lane's authority reaches the endpoint per-stream via
                 // the loop's `authority`.
                 do {
                     return try await self.actorSystem.agentRuntime.endpoint(
-                        for: self.definition.behavior.model.rawValue,
-                        agentID: self.state.agentID.rawValue,
-                        contextID: self.state.agentID.contextID,
+                        for: modelConfiguration.model.identifier,
+                        agentID: self.state.agentID,
                         workspace: self.workspace,
-                        executionPolicy: self.definition.behavior.execution,
-                        resumeSession: resumeSession,
-                        authority: self.authority,
-                        reasoningEffort: self.definition.behavior.reasoningEffort
+                        executionPolicy: turnContext.promptContext.definition.behavior.execution,
+                        resumeSession: turnContext.modelSession,
+                        authority: turnAuthority,
+                        reasoningEffort: modelConfiguration.reasoningEffort
                     )
                 } catch {
                     throw Self.mapEndpointDependencyError(error)
@@ -663,7 +637,11 @@ public distributed actor Agent: AsyncSequence {
             },
             modelReasoningPolicy: actorSystem.agentRuntime.modelReasoningPolicy,
             tools: { (turnContext: AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry in
-                try await self.toolRegistry(lane: lane, turnContext: turnContext)
+                try await self.toolRegistry(
+                    lane: lane,
+                    defaultAuthority: turnAuthority,
+                    turnContext: turnContext
+                )
             },
             emit: { (event: AgentEvent) async throws(AgentRuntimeError) in
                 try await self.emitReasoningEvent(event)
@@ -688,6 +666,7 @@ public distributed actor Agent: AsyncSequence {
         let instructions: PromptAssemblyInstructions
         let sessionIdentity: SessionIdentity
         let modelSession: ModelSessionResume?
+        let modelConfiguration: ModelConfiguration
 
         if let snapshot {
             // A turn owns these inputs for its entire lifetime. Only the
@@ -698,6 +677,7 @@ public distributed actor Agent: AsyncSequence {
             instructions = snapshot.promptContext.instructions
             sessionIdentity = snapshot.sessionIdentity
             modelSession = snapshot.modelSession
+            modelConfiguration = snapshot.promptContext.modelConfiguration
         } else {
             do {
                 contextManifest =
@@ -710,18 +690,35 @@ public distributed actor Agent: AsyncSequence {
                 )
             }
             agentID = state.agentID
-            definition = self.definition
+            // Resolve host-owned agent configuration at the turn boundary.
+            // The resulting definition is retained in this TurnContext so
+            // edits made while the turn is running cannot mix configuration
+            // across model rounds, tool calls, or compaction.
+            do {
+                definition = try await runtime.definition(for: self.spawnConfig)
+            } catch {
+                throw mapInfrastructureDependencyError(
+                    error,
+                    operation: "Could not resolve agent configuration"
+                )
+            }
             instructions = runtime.promptInstructions
+            modelConfiguration = try await runtime.modelConfiguration(for: state.agentID)
             sessionIdentity = AgentSessionIdentity.fingerprint(
-                model: definition.behavior.model.rawValue,
-                systemPrompt: definition.behavior.systemPrompt
+                model: modelConfiguration.model.identifier,
+                reasoningEffort: modelConfiguration.reasoningEffort,
+                systemPrompt: definition.behavior.systemPrompt,
+                personaInstructions: definition.persona?.instructions,
+                configurationIdentity: modelConfiguration.sessionConfigurationIdentity
             )
-            modelSession = self.modelSessionResume
+            let persistedSession = self.modelSessionResume
+            modelSession = persistedSession?.identity == sessionIdentity ? persistedSession : nil
         }
 
         let promptContext = PromptContext(
             agentID: agentID,
             definition: definition,
+            modelConfiguration: modelConfiguration,
             contextSummary: state.contextSummary,
             conversationThread: conversationThread,
             contextManifest: contextManifest,
@@ -746,9 +743,10 @@ public distributed actor Agent: AsyncSequence {
     /// the agent's plugin-derived authority.
     private func toolRegistry(
         lane: TurnAuthorityLane?,
+        defaultAuthority: any Authority,
         turnContext: AgentTurnContext
     ) async throws(AgentRuntimeError) -> ToolRegistry {
-        let registry = ToolRegistry(authority: lane?.authority ?? authority)
+        let registry = ToolRegistry(authority: lane?.authority ?? defaultAuthority)
         try await registerTools(in: registry, turnContext: turnContext)
         return registry
     }

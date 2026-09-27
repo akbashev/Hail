@@ -7,12 +7,13 @@ import CryptoKit
     import Foundation
 #endif
 
-/// Deterministic per-element digest chain over one outbound model request.
+/// Per-element content digests before provider-specific request serialization.
 ///
-/// Round N+1 of a tool loop should share its rendered prefix with round N.
+/// Round N+1 of a tool loop should share its content prefix with round N.
 /// Token counts cannot show where two requests diverge; comparing the
 /// journaled chains can. The first differing index between two rounds is
-/// the first element whose rendering changed.
+/// the first element whose content changed. Provider transformations and
+/// model tokenization are not represented by these diagnostics.
 public enum RequestContentHash {
     /// One cumulative digest per element: the tool schemas first, then each
     /// message in request order.
@@ -37,8 +38,48 @@ public enum RequestContentHash {
 
         absorb(tools)
         for message in messages {
-            absorb(message)
+            absorb(withoutLocalIDs(message))
         }
         return digests
     }
+
+    // Transcript/segment UUIDs are local bookkeeping, not prompt content.
+    // Tool invocation IDs are preserved: providers use them to match outputs.
+    private static func withoutLocalIDs(_ entry: Transcript.Entry) -> Transcript.Entry {
+        switch entry {
+        case .instructions(var value):
+            value.id = ""
+            value.segments = value.segments.map(withoutLocalID)
+            return .instructions(value)
+        case .prompt(var value):
+            value.id = ""
+            value.segments = value.segments.map(withoutLocalID)
+            return .prompt(value)
+        case .response(var value):
+            value.id = ""
+            value.segments = value.segments.map(withoutLocalID)
+            return .response(value)
+        case .toolCalls(var value):
+            value.id = ""
+            return .toolCalls(value)
+        case .toolOutput(var value):
+            value.segments = value.segments.map(withoutLocalID)
+            return .toolOutput(value)
+        }
+    }
+
+    private static func withoutLocalID(_ segment: Transcript.Segment) -> Transcript.Segment {
+        switch segment {
+        case .text(var value):
+            value.id = ""
+            return .text(value)
+        case .structure(var value):
+            value.id = ""
+            return .structure(value)
+        case .image(var value):
+            value.id = ""
+            return .image(value)
+        }
+    }
+
 }

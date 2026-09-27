@@ -33,8 +33,20 @@ public struct AgentState: Codable, Sendable {
     /// this state projection keeps dashboard reads local to the actor.
     public private(set) var modelRequests: [ModelRequestRecord] = []
 
-    public private(set) var phase: AgentPhase = .idle
-    public private(set) var currentToolName: String?
+    /// One invariant-bearing lifecycle value. The public `phase` view remains
+    /// available to reducer callers, but it is derived rather than persisted
+    /// beside another independent status field.
+    public private(set) var runtimeState: AgentRuntimeState = .idle
+
+    public var phase: AgentPhase {
+        switch runtimeState {
+        case .idle: .idle
+        case .generating: .generating
+        case .compacting: .compacting
+        case .executingTool: .executingTool
+        case .failed: .failed
+        }
+    }
 
     /// The opening message of a turn interrupted by a crash, folded by
     /// ``normalizeAfterReplay()``. The agent re-runs it after activation (when
@@ -80,13 +92,10 @@ public struct AgentState: Codable, Sendable {
             case opening, responded, id, startedAt
         }
 
-        /// New turn metadata was added after journals already contained
-        /// `activeTurn`. Decode the new fields optionally so an old snapshot
-        /// with only `opening` and `responded` remains loadable.
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             opening = try container.decodeIfPresent(ChatMessage.self, forKey: .opening)
-            responded = try container.decodeIfPresent(Bool.self, forKey: .responded) ?? false
+            responded = try container.decode(Bool.self, forKey: .responded)
             id = try container.decodeIfPresent(TurnID.self, forKey: .id)
             startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
         }
@@ -111,7 +120,7 @@ public struct AgentState: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case agentID, conversationThread, contextSummary, activeTurn,
             pendingTurnRerun, modelSession, usageSummary,
-            latestContextUsage, modelRequests, phase, currentToolName
+            latestContextUsage, modelRequests, runtimeState
     }
 
     public init(from decoder: Decoder) throws {
@@ -128,8 +137,7 @@ public struct AgentState: Codable, Sendable {
         if modelRequests.count > Self.maxRecentModelRequests {
             modelRequests.removeFirst(modelRequests.count - Self.maxRecentModelRequests)
         }
-        phase = try container.decodeIfPresent(AgentPhase.self, forKey: .phase) ?? .idle
-        currentToolName = try container.decodeIfPresent(String.self, forKey: .currentToolName)
+        runtimeState = try container.decode(AgentRuntimeState.self, forKey: .runtimeState)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -143,8 +151,7 @@ public struct AgentState: Codable, Sendable {
         try container.encode(usageSummary, forKey: .usageSummary)
         try container.encodeIfPresent(latestContextUsage, forKey: .latestContextUsage)
         try container.encode(modelRequests, forKey: .modelRequests)
-        try container.encode(phase, forKey: .phase)
-        try container.encodeIfPresent(currentToolName, forKey: .currentToolName)
+        try container.encode(runtimeState, forKey: .runtimeState)
     }
 
     /// Apply a single event to this state. This is the only place where event
@@ -159,8 +166,7 @@ public struct AgentState: Codable, Sendable {
             // starts a fresh turn before re-journaling its opening, so the
             // marker must survive until `messageReceived` recognizes it.
             activeTurn = ActiveTurn(startedAt: at)
-            phase = .generating
-            currentToolName = nil
+            runtimeState = .generating
         case .turnIdentified(let id):
             activeTurn?.id = id
         case .messageReceived(let message):
@@ -206,8 +212,7 @@ public struct AgentState: Codable, Sendable {
                     timestamp: at
                 )
             )
-            phase = .executingTool
-            currentToolName = round.calls.first?.name
+            runtimeState = .executingTool
         case .toolResult(let result, let at):
             conversationThread.append(
                 .toolResult(
@@ -217,14 +222,13 @@ public struct AgentState: Codable, Sendable {
                     timestamp: replayTimestamp(for: at)
                 )
             )
-            phase = .generating
-            currentToolName = nil
+            runtimeState = .generating
         case .conversationCompacted(let archivedCount, let content, _):
             contextSummary = content
             if archivedCount > 0 && archivedCount <= conversationThread.count {
                 conversationThread.removeFirst(archivedCount)
             }
-            phase = .generating
+            runtimeState = .generating
         case .responseReceived(let sender, let content, let timestamp):
             conversationThread.append(.response(sender: sender, content: content, timestamp: timestamp))
             activeTurn?.responded = true
@@ -232,12 +236,10 @@ public struct AgentState: Codable, Sendable {
             // Failures are status, not conversation: they never enter the
             // model-facing thread (PromptAssembler already excludes them),
             // so they can never be archived into a compaction summary.
-            phase = .failed
-            currentToolName = nil
+            runtimeState = .failed
         case .turnCompleted:
             activeTurn = nil
-            phase = .idle
-            currentToolName = nil
+            runtimeState = .idle
         case .modelUsage(let usage, _):
             usageSummary.record(usage)
         case .contextUsage(let usage, _):
@@ -247,7 +249,7 @@ public struct AgentState: Codable, Sendable {
             if modelRequests.count > Self.maxRecentModelRequests {
                 modelRequests.removeFirst(modelRequests.count - Self.maxRecentModelRequests)
             }
-            phase = record.kind == .compaction ? .compacting : .generating
+            runtimeState = record.kind == .compaction ? .compacting : .generating
         case .modelRequestCompleted(let id, let usage, let durationMilliseconds, let at):
             if let index = modelRequests.lastIndex(where: { $0.id == id }) {
                 modelRequests[index].completedAt = at
@@ -255,7 +257,7 @@ public struct AgentState: Codable, Sendable {
                 modelRequests[index].usage = usage
                 modelRequests[index].outcome = .completed
                 if activeTurn != nil {
-                    phase = .generating
+                    runtimeState = .generating
                 }
             }
         case .modelRequestFailed(let id, let error, let durationMilliseconds, let at):
@@ -264,7 +266,7 @@ public struct AgentState: Codable, Sendable {
                 modelRequests[index].durationMilliseconds = durationMilliseconds
                 modelRequests[index].outcome = .failed(error)
                 if activeTurn != nil {
-                    phase = .generating
+                    runtimeState = .generating
                 }
             }
         case .modelSessionIdentified(let id, let identity):
@@ -295,8 +297,7 @@ public struct AgentState: Codable, Sendable {
             }
         }
         activeTurn = nil
-        phase = .idle
-        currentToolName = nil
+        runtimeState = .idle
     }
 
     /// Deterministic timestamp for legacy events that predate per-tool timing.

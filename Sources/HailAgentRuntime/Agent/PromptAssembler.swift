@@ -25,6 +25,7 @@ public struct PromptAssemblyInstructions: Sendable, Hashable {
 public struct PromptContext: Sendable {
     public let agentID: AgentID
     public let definition: AgentDefinition
+    public let modelConfiguration: ModelConfiguration
     /// The rolling summary of compacted-away history, if any compaction ran.
     /// Compactors read it to fold the old summary into the new one.
     public let contextSummary: GeneratedContent?
@@ -37,6 +38,7 @@ public struct PromptContext: Sendable {
     public init(
         agentID: AgentID,
         definition: AgentDefinition,
+        modelConfiguration: ModelConfiguration,
         contextSummary: GeneratedContent? = nil,
         conversationThread: [ChatMessage],
         contextManifest: ContextManifest,
@@ -44,6 +46,7 @@ public struct PromptContext: Sendable {
     ) {
         self.agentID = agentID
         self.definition = definition
+        self.modelConfiguration = modelConfiguration
         self.contextSummary = contextSummary
         self.conversationThread = conversationThread
         self.contextManifest = contextManifest

@@ -116,11 +116,6 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     private var activeAgentIndex: ActiveAgentIndex?
     private let deliveryTracker: AgentDeliveryTracker
     private let modelRouter: ModelRouter
-    /// Host-selected model used only when no definition provider is supplied.
-    public let defaultModel: AgentModel
-    /// Host-selected effort used only when no definition provider is supplied.
-    /// `nil` leaves the selected provider/model default unchanged.
-    public let defaultReasoningEffort: ReasoningEffort?
     /// Host-selected ceiling on tool-call rounds within a single turn.
     /// There is intentionally no runtime fallback: this is an application
     /// safety policy supplied at composition time.
@@ -145,6 +140,11 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     public let workspaceProvider: WorkspaceProvider
 
     public var definitionProvider: DefinitionProvider?
+
+    /// Host-owned model selection for each turn. A new configuration is
+    /// resolved before every turn, so application model changes take effect
+    /// without replacing the durable agent.
+    public let modelSelectionProvider: ModelSelectionProvider
 
     /// Pure transformation that assembles an agent's model request.
     public let assemblePrompt: PromptAssembler
@@ -172,7 +172,6 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     public let contextProvider: AgentContextProvider?
 
     public init(
-        defaultModel: AgentModel,
         maxToolRounds: Int,
         routerConfiguration: ModelRouterConfiguration,
         mcpServerConfiguration: MCPServerConfiguration? = nil,
@@ -181,6 +180,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         authorityProvider: AuthorityProvider? = nil,
         workspaceProvider: @escaping WorkspaceProvider,
         definitionProvider: DefinitionProvider? = nil,
+        modelSelectionProvider: @escaping ModelSelectionProvider,
         contextProvider: AgentContextProvider? = nil,
         contextCompactor: (any ContextCompactor)? = nil,
         compactionOperation: CompactionOperation? = nil,
@@ -189,7 +189,6 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         },
         promptInstructions: PromptAssemblyInstructions = PromptAssemblyInstructions(),
         assemblePrompt: @escaping PromptAssembler = assembleStandardPrompt,
-        defaultReasoningEffort: ReasoningEffort? = nil,
         modelReasoningPolicy: @escaping ModelReasoningPolicy = { _ in .providerDefault }
     ) throws(AgentRuntimeConfigurationError) {
         guard maxToolRounds > 0 else {
@@ -201,14 +200,13 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             modelEndpointProvider: modelEndpointProvider
         )
         self.deliveryTracker = AgentDeliveryTracker()
-        self.defaultModel = defaultModel
-        self.defaultReasoningEffort = defaultReasoningEffort
         self.maxToolRounds = maxToolRounds
         self.modelReasoningPolicy = modelReasoningPolicy
         self.turnToolsProvider = turnToolsProvider
         self.authorityProvider = authorityProvider
         self.workspaceProvider = workspaceProvider
         self.definitionProvider = definitionProvider
+        self.modelSelectionProvider = modelSelectionProvider
         self.contextProvider = contextProvider
         self.contextCompactor = contextCompactor
         self.compactionOperation = compactionOperation
@@ -289,31 +287,33 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     public func definition(for spawnConfig: AgentSpawnConfig) async throws -> AgentDefinition {
         try await definitionProvider?(spawnConfig)
-            ?? .defaultDefinition(
-                for: spawnConfig.agentID.role,
-                model: defaultModel,
-                reasoningEffort: defaultReasoningEffort
+            ?? .defaultDefinition(for: spawnConfig.agentID.role)
+    }
+
+    public func modelConfiguration(
+        for agentID: AgentID
+    ) async throws(AgentRuntimeError) -> ModelConfiguration {
+        do {
+            return try await modelSelectionProvider(
+                ModelSelectionRequest(
+                    agentID: agentID
+                )
             )
+        } catch {
+            throw .configurationError(
+                "Could not resolve model configuration: \(error)"
+            )
+        }
     }
 
     // MARK: Model endpoints
 
-    /// Returns the cached ``ModelEndpoint`` for the given configuration,
-    /// creating and caching it if necessary.
-    ///
-    /// The caller owns the streaming effect; this method only resolves and
-    /// caches the endpoint instance. `authority` is used only when a new
-    /// endpoint is created — a cached endpoint keeps the authority it was
-    /// built with. That is safe for per-turn lanes because the creation
-    /// authority scopes only endpoint infrastructure (the harness spawn):
-    /// the turn's lane authority is delivered per-stream through
-    /// ``SessionOwningEndpoint/stream(messages:delta:authority:tools:responseType:)``
-    /// and governs every model-facing effect, so the cache key deliberately
-    /// has no authority component (see the invariant in `Agent.reasoningLoop`).
+    /// Creates the endpoint for one execution turn. The endpoint is not
+    /// retained by the runtime; a session-owning provider receives its
+    /// journaled resume handle when appropriate.
     public func endpoint(
         for model: String,
-        agentID: String,
-        contextID: AgentContextID? = nil,
+        agentID: AgentID,
         workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
         resumeSession: ModelSessionResume? = nil,
@@ -323,50 +323,11 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         try await modelRouter.endpoint(
             for: model,
             agentID: agentID,
-            contextID: contextID,
             workspace: workspace,
             executionPolicy: executionPolicy,
             resumeSession: resumeSession,
             authority: authority,
             reasoningEffort: reasoningEffort
-        )
-    }
-
-    /// Evicts the cached endpoint for the given configuration, tearing down
-    /// its live harness session if it owns one. Agents call this when they
-    /// accept deactivation so a passivated agent leaves no subprocess behind.
-    public func evictEndpoint(
-        for model: String,
-        agentID: String,
-        contextID: AgentContextID? = nil,
-        workspace: AgentWorkspace? = nil,
-        executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
-        reasoningEffort: ReasoningEffort? = nil
-    ) async {
-        await modelRouter.evict(
-            for: model,
-            agentID: agentID,
-            contextID: contextID,
-            workspace: workspace,
-            executionPolicy: executionPolicy,
-            reasoningEffort: reasoningEffort
-        )
-    }
-
-    /// Registers a custom endpoint for testing or programmatic override.
-    public func register<E: ModelEndpoint>(
-        _ endpoint: E,
-        for model: String,
-        agentID: String,
-        contextID: AgentContextID? = nil,
-        workspace: AgentWorkspace? = nil
-    ) async throws(ModelRouterError) {
-        try await modelRouter.register(
-            endpoint,
-            for: model,
-            agentID: agentID,
-            contextID: contextID,
-            workspace: workspace
         )
     }
 

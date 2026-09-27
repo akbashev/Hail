@@ -181,7 +181,7 @@ struct ACPModelEndpoint: ModelEndpoint {
                 "responseType": .string("\(T.self)"),
             ]
         )
-        continuation.yield(.activity(.status(GeneratedContent("Generating..."))))
+        continuation.yield(.activity(.status(GeneratedContent("Generating"))))
 
         let (stream, responseTask) = try await session.executeTurnPrompt(
             bootstrap: bootstrap,

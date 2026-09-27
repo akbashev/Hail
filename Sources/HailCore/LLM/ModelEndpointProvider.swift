@@ -1,13 +1,49 @@
 import ScopedEffect
 
+/// The complete model configuration selected for one agent turn.
+public struct ModelConfiguration: Sendable, Hashable {
+    public let model: AgentModel
+    public let reasoningEffort: ReasoningEffort?
+    /// Host-owned configuration identity for stateful provider sessions.
+    /// Changing this value forces a cold provider session on the next turn.
+    public let sessionConfigurationIdentity: String?
+
+    public init(
+        model: AgentModel,
+        reasoningEffort: ReasoningEffort? = nil,
+        sessionConfigurationIdentity: String? = nil
+    ) {
+        self.model = model
+        self.reasoningEffort = reasoningEffort
+        self.sessionConfigurationIdentity = sessionConfigurationIdentity
+    }
+}
+
+/// The application context needed to select the model configuration for one
+/// turn. Selection is performed again for every turn.
+public struct ModelSelectionRequest: Sendable {
+    public let agentID: AgentID
+
+    public init(
+        agentID: AgentID
+    ) {
+        self.agentID = agentID
+    }
+}
+
+/// Host hook for selecting the complete model configuration used by the next
+/// turn. A missing or unavailable configuration is an error, not a reason to
+/// reuse an older model.
+public typealias ModelSelectionProvider =
+    @Sendable (ModelSelectionRequest) async throws -> ModelConfiguration
+
 /// Everything a host needs to construct an endpoint that Hail does not own.
 /// Returning `nil` delegates to Hail's built-in provider routing.
 public struct ModelEndpointRequest: Sendable {
     public let model: String
     /// The optional host-selected effort and its wire representation.
     public let reasoning: ReasoningEffortSelection?
-    public let agentID: String?
-    public let contextID: AgentContextID?
+    public let agentID: AgentID
     /// Resolved workspace context for host/process-backed endpoints. HTTP
     /// model endpoints can ignore it.
     public let workspace: AgentWorkspace?
@@ -17,8 +53,7 @@ public struct ModelEndpointRequest: Sendable {
 
     public init(
         model: String,
-        agentID: String?,
-        contextID: AgentContextID?,
+        agentID: AgentID,
         workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy,
         resumeSession: ModelSessionResume?,
@@ -28,7 +63,6 @@ public struct ModelEndpointRequest: Sendable {
         self.model = model
         self.reasoning = reasoning
         self.agentID = agentID
-        self.contextID = contextID
         self.workspace = workspace
         self.executionPolicy = executionPolicy
         self.resumeSession = resumeSession
@@ -38,4 +72,4 @@ public struct ModelEndpointRequest: Sendable {
 
 /// Host-owned extension point for model providers not built into Hail.
 public typealias ModelEndpointProvider =
-    @Sendable (ModelEndpointRequest) async -> (any ModelEndpoint)?
+    @Sendable (ModelEndpointRequest) async throws -> (any ModelEndpoint)?

@@ -1,8 +1,3 @@
-public enum AgentScope: Codable, Sendable {
-    case sharedRoot
-    case isolatedWorkspace
-}
-
 /// A workspace resolved by the host for one activated agent.
 ///
 /// This value is intentionally not `Codable`: filesystem paths are
@@ -16,53 +11,31 @@ public struct AgentWorkspace: Sendable, Hashable {
     }
 }
 
+/// The host's configuration for one agent identity, produced by the runtime's
+/// spawn-config provider at every activation. Callers never supply it: an
+/// agent is addressed by `AgentID` alone.
 public struct AgentSpawnConfig: Codable, Sendable {
     public let agentID: AgentID
-    public let scope: AgentScope
+    /// The durable resource namespace this agent's workspace-scoped effects
+    /// (currently file access) address. Defaults to a namespace private to
+    /// this agent's own id, so omitting it fails closed toward isolation
+    /// rather than toward sharing.
+    public let workspaceID: WorkspaceID
     public let agentDirectoryID: AgentDirectoryID
     public let resumesInterruptedTurns: Bool
     public let snapshotPolicy: AgentSnapshotPolicy
 
-    private enum CodingKeys: String, CodingKey {
-        case agentID
-        case scope
-        case agentDirectoryID
-        case resumesInterruptedTurns
-        case snapshotPolicy
-    }
-
     public init(
         agentID: AgentID,
-        scope: AgentScope = .sharedRoot,
+        workspaceID: WorkspaceID? = nil,
         agentDirectoryID: AgentDirectoryID = "agent-directory",
         resumesInterruptedTurns: Bool = true,
         snapshotPolicy: AgentSnapshotPolicy = .default
     ) {
         self.agentID = agentID
-        self.scope = scope
+        self.workspaceID = workspaceID ?? WorkspaceID(agentID.rawValue)
         self.agentDirectoryID = agentDirectoryID
         self.resumesInterruptedTurns = resumesInterruptedTurns
         self.snapshotPolicy = snapshotPolicy
-    }
-
-    /// Decoding remains compatible with spawn configurations written before
-    /// snapshot policy became part of the dependency.
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.agentID = try container.decode(AgentID.self, forKey: .agentID)
-        self.scope = try container.decode(AgentScope.self, forKey: .scope)
-        self.agentDirectoryID = try container.decode(
-            AgentDirectoryID.self,
-            forKey: .agentDirectoryID
-        )
-        self.resumesInterruptedTurns = try container.decode(
-            Bool.self,
-            forKey: .resumesInterruptedTurns
-        )
-        self.snapshotPolicy =
-            try container.decodeIfPresent(
-                AgentSnapshotPolicy.self,
-                forKey: .snapshotPolicy
-            ) ?? .default
     }
 }

@@ -27,6 +27,7 @@ Tools are model-facing workflows dispatched by `ToolRegistry` under the turn's a
 - ``Role``
 - ``AgentContextID``
 - ``AgentSpawnConfig``
+- ``WorkspaceID``
 - ``AgentDefinition``
 - ``AgentActivity``
 - ``AgentUsageSummary``

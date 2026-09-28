@@ -35,14 +35,18 @@ public distributed actor Agent: AsyncSequence {
     public typealias ActorSystem = ClusterSystem
     public typealias Element = AgentActivity
     public typealias State = AgentState
-    public typealias Dependency = AgentSpawnConfig
+    /// An agent is activated by identity alone. Its configuration is a host
+    /// policy derived from that identity (see
+    /// ``AgentRuntimePlugin/SpawnConfigProvider``), so every caller that
+    /// addresses the agent activates the same agent, whoever gets there first.
+    public typealias Dependency = AgentID
 
     // Event-sourced state. All mutations happen through `handleEvent`, which
     // delegates to `AgentState.apply(_:)`. Public as an
     // `EventSourced` protocol witness — do not mutate directly.
     public var state: AgentState
 
-    /// Snapshot policy selected by the spawn dependency and interpreted by the
+    /// Snapshot policy selected by the spawn configuration and interpreted by the
     /// embedding runtime at activation.
     /// Snapshots are a best-effort replay optimization; the journal remains
     /// the source of truth.
@@ -63,13 +67,12 @@ public distributed actor Agent: AsyncSequence {
     /// activation (the journal is the truth; nothing caches it). A revived
     /// agent picks up edits made while it was passivated.
     let definition: AgentDefinition
-    let scope: AgentScope
-    /// Resolved by the host workspace effect for this activation. It is not
-    /// part of the durable spawn dependency.
+    /// Resolved by the host workspace provider for this activation; never
+    /// persisted.
     let workspace: AgentWorkspace
     let agentDirectoryID: AgentDirectoryID
     let resumesInterruptedTurns: Bool
-    /// The spawn configuration this agent was created with. Kept so
+    /// The host's configuration for this agent's identity. Kept so
     /// ``shouldDeactivate()`` can restore its active-index entry when a turn
     /// starts mid-deactivation — registration otherwise happens only on
     /// activation.
@@ -108,37 +111,37 @@ public distributed actor Agent: AsyncSequence {
     /// survive even then.
     private static let activityBufferLimit = 128
 
-    public init(actorSystem: ClusterSystem, dependency: AgentSpawnConfig) async throws {
+    public init(actorSystem: ClusterSystem, dependency agentID: AgentID) async throws {
         self.actorSystem = actorSystem
-        self._agentID = dependency.agentID
-        self.state = AgentState(agentID: dependency.agentID)
-        self.snapshotting = await actorSystem.agentRuntime.snapshotting(for: dependency)
-        let workspace = try await actorSystem.agentRuntime.workspace(for: dependency)
+        self._agentID = agentID
+        self.state = AgentState(agentID: agentID)
+        let spawnConfig = try await actorSystem.agentRuntime.spawnConfig(for: agentID)
+        self.snapshotting = await actorSystem.agentRuntime.snapshotting(for: spawnConfig)
+        let workspace = try await actorSystem.agentRuntime.workspace(for: spawnConfig)
         // Configuration is supplied by the embedding host. Hail neither knows
         // nor assumes where definitions are persisted.
-        let definition = try await actorSystem.agentRuntime.definition(for: dependency)
+        let definition = try await actorSystem.agentRuntime.definition(for: spawnConfig)
         self.definition = definition
-        self.scope = dependency.scope
         self.workspace = workspace
-        self.agentDirectoryID = dependency.agentDirectoryID
-        self.resumesInterruptedTurns = dependency.resumesInterruptedTurns
-        self.spawnConfig = dependency
+        self.agentDirectoryID = spawnConfig.agentDirectoryID
+        self.resumesInterruptedTurns = spawnConfig.resumesInterruptedTurns
+        self.spawnConfig = spawnConfig
         self.authority = await actorSystem.agentRuntime.authority(
-            for: dependency,
+            for: spawnConfig,
             workspace: workspace
         )
 
         // The virtual actor and its event-sourced state share one canonical
         // identity. A separate persistence key could drift and revive the same
         // logical agent with different history.
-        try await actorSystem.journal.register(actor: self, with: dependency.agentID.rawValue)
+        try await actorSystem.journal.register(actor: self, with: agentID.rawValue)
 
         do {
             try await actorSystem.agentRuntime.register(
                 entry: AgentDirectoryEntry(
-                    agentID: dependency.agentID,
+                    agentID: agentID,
                     definition: definition,
-                    spawnConfig: dependency
+                    spawnConfig: spawnConfig
                 )
             )
         } catch {
@@ -148,7 +151,7 @@ public distributed actor Agent: AsyncSequence {
             actorSystem.log.warning(
                 "Active agent index unavailable during activation",
                 metadata: [
-                    "agentID": .string(dependency.agentID.rawValue),
+                    "agentID": .string(agentID.rawValue),
                     "error": .string(String(describing: error)),
                 ]
             )
@@ -173,7 +176,7 @@ public distributed actor Agent: AsyncSequence {
                     actorSystem.log.error(
                         "Interrupted turn replay failed",
                         metadata: [
-                            "agentID": .string(dependency.agentID.rawValue),
+                            "agentID": .string(agentID.rawValue),
                             "error": .string(String(describing: error)),
                         ]
                     )
@@ -764,9 +767,7 @@ public distributed actor Agent: AsyncSequence {
         await registry.register(tools: [
             AgentTool(
                 sourceAgentID: state.agentID,
-                system: actorSystem,
-                scope: scope,
-                agentDirectoryID: agentDirectoryID
+                system: actorSystem
             )
         ])
 
@@ -798,6 +799,22 @@ public distributed actor Agent: AsyncSequence {
         return .infrastructureFailure("\(operation): \(error)")
     }
 
+}
+
+extension ClusterSystem {
+    /// The agent with this identity, activating it if it is idle.
+    ///
+    /// Prefer this over `virtualActors.getActor`: that API is generic over
+    /// the dependency, so passing anything but an `AgentID` compiles and
+    /// fails only at activation. Here the identity is the only input, as it
+    /// must be — an agent's configuration is the host's policy over its id
+    /// (see ``AgentRuntimePlugin/SpawnConfigProvider``).
+    public func agent(_ agentID: AgentID) async throws -> Agent {
+        try await virtualActors.getActor(
+            identifiedBy: VirtualActorID(rawValue: agentID.rawValue),
+            dependency: agentID
+        )
+    }
 }
 
 extension Agent {

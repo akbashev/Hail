@@ -59,18 +59,7 @@ public struct ReportStatusTool {
         -> ToolOutput
     {
         _ = token
-        guard
-            let entry = try await system.agentRuntime.entry(forAgentID: sourceAgentID),
-            let spawnConfig = entry.spawnConfig
-        else {
-            throw ToolError.notConfigured(
-                "No spawn config registered for \(sourceAgentID.rawValue)"
-            )
-        }
-        let agent: Agent = try await system.virtualActors.getActor(
-            identifiedBy: VirtualActorID(rawValue: sourceAgentID.rawValue),
-            dependency: spawnConfig
-        )
+        let agent: Agent = try await system.agent(sourceAgentID)
         let timestamp = input.timestamp.flatMap { try? Date.ISO8601FormatStyle().parse($0) } ?? Date()
         try await agent.recordStatusActivity(input.message, at: timestamp)
         return .text("Status reported.")

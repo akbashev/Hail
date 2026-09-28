@@ -11,16 +11,65 @@ import Testing
 struct AgentDirectoryTests {
     private let agentID = AgentID(role: Role("coder"), contextID: .main)
 
-    @Test("spawn configuration stores scope, not a host filesystem path")
+    @Test("spawn configuration stores a workspace id, not a host filesystem path")
     func spawnConfigurationIsPathless() throws {
         let config = AgentSpawnConfig(
             agentID: agentID,
-            scope: .isolatedWorkspace
+            workspaceID: WorkspaceID("isolated-test-workspace")
         )
         let encoded = try JSONEncoder().encode(config)
         let json = String(decoding: encoded, as: UTF8.self)
         #expect(!json.contains("projectRootPath"))
         #expect(!json.contains("path"))
+    }
+
+    @Test("omitting workspaceID defaults to a workspace private to the agent's own id")
+    func workspaceIDDefaultsToPrivate() {
+        let config = AgentSpawnConfig(agentID: agentID)
+        #expect(config.workspaceID == WorkspaceID(agentID.rawValue))
+    }
+
+    @Test("two different agent ids never default to the same workspace")
+    func differentAgentsDefaultToDifferentWorkspaces() {
+        let other = AgentID(role: Role("reviewer"), contextID: .main)
+        let config = AgentSpawnConfig(agentID: agentID)
+        let otherConfig = AgentSpawnConfig(agentID: other)
+        #expect(config.workspaceID != otherConfig.workspaceID)
+    }
+
+    @Test("an agent's configuration comes from the host's policy over its identity")
+    func spawnConfigComesFromHostPolicy() async throws {
+        let runtime = try AgentRuntimePlugin(
+            maxToolRounds: 25,
+            routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
+            workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
+            spawnConfigProvider: { agentID in
+                AgentSpawnConfig(agentID: agentID, workspaceID: WorkspaceID("project-A"))
+            },
+            modelSelectionProvider: { _ in
+                ModelConfiguration(model: try AgentModel("test/model"))
+            }
+        )
+        let config = try await runtime.spawnConfig(for: agentID)
+        #expect(config.agentID == agentID)
+        #expect(config.workspaceID == WorkspaceID("project-A"))
+    }
+
+    @Test("a provider answering for a different agent is rejected")
+    func mismatchedSpawnConfigIsRejected() async throws {
+        let stranger = AgentID(role: Role("reviewer"), contextID: .main)
+        let runtime = try AgentRuntimePlugin(
+            maxToolRounds: 25,
+            routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
+            workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
+            spawnConfigProvider: { _ in AgentSpawnConfig(agentID: stranger) },
+            modelSelectionProvider: { _ in
+                ModelConfiguration(model: try AgentModel("test/model"))
+            }
+        )
+        await #expect(throws: AgentRuntimeError.self) {
+            try await runtime.spawnConfig(for: agentID)
+        }
     }
 
     @Test("snapshot policy is part of the spawn dependency")

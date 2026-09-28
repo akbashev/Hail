@@ -68,19 +68,13 @@ public struct AgentTool {
 
     private let sourceAgentID: AgentID
     private let system: ClusterSystem
-    private let scope: AgentScope
-    private let agentDirectoryID: AgentDirectoryID
 
     public init(
         sourceAgentID: AgentID,
-        system: ClusterSystem,
-        scope: AgentScope,
-        agentDirectoryID: AgentDirectoryID
+        system: ClusterSystem
     ) {
         self.sourceAgentID = sourceAgentID
         self.system = system
-        self.scope = scope
-        self.agentDirectoryID = agentDirectoryID
     }
 
     public func effect(for input: AgentToolInput) throws -> CoordinationEffect {
@@ -128,14 +122,7 @@ public struct AgentTool {
                     "An agent cannot send a message to itself. Continue the task in this turn."
                 )
             }
-            let other: Agent = try await system.virtualActors.getActor(
-                identifiedBy: VirtualActorID(rawValue: targetID.rawValue),
-                dependency: AgentSpawnConfig(
-                    agentID: targetID,
-                    scope: scope,
-                    agentDirectoryID: agentDirectoryID
-                )
-            )
+            let other: Agent = try await system.agent(targetID)
             // Tag the real sender and queue asynchronously. The runtime owns
             // the task so it remains observable until completion, while the
             // tool still returns without waiting for the recipient. This is

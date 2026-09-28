@@ -1,6 +1,12 @@
 import ScopedEffect
 import Subprocess
 
+#if os(macOS)
+    import Darwin
+#elseif os(Linux)
+    import Glibc
+#endif
+
 #if canImport(System)
     import System
 #else
@@ -639,35 +645,93 @@ extension CoordinationEffect {
 }
 
 public enum EffectPath {
-    public static func normalize(_ path: String) -> String {
+    /// Resolves `path` the way the operating system actually would: absolute,
+    /// walked one component at a time, following a symlink the instant it is
+    /// encountered, and computing `".."` against that real, post-symlink
+    /// position — not against the written string.
+    ///
+    /// Nothing here is lexical. Collapsing `".."` as text silently assumes
+    /// every traversed component is a real directory. That assumption is false the moment a
+    /// component is a symlink: `link/..` means "the parent of wherever
+    /// `link` points," which can be anywhere, not "cancel `link` back to
+    /// nothing." A path containment check built on the lexical collapse can
+    /// therefore approve a path whose real, symlink-aware resolution lands
+    /// somewhere else entirely — including outside an allowed root — because
+    /// the very information needed to catch that (that a symlink was
+    /// traversed before the `".."`) was already discarded before the check
+    /// ran. Resolving component-by-component, the same way `realpath` and
+    /// the kernel itself do, cannot lose that information.
+    ///
+    /// A component that does not exist yet (for example a file about to be
+    /// created by a `write`) is appended literally rather than resolved —
+    /// nothing not yet on disk can be a symlink — so this also matches a
+    /// not-yet-existing target correctly.
+    public static func resolveReal(_ path: String) -> String {
         let isAbsolute = path.hasPrefix("/")
-        let components = path.replacingOccurrences(of: "\\", with: "/").components(separatedBy: "/")
-        var stack: [String] = []
-        for component in components {
+        // Split on "/" only: on macOS and Linux a backslash is an ordinary
+        // filename character, and treating it as a separator would check a
+        // different path than the one the file system then opens.
+        let rawComponents = path.split(separator: "/")
+        var current = isAbsolute ? "/" : (realpathIfExists(".") ?? ".")
+        for component in rawComponents {
             switch component {
-            case "", ".": break
+            case ".":
+                continue
             case "..":
-                if !stack.isEmpty, stack.last != ".." {
-                    stack.removeLast()
-                } else if !isAbsolute {
-                    stack.append(component)
-                }
-            default: stack.append(component)
+                current = parent(of: current)
+            default:
+                let candidate = current.hasSuffix("/") ? current + component : current + "/" + component
+                current = realpathIfExists(candidate) ?? candidate
             }
         }
-        let joined = stack.joined(separator: "/")
-        return isAbsolute ? "/" + joined : joined
+        return current
+    }
+
+    /// True if `path`'s real, symlink-resolved location (see
+    /// ``resolveReal(_:)``) is `root` or falls beneath it. This is the check
+    /// every path-scoped authority policy must use: a syntactic prefix check
+    /// on the raw or lexically normalized string is not sufficient, for the
+    /// reason `resolveReal(_:)` documents.
+    public static func isContained(_ path: String, in root: String) -> Bool {
+        let resolvedRoot = resolveReal(root)
+        let resolvedPath = resolveReal(path)
+        return resolvedPath == resolvedRoot || resolvedPath.hasPrefix(resolvedRoot + "/")
+    }
+
+    private static func parent(of path: String) -> String {
+        guard path != "/" else { return "/" }
+        let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
+        guard let lastSlash = trimmed.lastIndex(of: "/") else { return "/" }
+        let result = String(trimmed[trimmed.startIndex..<lastSlash])
+        return result.isEmpty ? "/" : result
+    }
+
+    private static func realpathIfExists(_ path: String) -> String? {
+        #if os(macOS)
+            return path.withCString { pointer in
+                guard let resolved = Darwin.realpath(pointer, nil) else { return nil }
+                defer { Darwin.free(resolved) }
+                return String(cString: resolved)
+            }
+        #elseif os(Linux)
+            return path.withCString { pointer in
+                guard let resolved = Glibc.realpath(pointer, nil) else { return nil }
+                defer { Glibc.free(resolved) }
+                return String(cString: resolved)
+            }
+        #else
+            return nil
+        #endif
     }
 }
 
 extension FileEffect {
     public static func pathPolicy(scopedTo root: String) -> @Sendable (FileEffect) -> EffectDecision {
-        let normalizedRoot = EffectPath.normalize(root)
         return { effect in
-            let path = EffectPath.normalize(effect.path)
-            return path == normalizedRoot || path.hasPrefix(normalizedRoot + "/")
-                ? .granted
-                : .denied("path '\(effect.path)' is outside the allowed root '\(normalizedRoot)'")
+            guard EffectPath.isContained(effect.path, in: root) else {
+                return .denied("path '\(effect.path)' is outside the allowed root '\(root)'")
+            }
+            return .granted
         }
     }
 
@@ -706,7 +770,6 @@ extension TerminalEffect {
         -> @Sendable (TerminalEffect) -> EffectDecision
     {
         let prefixes = allowed.map { $0.split(separator: " ").map(String.init) }
-        let normalizedRoot = EffectPath.normalize(root)
         return { effect in
             guard
                 !effect.tokens.contains(where: { token in
@@ -719,9 +782,8 @@ extension TerminalEffect {
                 return commandDenial(effect.tokens, allowed)
             }
             for path in effect.tokens.dropFirst().filter({ $0.hasPrefix("/") }) {
-                let normalized = EffectPath.normalize(path)
-                guard normalized == normalizedRoot || normalized.hasPrefix(normalizedRoot + "/") else {
-                    return .denied("path '\(path)' is outside the allowed root '\(normalizedRoot)'")
+                guard EffectPath.isContained(path, in: root) else {
+                    return .denied("path '\(path)' is outside the allowed root '\(root)'")
                 }
             }
             return .granted

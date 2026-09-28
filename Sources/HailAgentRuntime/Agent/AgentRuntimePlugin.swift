@@ -95,6 +95,15 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     public typealias AuthorityProvider =
         @Sendable (_ spawnConfig: AgentSpawnConfig, _ workspace: AgentWorkspace) async -> any Authority
 
+    /// Derives an agent's configuration from its identity. An agent is
+    /// activated by `AgentID` alone — by its owner, another agent messaging
+    /// it, or a dashboard reading it — so its configuration must be a host
+    /// policy over that identity, never data an activating caller supplies:
+    /// otherwise whichever caller happens to activate it first decides how it
+    /// is built.
+    public typealias SpawnConfigProvider =
+        @Sendable (_ agentID: AgentID) async throws(AgentRuntimeError) -> AgentSpawnConfig
+
     /// Resolves the host's physical workspace for an agent's logical scope.
     /// The result is activation-time state and is never persisted with the
     /// distributed spawn config.
@@ -139,6 +148,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     public let workspaceProvider: WorkspaceProvider
 
+    public let spawnConfigProvider: SpawnConfigProvider
+
     public var definitionProvider: DefinitionProvider?
 
     /// Host-owned model selection for each turn. A new configuration is
@@ -179,6 +190,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         turnToolsProvider: TurnToolsProvider? = nil,
         authorityProvider: AuthorityProvider? = nil,
         workspaceProvider: @escaping WorkspaceProvider,
+        spawnConfigProvider: @escaping SpawnConfigProvider = { AgentSpawnConfig(agentID: $0) },
         definitionProvider: DefinitionProvider? = nil,
         modelSelectionProvider: @escaping ModelSelectionProvider,
         contextProvider: AgentContextProvider? = nil,
@@ -205,6 +217,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         self.turnToolsProvider = turnToolsProvider
         self.authorityProvider = authorityProvider
         self.workspaceProvider = workspaceProvider
+        self.spawnConfigProvider = spawnConfigProvider
         self.definitionProvider = definitionProvider
         self.modelSelectionProvider = modelSelectionProvider
         self.contextProvider = contextProvider
@@ -263,6 +276,17 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         case .keepLast(let count):
             return .keepLast(max(1, count))
         }
+    }
+
+    /// The host's configuration for one agent identity.
+    public func spawnConfig(for agentID: AgentID) async throws(AgentRuntimeError) -> AgentSpawnConfig {
+        let config = try await spawnConfigProvider(agentID)
+        guard config.agentID == agentID else {
+            throw .configurationError(
+                "Spawn config provider returned '\(config.agentID)' for '\(agentID)'"
+            )
+        }
+        return config
     }
 
     /// Resolves the host workspace for one activation.

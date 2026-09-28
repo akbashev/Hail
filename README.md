@@ -38,13 +38,11 @@ let scoutDefinition = AgentDefinition(
     limits: .init()
 )
 
-// The host's definitionProvider returns scoutDefinition when the agent activates.
-let scout: Agent = try await system.virtualActors.getActor(
-    identifiedBy: VirtualActorID(rawValue: scoutID.rawValue),
-    dependency: AgentSpawnConfig(
-        agentID: scoutID
-    )
-)
+// The host's definitionProvider returns scoutDefinition when the agent
+// activates. The identity is all a caller passes: how the agent is built
+// (workspace, recovery, snapshots) is the host's spawnConfigProvider policy
+// over scoutID, so every caller reaches the same agent.
+let scout = try await system.agent(scoutID)
 ```
 
 ### Talk to it
@@ -179,22 +177,27 @@ The host supplies definitions, tools, and policy as values. This keeps product d
 
 ```swift
 let runtime = try AgentRuntimePlugin(
-    defaultModel: try AgentModel("your-provider/your-model"),
     maxToolRounds: 25,
     routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
-    workspaceProvider: { _ in
-        AgentWorkspace(rootPath: "/path/to/project")
-    },
-    definitionProvider: { spawn in
-        await definitions.lookup(spawn.agentID.role)
-    },
     turnToolsProvider: { context, system in
         makeHostTools(for: context, in: system)
     },
     authorityProvider: { _, workspace in
-        CompositeAuthority.workspaceDefault(
-            root: workspace.rootPath
-        )
+        CompositeAuthority.workspaceDefault(root: workspace.rootPath)
+    },
+    workspaceProvider: { spawn in
+        // Map the logical id to a directory you control; never splice the
+        // raw id into a path.
+        AgentWorkspace(rootPath: workspaces.directory(for: spawn.workspaceID))
+    },
+    spawnConfigProvider: { agentID in
+        AgentSpawnConfig(agentID: agentID)
+    },
+    definitionProvider: { spawn in
+        await definitions.lookup(spawn.agentID.role)
+    },
+    modelSelectionProvider: { _ in
+        ModelConfiguration(model: try AgentModel("your-provider/your-model"))
     }
 )
 ```

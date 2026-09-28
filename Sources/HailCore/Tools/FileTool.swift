@@ -63,14 +63,21 @@ public struct FileTool {
     }
 
     /// Pure: resolves the model-supplied path against the project root into
-    /// the effect configuration. Whether the resolved path is allowed is the
+    /// the effect configuration. A model-supplied leading slash is treated as
+    /// workspace-relative (like a chroot), never as a host-absolute path — the
+    /// model has no way to name anything outside `projectRoot` by
+    /// construction. Whether the resolved path is still allowed is the
     /// authority's decision (see `FileEffect.pathPolicy(scopedTo:)`), not the
     /// tool's.
+    ///
+    /// Deliberately not lexically collapsed here (see `EffectPath.resolveReal`
+    /// for why): the authority needs the real, uncollapsed structure to
+    /// detect a symlink-then-".." escape, and `runOutput` executes this exact
+    /// same string, so the operating system resolves it identically to how
+    /// the authority checked it.
     public func effect(for input: FileToolInput) throws -> FileEffect {
-        let resolved =
-            input.path.hasPrefix("/")
-            ? EffectPath.normalize(input.path)
-            : EffectPath.normalize(projectRoot.path + "/" + input.path)
+        let relative = input.path.hasPrefix("/") ? String(input.path.dropFirst()) : input.path
+        let resolved = projectRoot.path + "/" + relative
         return FileEffect(path: resolved, action: input.action.effectAction)
     }
 

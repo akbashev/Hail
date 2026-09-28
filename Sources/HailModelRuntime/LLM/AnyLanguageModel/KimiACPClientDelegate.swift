@@ -79,19 +79,21 @@ final class KimiACPClientDelegate: ClientDelegate, Sendable {
         }
     }
 
-    /// Resolves the agent-supplied path to an absolute one. Normalization and
-    /// the under-the-working-directory check live in the file policy
-    /// (`FileEffect.pathPolicy(scopedTo:)`), not here.
+    /// Resolves the agent-supplied path to an absolute one. Deliberately not
+    /// lexically collapsed: the containment check in the file policy
+    /// (`FileEffect.pathPolicy(scopedTo:)`) needs the real, uncollapsed
+    /// structure to catch a symlink-then-".." escape (see
+    /// `EffectPath.resolveReal`), and the file system delegate below executes
+    /// this exact same string, so it resolves identically to how the policy
+    /// checked it.
     private func resolvePath(_ path: String) -> String {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("/") {
-            return EffectPath.normalize(trimmed)
+            return trimmed
         }
-        return EffectPath.normalize(
-            URL(fileURLWithPath: workingDirectory)
-                .appendingPathComponent(trimmed)
-                .path
-        )
+        return URL(fileURLWithPath: workingDirectory)
+            .appendingPathComponent(trimmed)
+            .path
     }
 
     func handleTerminalCreate(

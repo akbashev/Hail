@@ -23,10 +23,14 @@ struct AuthorizedAnyLanguageModelTool: AnyLanguageModel.Tool {
     var description: String { tool.description }
     var parameters: GenerationSchema { tool.schema.parameters }
 
+    /// A failed call answers with the error for the model to read, as the tool
+    /// registry does; throwing would end the whole model request.
     func call(arguments: GeneratedContent) async throws -> GeneratedContent {
-        try await tool.runOutput(
-            generatedContent: arguments,
-            authority: authority
-        ).modelContent()
+        do {
+            return try await tool.outcome(generatedContent: arguments, authority: authority)
+                .output.modelContent()
+        } catch {
+            throw CancellationError()
+        }
     }
 }

@@ -81,57 +81,55 @@ public actor ToolRegistry: Sendable {
                 continue
             }
 
-            do {
-                let output = try await tool.runOutput(
-                    generatedContent: call.arguments,
-                    authority: authority
-                )
-                let result = ToolResult(
-                    toolCallID: call.id,
-                    name: call.name,
-                    output: output,
-                    failureKind: nil
-                )
-                executions.append(ToolExecution(result: result))
-            } catch let denial as EffectDenied {
-                let result = ToolResult(
-                    toolCallID: call.id,
-                    name: call.name,
-                    output: .text("Error: \(denial)"),
-                    failureKind: .rejected
-                )
-                executions.append(ToolExecution(result: result))
-            } catch let error as ToolError {
-                let result = ToolResult(
-                    toolCallID: call.id,
-                    name: call.name,
-                    output: .text(Self.toolErrorMessage(error, toolName: call.name)),
-                    failureKind: Self.failureKind(for: error)
-                )
-                executions.append(ToolExecution(result: result))
-            } catch let error as DecodingError {
-                let result = ToolResult(
-                    toolCallID: call.id,
-                    name: call.name,
-                    output: .text(
-                        "Error: tool \(call.name) received invalid arguments: \(Self.decodingMessage(error))"),
-                    failureKind: .invalidArguments
-                )
-                executions.append(ToolExecution(result: result))
-            } catch is CancellationError {
-                throw AgentRuntimeError.cancelled
-            } catch {
-                let result = ToolResult(
-                    toolCallID: call.id,
-                    name: call.name,
-                    output: .text("Error: \(error)"),
-                    failureKind: .failed
-                )
-                executions.append(ToolExecution(result: result))
-            }
+            let outcome = try await tool.outcome(generatedContent: call.arguments, authority: authority)
+            let result = ToolResult(
+                toolCallID: call.id,
+                name: call.name,
+                output: outcome.output,
+                failureKind: outcome.failureKind
+            )
+            executions.append(ToolExecution(result: result))
         }
 
         return executions
+    }
+}
+
+/// What one tool call gives the model: the tool's output, or the error it reads
+/// when the call failed, so the model can recover instead of the turn ending.
+public struct ToolOutcome: Sendable {
+    public let output: ToolOutput
+    /// Nil when the tool succeeded.
+    public let failureKind: ToolFailureKind?
+}
+
+extension AnyTool {
+    /// Runs the tool, turning its failures into an error the model reads.
+    /// Only cancellation escapes.
+    public func outcome(
+        generatedContent arguments: GeneratedContent,
+        authority: any Authority
+    ) async throws(AgentRuntimeError) -> ToolOutcome {
+        do {
+            let output = try await runOutput(generatedContent: arguments, authority: authority)
+            return ToolOutcome(output: output, failureKind: nil)
+        } catch let denial as EffectDenied {
+            return ToolOutcome(output: .text("Error: \(denial)"), failureKind: .rejected)
+        } catch let error as ToolError {
+            return ToolOutcome(
+                output: .text(Self.toolErrorMessage(error, toolName: name)),
+                failureKind: Self.failureKind(for: error)
+            )
+        } catch let error as DecodingError {
+            return ToolOutcome(
+                output: .text("Error: tool \(name) received invalid arguments: \(Self.decodingMessage(error))"),
+                failureKind: .invalidArguments
+            )
+        } catch is CancellationError {
+            throw AgentRuntimeError.cancelled
+        } catch {
+            return ToolOutcome(output: .text("Error: \(error)"), failureKind: .failed)
+        }
     }
 
     private static func toolErrorMessage(_ error: ToolError, toolName: String) -> String {

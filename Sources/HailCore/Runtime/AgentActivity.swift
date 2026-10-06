@@ -39,7 +39,10 @@ public enum AgentActivity: Codable, Sendable, Equatable {
         /// Model reasoning output (distinct from reply text).
         case reasoning(GeneratedContent)
         case narration(GeneratedContent)
-        case tool(name: String)
+        /// A tool the model called, with its arguments.
+        case toolCalled(ToolCall)
+        /// A tool call's result, or why it failed.
+        case toolFinished(ToolResult)
         /// Token usage reported by the model provider for the current request.
         case usage(ModelUsage)
         /// Current context occupancy reported by a session-owning endpoint.

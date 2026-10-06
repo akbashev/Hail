@@ -219,6 +219,7 @@ public struct AgentState: Codable, Sendable {
                     id: result.toolCallID,
                     name: result.name,
                     output: result.output,
+                    failure: result.failureKind,
                     timestamp: replayTimestamp(for: at)
                 )
             )

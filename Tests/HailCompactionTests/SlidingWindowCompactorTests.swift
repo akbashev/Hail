@@ -64,7 +64,7 @@ struct SlidingWindowCompactorTests {
             segments = value.segments
         case .response(let value):
             segments = value.segments
-        case .toolCalls, .toolOutput:
+        case .toolCalls, .toolOutput, .reasoning:
             return ""
         }
 
@@ -145,7 +145,7 @@ struct SlidingWindowCompactorTests {
         // The preferred tail is kept when it fits. Compaction archives the
         // complete older prefix, rather than stopping after an arbitrary
         // minimum amount of progress.
-        #expect(result.archivedCount == 3)
+        #expect(result.archivedCount == 4)
     }
 
     @Test("an oversized archived message still uses one summarization request")
@@ -241,7 +241,7 @@ struct SlidingWindowCompactorTests {
         // is still too large for the retained request budget. The fallback
         // therefore archives that complete interaction as one unit and keeps
         // only the final semantic message.
-        #expect(result.archivedCount == 3)
+        #expect(result.archivedCount == 5)
     }
 
     @Test("the current assistant tool-round representation stays paired with its result")
@@ -281,7 +281,7 @@ struct SlidingWindowCompactorTests {
             ) { _ in "rolled" }
         )
 
-        #expect(result.archivedCount == 3)
+        #expect(result.archivedCount == 5)
     }
 
     @Test("the cut keeps every result of a parallel tool call with its call")

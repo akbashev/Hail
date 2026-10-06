@@ -29,7 +29,7 @@ struct PromptAssemblyPersonaTests {
         case .instructions(let value): segments = value.segments
         case .prompt(let value): segments = value.segments
         case .response(let value): segments = value.segments
-        case .toolCalls, .toolOutput: return ""
+        case .toolCalls, .toolOutput, .reasoning: return ""
         }
         return segments.map { segment in
             switch segment {

@@ -126,7 +126,7 @@ public struct TokenEstimator: Sendable {
             return narration
                 + reasoning
                 + round.calls.reduce(0) { $0 + $1.name.count + $1.arguments.jsonString.count }
-        case .toolResult(_, let name, let output, _):
+        case .toolResult(_, let name, let output, _, _):
             return name.count + characters(of: output.transcriptSegments)
         case .failure(let error, _):
             return String(describing: error).count

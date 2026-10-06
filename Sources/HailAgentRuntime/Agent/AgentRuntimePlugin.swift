@@ -87,7 +87,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         @Sendable (
             _ context: AgentTurnContext,
             _ actorSystem: ClusterSystem
-        ) async throws -> [any Tool]
+        ) async throws -> TurnTools
 
     /// Derives the effect ``Authority`` for one agent from its durable spawn
     /// intent and activation-resolved workspace. The authority — a value of
@@ -417,8 +417,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     public func turnTools(
         for context: AgentTurnContext,
         actorSystem: ClusterSystem
-    ) async throws -> [any Tool] {
-        try await turnToolsProvider?(context, actorSystem) ?? []
+    ) async throws -> TurnTools {
+        try await turnToolsProvider?(context, actorSystem) ?? TurnTools()
     }
 
     // MARK: Lifecycle hooks

@@ -20,7 +20,7 @@ let package = Package(
         .package(url: "https://github.com/akbashev/cluster-event-sourcing.git", branch: "main"),
         .package(
             url: "https://github.com/huggingface/AnyLanguageModel.git",
-            from: "0.14.2",
+            from: "0.16.0",
             traits: ["AsyncHTTPClient", "Llama"]
         ),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),

@@ -210,7 +210,7 @@ func modelEntries(from msg: ChatMessage, context: PromptContext) -> [Transcript.
             entries.append(.toolCalls(.init(round.calls.map(transcriptToolCall))))
         }
         return entries
-    case .toolResult(let id, let name, let output, _):
+    case .toolResult(let id, let name, let output, _, _):
         return [.toolOutput(.init(id: id, toolName: name, segments: output.transcriptSegments))]
     case .failure:
         return []

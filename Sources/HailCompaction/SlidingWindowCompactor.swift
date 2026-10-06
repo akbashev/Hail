@@ -272,7 +272,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
                 groups.append((index, index))
                 for call in round.calls { pending[call.id, default: []].append(group) }
 
-            case .toolResult(let id, _, _, _):
+            case .toolResult(let id, _, _, _, _):
                 if var occurrences = pending[id], !occurrences.isEmpty {
                     let group = occurrences.removeFirst()
                     pending[id] = occurrences

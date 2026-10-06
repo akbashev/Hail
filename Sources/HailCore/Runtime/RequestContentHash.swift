@@ -65,6 +65,10 @@ public enum RequestContentHash {
         case .toolOutput(var value):
             value.segments = value.segments.map(withoutLocalID)
             return .toolOutput(value)
+        case .reasoning(var value):
+            value.id = ""
+            value.segments = value.segments.map(withoutLocalID)
+            return .reasoning(value)
         }
     }
 

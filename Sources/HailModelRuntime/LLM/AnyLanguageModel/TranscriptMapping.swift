@@ -24,7 +24,7 @@ enum TranscriptMapping {
             switch entry {
             case .instructions(let instructions):
                 systemSegments.append(contentsOf: instructions.segments)
-            case .prompt, .response, .toolCalls, .toolOutput:
+            case .prompt, .response, .toolCalls, .toolOutput, .reasoning:
                 flushSystemSegments(into: &transcriptEntries, segments: &systemSegments)
                 transcriptEntries.append(entry)
             }

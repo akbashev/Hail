@@ -120,6 +120,8 @@ public struct TokenCounter: Sendable {
                 "content": render(output.segments),
                 "tool_call_id": output.id,
             ]
+        case .reasoning(let reasoning):
+            return ["role": "assistant", "content": render(reasoning.segments)]
         }
     }
 

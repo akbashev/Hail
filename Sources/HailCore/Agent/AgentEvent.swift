@@ -76,7 +76,8 @@ public enum ChatMessage: Codable, Sendable, Equatable {
     case response(sender: String, content: GeneratedContent, timestamp: Date)
     case toolCall(calls: [ToolCall], timestamp: Date)
     case assistantToolCall(round: ModelToolRound, timestamp: Date)
-    case toolResult(id: String, name: String, output: ToolOutput, timestamp: Date)
+    /// A tool call's result; `failure` says why it failed, when it did.
+    case toolResult(id: String, name: String, output: ToolOutput, failure: ToolFailureKind? = nil, timestamp: Date)
     /// A turn that failed (model error, rate limit, ...). Journaled so the
     /// failure stays visible in the transcript after a reload; prompt
     /// assembly skips it — the model never sees its own turn failures.
@@ -96,7 +97,7 @@ public enum ChatMessage: Codable, Sendable, Equatable {
         switch self {
         case .text(_, _, let timestamp), .response(_, _, let timestamp), .toolCall(_, let timestamp),
             .assistantToolCall(_, let timestamp),
-            .toolResult(_, _, _, let timestamp), .failure(_, let timestamp),
+            .toolResult(_, _, _, _, let timestamp), .failure(_, let timestamp),
             .decisionRequest(_, _, _, let timestamp), .decisionResolved(_, _, _, _, let timestamp):
             return timestamp
         }

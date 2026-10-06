@@ -90,7 +90,7 @@ enum SummaryPrompt {
             let rendered = round.calls.map { "\($0.name)(\($0.arguments.jsonString))" }.joined(separator: ", ")
             let reasoning = round.reasoning.isEmpty ? "" : " reasoning: \(render(round.reasoning))"
             return "assistant: \(content)\(reasoning) called tools: \(rendered)"
-        case .toolResult(_, let name, let output, _):
+        case .toolResult(_, let name, let output, _, _):
             let text = render(output.transcriptSegments)
             let bounded =
                 text.count > Self.maximumToolResultCharacters

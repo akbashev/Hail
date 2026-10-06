@@ -1124,6 +1124,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         registry: ToolRegistry,
         endpoint: ModelEndpoint,
         completedToolRounds: Int = 0,
+        lastToolRound: ToolRoundOutcome? = nil,
         contextRecoveryAttempts: Int = 0,
         toolFailureTracker: ToolFailureTracker = .init(),
         through connection: AgentConnection<Output>
@@ -1138,6 +1139,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 schemas: schemas,
                 modelTools: modelTools,
                 endpoint: endpoint,
+                lastToolRound: lastToolRound,
                 through: connection
             )
         } catch AgentRuntimeError.contextLengthExceeded {
@@ -1162,6 +1164,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 registry: registry,
                 endpoint: endpoint,
                 completedToolRounds: completedToolRounds,
+                lastToolRound: lastToolRound,
                 contextRecoveryAttempts: contextRecoveryAttempts + 1,
                 toolFailureTracker: toolFailureTracker,
                 through: connection
@@ -1201,16 +1204,19 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                         "The model repeated the same failed tool call twice. \(failure?.output.textRepresentation ?? "Tool execution failed.")"
                 )
             }
+            // A tool round can change the tools, such as an object the model just made.
+            await registry.refresh()
             return try await runTurn(
                 input: next.input,
                 delta: delta,
                 turnContextEntries: turnContextEntries,
-                schemas: schemas,
-                modelTools: modelTools,
+                schemas: await registry.schemas(),
+                modelTools: await registry.allTools(),
                 turnSnapshot: turnSnapshot,
                 registry: registry,
                 endpoint: endpoint,
                 completedToolRounds: completedToolRounds + 1,
+                lastToolRound: next.results.contains(where: \.isError) ? .failed : .succeeded,
                 contextRecoveryAttempts: contextRecoveryAttempts,
                 toolFailureTracker: failureTracking.tracker,
                 through: connection
@@ -1260,6 +1266,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         schemas: [ToolDefinition],
         modelTools: [AnyTool],
         endpoint: ModelEndpoint,
+        lastToolRound: ToolRoundOutcome?,
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) -> ModelRoundOutcome<Output>
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
@@ -1273,7 +1280,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                     model: endpoint.model,
                     purpose: .generation,
                     hasTools: !modelTools.isEmpty,
-                    completedToolRounds: input.reasoningRounds.count
+                    completedToolRounds: input.reasoningRounds.count,
+                    lastToolRound: lastToolRound
                 )
             )
         )
@@ -1322,7 +1330,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             case .toolsRequested(let round):
                 accumulator = accumulator.applying(event)
                 for call in round.calls {
-                    await recordActivity(.turn(.progress(.tool(name: call.name)), at: Date()))
+                    await recordActivity(.turn(.progress(.toolCalled(call)), at: Date()))
                 }
             case .generated:
                 accumulator = accumulator.applying(event)
@@ -1394,6 +1402,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 output: result.output
             )
             try await emit(.toolResult(result, at: Date()))
+            await recordActivity(.turn(.progress(.toolFinished(result)), at: Date()))
             await broadcast(
                 .toolCompleted(result: result, at: Date()),
                 to: connection

@@ -145,6 +145,14 @@ public enum ModelReasoningOverride: Sendable, Equatable {
     case disabled
 }
 
+/// How the previous tool round of a turn went, for a reasoning policy that thinks again
+/// after a failure.
+public enum ToolRoundOutcome: Sendable, Equatable {
+    case succeeded
+    /// At least one of its tool calls failed.
+    case failed
+}
+
 /// Context supplied to a host's reasoning policy before Hail creates one
 /// model request. This deliberately contains turn structure, not prompt text:
 /// hosts can make an explicit policy decision without making Hail classify
@@ -156,17 +164,21 @@ public struct ModelReasoningContext: Sendable, Equatable {
     /// Number of completed assistant/tool rounds already present in this
     /// request. Zero identifies the initial generation round of a turn.
     public let completedToolRounds: Int
+    /// How the round before this one went; `nil` on a turn's first round.
+    public let lastToolRound: ToolRoundOutcome?
 
     public init(
         model: String,
         purpose: ModelRequestPurpose,
         hasTools: Bool,
-        completedToolRounds: Int
+        completedToolRounds: Int,
+        lastToolRound: ToolRoundOutcome? = nil
     ) {
         self.model = model
         self.purpose = purpose
         self.hasTools = hasTools
         self.completedToolRounds = completedToolRounds
+        self.lastToolRound = lastToolRound
     }
 }
 

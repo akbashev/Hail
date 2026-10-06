@@ -76,6 +76,60 @@ struct AnyLanguageModelEndpointTests {
         )
     }
 
+    @Test("text before tool calls is one narration segment, not one per delta")
+    func narrationBeforeToolCallsIsOneSegment() async throws {
+        let endpoint = AnyLanguageModelEndpoint(
+            languageModel: ToolCallingLanguageModel(narration: ["Let", "Let me", "Let me check"]),
+            modelIdentifier: "test",
+            temperature: 0
+        )
+        let entries: [Transcript.Entry] = [
+            .prompt(.init(segments: [.text(.init(content: "use the tool"))]))
+        ]
+        var requested: ModelToolRound?
+        for await event in endpoint.stream(
+            request: ModelRequest(input: "use the tool", entries: entries),
+            tools: [AnyTool(EffectTool())],
+            authority: FullAuthority(),
+            generating: String.self,
+            purpose: .generation
+        ) {
+            if case .toolsRequested(let round) = event { requested = round }
+        }
+
+        let segments = try #require(requested?.narration?.segments)
+        #expect(segments.count == 1)
+        guard case .text(let text)? = segments.first else {
+            Issue.record("The narration isn't text")
+            return
+        }
+        #expect(text.content == "Let me check")
+    }
+
+    @Test("a request's reasoning override reaches the options through the endpoint's switch")
+    func reasoningOverrideReachesOptions() async {
+        let recorded = RecordedOptions()
+        let endpoint = AnyLanguageModelEndpoint(
+            languageModel: OptionsRecordingLanguageModel(recorded: recorded),
+            modelIdentifier: "test",
+            temperature: 0.5,
+            reasoningSwitch: .init { thinking, options in
+                options.temperature = thinking == .enabled ? 1 : 0
+            }
+        )
+        let entries: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: "hello"))]))]
+        for reasoning in [ModelReasoningOverride.enabled, .disabled, .providerDefault] {
+            for await _ in endpoint.stream(
+                request: ModelRequest(input: "hello", entries: entries, reasoning: reasoning),
+                tools: [],
+                authority: FullAuthority(),
+                generating: String.self,
+                purpose: .generation
+            ) {}
+        }
+        #expect(await recorded.temperatures == [1, 0, 0.5])
+    }
+
     @Test("streamed tool calls return to Hail for execution")
     func streamedToolCallsReturnToHail() async throws {
         let endpoint = AnyLanguageModelEndpoint(
@@ -148,6 +202,9 @@ private struct SnapshotLanguageModel: LanguageModel {
 }
 
 private struct ToolCallingLanguageModel: LanguageModel {
+    /// Text streamed before the tool call, as cumulative snapshots.
+    var narration: [String] = []
+
     func respond<Content>(
         within session: LanguageModelSession,
         to prompt: Prompt,
@@ -171,6 +228,15 @@ private struct ToolCallingLanguageModel: LanguageModel {
                 guard type == String.self else {
                     fatalError("Unsupported test output")
                 }
+                for text in narration {
+                    continuation.yield(
+                        .init(
+                            content: (text as! Content).asPartiallyGenerated(),
+                            rawContent: GeneratedContent(text),
+                            transcriptEntries: []
+                        )
+                    )
+                }
                 let call = Transcript.ToolCall(
                     id: "call-1",
                     toolName: "effect_test",
@@ -186,6 +252,48 @@ private struct ToolCallingLanguageModel: LanguageModel {
                         transcriptEntries: [.toolCalls(.init([call]))]
                     )
                 )
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+        return LanguageModelSession.ResponseStream(stream: stream)
+    }
+}
+
+private actor RecordedOptions {
+    private(set) var temperatures: [Double?] = []
+    func record(_ options: GenerationOptions) { temperatures.append(options.temperature) }
+}
+
+/// Answers "ok", recording the options of each request.
+private struct OptionsRecordingLanguageModel: LanguageModel {
+    let recorded: RecordedOptions
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        fatalError("The streaming test should not call respond")
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        let recorded = recorded
+        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
+            continuation in
+            let task = Task {
+                await recorded.record(options)
+                let content = "ok" as! Content
+                continuation.yield(
+                    .init(content: content.asPartiallyGenerated(), rawContent: GeneratedContent("ok"), transcriptEntries: []))
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }

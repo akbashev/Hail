@@ -173,6 +173,7 @@ public struct CodexAppServerEndpoint: ModelEndpoint {
         case .response(let value): return "Assistant: \(render(value.segments))"
         case .toolCalls(let value): return "Assistant tool calls: \(value.id)"
         case .toolOutput(let value): return "Tool result: \(render(value.segments))"
+        case .reasoning(let value): return "Assistant reasoning: \(render(value.segments))"
         }
     }
 

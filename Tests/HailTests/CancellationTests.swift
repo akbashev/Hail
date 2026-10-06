@@ -367,6 +367,6 @@ struct ToolRegistryCancellationTests {
         try #require(results.count == 1)
         #expect(results[0].isError)
         #expect(results[0].failureKind == .invalidArguments)
-        #expect(results[0].output.textRepresentation.contains("expected Trigger"))
+        #expect(results[0].output.textRepresentation.contains("`trigger` is `\"not-an-object\"`, but it's an object"))
     }
 }

@@ -189,7 +189,8 @@ public struct AnyTool: Sendable {
         self.description = tool.description
         self.schema = tool.schema
         self._runGeneratedWithAuthority = { generated, authority in
-            let decoded = try T.Input(generated)
+            let decoded: T.Input
+            decoded = try T.Input(leniently: generated)
             return try await tool.runOutput(input: decoded, authority: authority)
         }
     }

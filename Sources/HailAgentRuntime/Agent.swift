@@ -772,7 +772,7 @@ public distributed actor Agent: AsyncSequence {
         ])
 
         let runtime = actorSystem.agentRuntime
-        let turnTools: [any HailCore.Tool]
+        let turnTools: TurnTools
         do {
             turnTools = try await runtime.turnTools(
                 for: turnContext,
@@ -781,7 +781,11 @@ public distributed actor Agent: AsyncSequence {
         } catch {
             throw mapInfrastructureDependencyError(error, operation: "Could not load agent tools")
         }
-        await registry.register(tools: turnTools)
+        await registry.register(tools: turnTools.tools)
+        for source in turnTools.sources {
+            await registry.register(source: source)
+        }
+        await registry.refresh()
     }
 
     private static func mapEndpointDependencyError(_ error: any Error) -> AgentRuntimeError {

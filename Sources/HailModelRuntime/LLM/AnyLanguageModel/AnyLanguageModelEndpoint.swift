@@ -21,6 +21,20 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     public let tokenCounting: TokenCounting
     private let languageModel: any LanguageModel
     private let generationOptions: GenerationOptions
+    private let reasoningSwitch: ReasoningSwitch?
+
+    /// How a provider whose reasoning is on or off takes a request's
+    /// ``ModelReasoningOverride``, such as Ollama's `think`. It's only given an actual
+    /// override, `enabled` or `disabled`.
+    public struct ReasoningSwitch: Sendable {
+        let apply: @Sendable (_ thinking: ModelReasoningOverride, _ options: inout GenerationOptions) -> Void
+
+        public init(
+            _ apply: @escaping @Sendable (_ thinking: ModelReasoningOverride, _ options: inout GenerationOptions) -> Void
+        ) {
+            self.apply = apply
+        }
+    }
 
     public init(
         languageModel: some LanguageModel,
@@ -30,11 +44,13 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         countTokens: (
             @Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int
         )? = nil,
-        generationOptions: GenerationOptions? = nil
+        generationOptions: GenerationOptions? = nil,
+        reasoningSwitch: ReasoningSwitch? = nil
     ) {
         self.languageModel = languageModel
         self.model = modelIdentifier
         self.generationOptions = generationOptions ?? GenerationOptions(temperature: temperature)
+        self.reasoningSwitch = reasoningSwitch
         self.effectiveContextWindow = effectiveContextWindow
         self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
     }
@@ -60,12 +76,22 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         }
         options[custom: OllamaLanguageModel.self] = ollamaOptions
 
+        // A request's override sets `think`, unless the configuration already fixed it.
+        let reasoningSwitch: ReasoningSwitch? =
+            think != nil
+            ? nil
+            : ReasoningSwitch { thinking, options in
+                var ollamaOptions = options[custom: OllamaLanguageModel.self] ?? [:]
+                ollamaOptions["think"] = .bool(thinking == .enabled)
+                options[custom: OllamaLanguageModel.self] = ollamaOptions
+            }
         return Self(
             languageModel: OllamaLanguageModel(baseURL: baseURL, model: model),
             modelIdentifier: model,
             temperature: temperature,
             effectiveContextWindow: contextWindow,
-            generationOptions: options
+            generationOptions: options,
+            reasoningSwitch: reasoningSwitch
         )
     }
 
@@ -131,13 +157,12 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                         let stream = session.streamResponse(
                             to: mapped.prompt,
                             generating: outputType,
-                            options: Self.options(generationOptions, for: purpose)
+                            options: options(for: purpose, thinking: request.reasoning)
                         )
 
                         var lastComplete: Output?
                         var latestUsage: LanguageModelSession.Usage?
                         var accumulatedText = ""
-                        var narrationSegments: [Transcript.Segment] = []
                         // This is only an adapter-level rendering decision for
                         // observer activity. The requested output contract is
                         // `T` itself; Hail does not classify it as plain text or
@@ -154,9 +179,6 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                                     after: &accumulatedText
                                 )
                                 if !delta.isEmpty {
-                                    narrationSegments.append(
-                                        .text(.init(content: delta))
-                                    )
                                     continuation.yield(.activity(.narrationDelta(GeneratedContent(delta))))
                                 }
                                 // String is itself Generable. Keep the text delta
@@ -216,12 +238,15 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                                     arguments: call.arguments
                                 )
                             }
+                            // The text the model wrote before its tool calls, as one
+                            // segment: the deltas are for live observers, not separate
+                            // pieces of the response.
                             let narration =
-                                narrationSegments.isEmpty
+                                accumulatedText.isEmpty
                                 ? nil
                                 : Transcript.Response(
                                     assetIDs: [],
-                                    segments: narrationSegments
+                                    segments: [.text(.init(content: accumulatedText))]
                                 )
                             for call in calls {
                                 continuation.yield(.activity(.status(GeneratedContent("Calling \(call.name)."))))
@@ -311,14 +336,12 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         return .requestFailed(message)
     }
 
-    private static func options(
-        _ base: GenerationOptions,
-        for purpose: ModelRequestPurpose
-    ) -> GenerationOptions {
-        var options = base
+    private func options(for purpose: ModelRequestPurpose, thinking: ModelReasoningOverride) -> GenerationOptions {
+        var options = generationOptions
         if case .compaction(let maxOutputTokens) = purpose {
             options.maximumResponseTokens = maxOutputTokens
         }
+        if thinking != .providerDefault { reasoningSwitch?.apply(thinking, &options) }
         return options
     }
 

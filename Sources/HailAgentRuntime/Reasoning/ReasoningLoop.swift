@@ -305,16 +305,26 @@ struct TurnPrompt<Input: Sendable>: Sendable {
     func appendingToolOutput(
         callID: String,
         name: String,
-        output: ToolOutput
+        output: ToolOutput,
+        superseding superseded: [String] = []
     ) -> Self {
         let entry = Transcript.Entry.toolOutput(
             .init(id: callID, toolName: name, segments: transcriptSegments(output))
         )
+        // A scope's earlier page is replaced by a line, the way a browser shows only the current
+        // page: the model reads one current state, not every one before it.
+        let entries = current.entries.map { entry -> Transcript.Entry in
+            guard case .toolOutput(let earlier) = entry, superseded.contains(earlier.id) else { return entry }
+            return .toolOutput(
+                .init(
+                    id: earlier.id, toolName: earlier.toolName,
+                    segments: [.text(.init(content: "(Replaced by a later page of the same call.)"))]))
+        }
         return Self(
             history: history,
             current: TurnInput(
                 value: current.value,
-                entries: current.entries + [entry],
+                entries: entries + [entry],
                 currentEntry: current.currentEntry
             ),
             currentSourceIndex: currentSourceIndex,
@@ -461,7 +471,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     let assemblePrompt: PromptAssembler
 
     /// Resolves the tool registry available to this turn.
-    let tools: @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry
+    let tools: @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> AgentScope
+    /// Gives the agent's scope back when the turn ends, with the scopes still open in it.
+    let keepScopes: @Sendable (consuming AgentScope) async -> Void
 
     /// Emits a persistent agent event.
     let emit: @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void
@@ -571,7 +583,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> TurnContext,
         endpoint: @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> ModelEndpoint,
         modelReasoningPolicy: @escaping ModelReasoningPolicy = { _ in .providerDefault },
-        tools: @escaping @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry,
+        tools: @escaping @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> AgentScope,
+        keepScopes: @escaping @Sendable (consuming AgentScope) async -> Void = { _ in },
         emit: @escaping @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void,
         recordActivity: @escaping @Sendable (AgentActivity) async -> Void,
         compactor: (any ContextCompactor)? = nil,
@@ -587,6 +600,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         self.context = context
         self.rebuildContext = rebuildContext
         self.endpoint = endpoint
+        self.keepScopes = keepScopes
         self.modelReasoningPolicy = modelReasoningPolicy
         self.tools = tools
         self.emit = emit
@@ -1002,7 +1016,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         // the reusable prefix on every turn. The context is placed immediately
         // before the current input instead, so it cannot be mistaken for the
         // user's latest request.
-        let turnContextEntries = referenceEntries
+        var turnContextEntries = referenceEntries
 
         let inputEntries = modelEntries(from: message, context: turnContext.promptContext)
         guard let inputEntry = inputEntries.last else {
@@ -1010,7 +1024,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 "The turn message has no model-facing transcript entry."
             )
         }
-        let registry = try await tools(
+        // The turn runs in the agent's scope, where the last turn left off: each call still open
+        // shows where it is, or finishes, before the model does anything. When the turn ends, the scope goes
+        // back to the agent with what's still open; only a cancelled turn ends it.
+        var registry = try await tools(
             AgentTurnContext(
                 agentID: agentID,
                 turnID: turnID,
@@ -1018,11 +1035,15 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 inputID: inputID
             )
         )
-        let modelTools = await registry.allTools()
+        for page in await registry.begin(turnID) {
+            turnContextEntries.append(
+                .prompt(.init(segments: [.text(.init(content: page.output.textRepresentation))])))
+        }
+        let modelTools = registry.allTools()
         // Budget the request that will actually be sent, not a second
         // approximation assembled from AgentState fields. This includes the
         // per-turn delta and tool schemas as well as assembled prompt output.
-        let schemas = await registry.schemas()
+        let schemas = registry.schemas()
         var promptMetadata: [String: Logger.MetadataValue] = [
             "agentID": .string(agentID.rawValue),
             "historyEntries": .string("\(turnContext.preparedRequest.entries.count)"),
@@ -1075,17 +1096,25 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             sessionIdentity: turnContext.sessionIdentity
         )
 
-        let outcome = try await runTurn(
-            input: prompt,
-            delta: delta,
-            turnContextEntries: turnContextEntries,
-            schemas: schemas,
-            modelTools: modelTools,
-            turnSnapshot: turnContext,
-            registry: registry,
-            endpoint: endpoint,
-            through: connection
-        )
+        let outcome: Output
+        do {
+            outcome = try await runTurn(
+                input: prompt,
+                delta: delta,
+                turnContextEntries: turnContextEntries,
+                schemas: schemas,
+                modelTools: modelTools,
+                turnSnapshot: turnContext,
+                registry: &registry,
+                endpoint: endpoint,
+                through: connection
+            )
+        } catch {
+            // Scopes outlive turns: a turn ending, however it ends, leaves them as they are.
+            await keepScopes(registry)
+            throw error
+        }
+        await keepScopes(registry)
 
         // Persist the harness session id (and its identity fingerprint) so a
         // restart can resume the CLI session instead of bootstrapping from
@@ -1114,6 +1143,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// Advances the turn through a bounded sequence of model/tool transitions.
     /// Messages are passed as values between rounds, so the control flow does
     /// not rely on a mutable `while true` loop or an optional success sentinel.
+
     private func runTurn<Input: Sendable, Output>(
         input: TurnPrompt<Input>,
         delta: TurnDelta,
@@ -1121,7 +1151,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         schemas: [ToolDefinition],
         modelTools: [AnyTool],
         turnSnapshot: TurnContext,
-        registry: ToolRegistry,
+        registry: inout AgentScope,
         endpoint: ModelEndpoint,
         completedToolRounds: Int = 0,
         lastToolRound: ToolRoundOutcome? = nil,
@@ -1161,7 +1191,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 schemas: schemas,
                 modelTools: modelTools,
                 turnSnapshot: turnSnapshot,
-                registry: registry,
+                registry: &registry,
                 endpoint: endpoint,
                 completedToolRounds: completedToolRounds,
                 lastToolRound: lastToolRound,
@@ -1188,7 +1218,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 input: input,
                 turnContextEntries: turnContextEntries,
                 turnSnapshot: turnSnapshot,
-                registry: registry,
+                registry: &registry,
                 endpoint: endpoint,
                 through: connection
             )
@@ -1204,16 +1234,14 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                         "The model repeated the same failed tool call twice. \(failure?.output.textRepresentation ?? "Tool execution failed.")"
                 )
             }
-            // A tool round can change the tools, such as an object the model just made.
-            await registry.refresh()
             return try await runTurn(
                 input: next.input,
                 delta: delta,
                 turnContextEntries: turnContextEntries,
-                schemas: await registry.schemas(),
-                modelTools: await registry.allTools(),
+                schemas: registry.schemas(),
+                modelTools: registry.allTools(),
                 turnSnapshot: turnSnapshot,
-                registry: registry,
+                registry: &registry,
                 endpoint: endpoint,
                 completedToolRounds: completedToolRounds + 1,
                 lastToolRound: next.results.contains(where: \.isError) ? .failed : .succeeded,
@@ -1368,7 +1396,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         input: TurnPrompt<Input>,
         turnContextEntries: [Transcript.Entry],
         turnSnapshot: TurnContext,
-        registry: ToolRegistry,
+        registry: inout AgentScope,
         endpoint: ModelEndpoint,
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) -> ToolRoundResult<Input>
@@ -1399,7 +1427,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             nextInput = nextInput.appendingToolOutput(
                 callID: result.toolCallID,
                 name: result.name,
-                output: result.output
+                output: result.output,
+                superseding: execution.superseded
             )
             try await emit(.toolResult(result, at: Date()))
             await recordActivity(.turn(.progress(.toolFinished(result)), at: Date()))

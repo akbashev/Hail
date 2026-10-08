@@ -16,7 +16,7 @@ An `Agent` is a distributed virtual actor: addressable by `AgentID`, auto-passiv
 
 Models route through `ModelEndpoint` implementations — session-owning harnesses (`KimiCodeEndpoint` over ACP, `ClaudeCliEndpoint`, and `CodexAppServerEndpoint`) keep the live conversation in the harness session and receive only the per-turn `TurnDelta`, while stateless API providers always receive the assembled transcript. Hosts provide `ModelRouterConfiguration` (credentials, URLs, generation policy, and per-model reasoning capabilities) when composing the runtime; Hail does not read provider environment variables or choose product defaults. The journal stays the durable source of truth; the harness session is an ephemeral cache, reset on any doubt.
 
-Tools are model-facing workflows dispatched by `ToolRegistry` under the turn's authority. Every `Tool` maps its decoded input to one concrete effect descriptor, and its implementation can only run with the matching non-escapable token. The registry authorizes that effect before invoking the tool; `AnyTool` preserves the concrete effect type through type erasure. Agent-facing effect domains live in `HailCore`.
+Tools are model-facing workflows dispatched by the turn's `TurnScope` under the turn's authority. Every `Tool` maps its decoded input to one concrete effect descriptor, and its implementation can only run with the matching non-escapable token. The registry authorizes that effect before invoking the tool; `AnyTool` preserves the concrete effect type through type erasure. Agent-facing effect domains live in `HailCore`.
 
 ## Topics
 
@@ -63,7 +63,9 @@ Tools are model-facing workflows dispatched by `ToolRegistry` under the turn's a
 ### Tools
 
 - ``Tool``
-- ``ToolRegistry``
+- ``TurnScope``
+- ``ToolScope``
+- ``CallToken``
 - ``FileTool``
 - ``AgentTool``
 

@@ -41,11 +41,11 @@ struct ToolRegistryTests {
 
     @Test("schemas are sorted independently of registration order")
     func schemasHaveStableOrder() async {
-        let registry = ToolRegistry()
-        await registry.register(NowTool())
-        await registry.register(FileTool(projectRoot: URL(fileURLWithPath: "/tmp")))
+        var registry = AgentScope()
+        registry.register(NowTool())
+        registry.register(FileTool(projectRoot: URL(fileURLWithPath: "/tmp")))
 
-        let names = await registry.schemas().map(\.name)
+        let names = registry.schemas().map(\.name)
 
         #expect(names == ["file", "now"])
     }
@@ -63,7 +63,7 @@ struct ToolRegistryTests {
             ClockEffect()
         }
 
-        func runOutput(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
             .text(input.message)
         }
     }
@@ -82,8 +82,8 @@ struct ToolRegistryTests {
 
     @Test("a call to a tool that doesn't exist lists the tools, with what each does")
     func unknownToolListsTheTools() async throws {
-        let registry = ToolRegistry()
-        await registry.register(tools: ParameterlessCommands().tools)
+        var registry = AgentScope()
+        registry.register(tools: ParameterlessCommands().tools)
         let results = try await registry.execute([
             ToolCall(id: "1", name: "test", arguments: GeneratedContent(properties: [:]))
         ])
@@ -103,7 +103,237 @@ struct ToolRegistryTests {
             generatedContent: GeneratedContent(properties: [:]),
             authority: FullAuthority()
         )
-        #expect(!output.textRepresentation.isEmpty)
+        #expect(!output.output.textRepresentation.isEmpty)
+    }
+
+    /// A tool that links to the generated-input tool, as a page links to the next one.
+    struct LinkingTool: HailCore.Tool {
+        typealias Input = EmptyToolInput
+        let name = "start"
+        let description = "Starts, and links to what comes next."
+
+        func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
+
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+            .text("Started.", links: [GeneratedInputTool()])
+        }
+    }
+
+    @Test("a result's links are offered in its call's scope, first; calling another tool leaves it open, like a tab")
+    func linksAreOffered() async throws {
+        var registry = AgentScope()
+        registry.register(tools: [LinkingTool(), NowTool()])
+        #expect(registry.schemas().map(\.name) == ["now", "start"])
+
+        let results = try await registry.execute([
+            ToolCall(id: "1", name: "start", arguments: GeneratedContent(properties: [:]))
+        ])
+        #expect(results[0].output.textRepresentation == "Started.\n\nNow you can use: generated_input")
+        #expect(registry.schemas().map(\.name) == ["generated_input", "now", "start"])
+
+        let echoed = try await registry.execute([
+            ToolCall(id: "2", name: "generated_input", arguments: GeneratedContent(properties: ["message": "hi"]))
+        ])
+        #expect(echoed[0].output == .text("hi"))
+
+        _ = try await registry.execute([ToolCall(id: "3", name: "now", arguments: GeneratedContent(properties: [:]))])
+        #expect(registry.schemas().map(\.name) == ["generated_input", "now", "start"])
+    }
+
+    /// Builds a list of names with the model, a call at a time: the names are a local of its
+    /// scope, and making the list is its result.
+    struct ListTool: HailCore.Tool {
+        typealias Input = EmptyToolInput
+        enum Call: Sendable { case add(String), make }
+        @Generable struct Name: Sendable { let name: String }
+
+        var name: String { "start" }
+        var description: String { "Starts a list." }
+        static let options: [ScopeOption<Call>] = [
+            ScopeOption(name: "add", description: "Adds a name.", input: Name.self) { .add($0.name) },
+            ScopeOption(name: "make", description: "Makes the list.", input: EmptyToolInput.self) { _ in .make },
+        ]
+
+        func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
+
+        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+            var names: [String] = []
+            await scope.show(.text("Started."), offering: Self.options)
+            while let event = await scope.next() {
+                switch consume event {
+                case .turn(let turn):
+                    await turn.show(.text("Still a list of \(names.joined(separator: ", ")); nothing made yet."), offering: Self.options)
+                case .call(let call):
+                    let value = call.value
+                    switch value {
+                    case .add(let name):
+                        guard !names.contains(name) else {
+                            await call.fail(ToolError.invalidArgument("name", value: name))
+                            continue
+                        }
+                        names.append(name)
+                        await call.reply(.text("So far: \(names.joined(separator: ", "))"), offering: Self.options)
+                    case .make:
+                        return .text("Made: \(names.joined(separator: ", "))")
+                    }
+                }
+            }
+            throw CancellationError()
+        }
+    }
+
+    private func call(_ registry: inout AgentScope, _ id: String, _ name: String, adding added: String? = nil) async throws -> ToolExecution {
+        let arguments = added.map { GeneratedContent(properties: ["name": $0]) } ?? GeneratedContent(properties: [:])
+        return try await registry.executeWithOutputs([ToolCall(id: id, name: name, arguments: arguments)])[0]
+    }
+
+    @Test("a call works with the model in its scope, until its result; the scope then collapses to it")
+    func callsWorkInTheirScope() async throws {
+        var registry = AgentScope()
+        registry.register(tools: [ListTool()])
+        let started = try await call(&registry, "1", "start")
+        #expect(started.result.output.textRepresentation == "Started.\n\nNow you can use: add, make")
+        #expect(registry.schemas().map(\.name) == ["add", "make", "start"])
+
+        // Each page replaces the scope's earlier ones.
+        #expect(try await call(&registry, "2", "add", adding: "Ann").superseded == ["1"])
+        // A call that fails fails alone: the scope goes on as it was.
+        #expect(try await call(&registry, "3", "add", adding: "Ann").result.isError)
+        #expect(try await call(&registry, "4", "add", adding: "Bob").superseded == ["1", "2"])
+
+        let made = try await call(&registry, "5", "make")
+        #expect(made.result.output.textRepresentation == "Made: Ann, Bob")
+        #expect(made.superseded == ["1", "2", "4"])
+        #expect(registry.schemas().map(\.name) == ["start"])
+    }
+
+    @Test("answering ends no scope: the next turn begins inside the ones left open")
+    func scopesOutliveTurns() async throws {
+        var scope = AgentScope()
+        scope.offer([ListTool()])
+        _ = try await call(&scope, "1", "start")
+        _ = try await call(&scope, "2", "add", adding: "Ann")
+
+        // The next turn begins inside the open scope, which says where things are.
+        let pages = await scope.begin(TurnID())
+        #expect(pages.map(\.output.textRepresentation) == ["Still a list of Ann; nothing made yet.\n\nNow you can use: add, make"])
+        #expect(scope.schemas().map(\.name) == ["add", "make", "start"])
+        _ = try await call(&scope, "3", "add", adding: "Bob")
+        #expect(try await call(&scope, "4", "make").result.output.textRepresentation == "Made: Ann, Bob")
+    }
+
+    @Test("a call still working stays open beside other calls, until ending the agent's scope cancels it")
+    func workingCallsStayOpen() async throws {
+        var registry = AgentScope()
+        registry.register(tools: [ListTool(), NowTool()])
+        _ = try await call(&registry, "1", "start")
+        _ = try await call(&registry, "2", "now")
+        #expect(registry.schemas().map(\.name) == ["add", "make", "now", "start"])
+        _ = try await call(&registry, "3", "add", adding: "Ann")
+
+        await registry.end()
+        #expect(registry.schemas().map(\.name) == ["now", "start"])
+    }
+
+    @Test("two calls can work side by side, each answering its own")
+    func callsSideBySide() async throws {
+        var registry = AgentScope()
+        registry.register(tools: [ListTool(), SecondListTool()])
+        _ = try await call(&registry, "1", "start")
+        _ = try await call(&registry, "2", "start_second")
+        _ = try await call(&registry, "3", "add", adding: "Ann")
+        _ = try await call(&registry, "4", "add_second", adding: "Bob")
+        #expect(try await call(&registry, "5", "make").result.output.textRepresentation == "Made: Ann")
+        #expect(try await call(&registry, "6", "make_second").result.output.textRepresentation == "Made: Bob")
+    }
+
+    /// A second list, with tools of its own names, to work beside the first.
+    struct SecondListTool: HailCore.Tool {
+        typealias Input = EmptyToolInput
+        typealias Call = ListTool.Call
+        var name: String { "start_second" }
+        var description: String { "Starts another list." }
+        static let options: [ScopeOption<Call>] = [
+            ScopeOption(name: "add_second", description: "Adds a name.", input: ListTool.Name.self) { .add($0.name) },
+            ScopeOption(name: "make_second", description: "Makes the list.", input: EmptyToolInput.self) { _ in .make },
+        ]
+
+        func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
+
+        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+            var names: [String] = []
+            await scope.show(.text("Started."), offering: Self.options)
+            while let event = await scope.next() {
+                switch consume event {
+                case .turn(let turn):
+                    await turn.show(.text("Still a list."), offering: Self.options)
+                case .call(let call):
+                    let value = call.value
+                    switch value {
+                    case .add(let name):
+                        names.append(name)
+                        await call.reply(.text("So far: \(names.joined(separator: ", "))"), offering: Self.options)
+                    case .make:
+                        return .text("Made: \(names.joined(separator: ", "))")
+                    }
+                }
+            }
+            throw CancellationError()
+        }
+    }
+
+    /// Takes the model's calls and never answers them.
+    struct SilentTool: HailCore.Tool {
+        typealias Input = EmptyToolInput
+        var name: String { "silent" }
+        var description: String { "Never answers." }
+
+        func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
+
+        func run(_ input: Input, in scope: borrowing ToolScope<ListTool.Call>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+            await scope.show(.text("Listening."), offering: ListTool.options)
+            while let event = await scope.next() { _ = consume event }
+            throw CancellationError()
+        }
+    }
+
+    @Test("a call the scope doesn't answer fails, instead of waiting forever")
+    func unansweredCallsFail() async throws {
+        var registry = AgentScope()
+        registry.register(tools: [SilentTool()])
+        _ = try await call(&registry, "1", "silent")
+        let unanswered = try await call(&registry, "2", "add", adding: "Ann")
+        #expect(unanswered.result.isError)
+        #expect(unanswered.result.output.textRepresentation.contains("no answer"))
+    }
+
+    /// Fails, with a page linking the tool to recover with.
+    struct ExistsTool: HailCore.Tool {
+        typealias Input = EmptyToolInput
+        var name: String { "make" }
+        var description: String { "Makes it." }
+
+        func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
+
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+            throw PageError(.text("It already exists.", links: [GeneratedInputTool()]))
+        }
+    }
+
+    @Test("a failure is a page too: its links are offered, like a result's")
+    func failuresLink() async throws {
+        var registry = AgentScope()
+        registry.register(tools: [ExistsTool()])
+        let failed = try await call(&registry, "1", "make")
+        #expect(failed.result.isError)
+        #expect(failed.result.output.textRepresentation == "It already exists.\n\nNow you can use: generated_input")
+        #expect(registry.schemas().map(\.name) == ["generated_input", "make"])
+    }
+
+    @Test("called with no model, a call's result is the first page its scope shows")
+    func noModel() async throws {
+        let page = try await AnyTool(ListTool()).runOutput(generatedContent: GeneratedContent(properties: [:]), authority: FullAuthority())
+        #expect(page.output.textRepresentation == "Started.")
     }
 
     @Test("generated arguments are decoded without a JSONDecoder round trip")
@@ -115,7 +345,7 @@ struct ToolRegistryTests {
             authority: FullAuthority()
         )
 
-        #expect(output == .text("hello"))
+        #expect(output.output == .text("hello"))
     }
 }
 

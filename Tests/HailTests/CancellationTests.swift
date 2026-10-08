@@ -264,7 +264,7 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func runOutput(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
             throw CancellationError()
         }
     }
@@ -285,7 +285,7 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func runOutput(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
             throw ToolError.notConfigured("test")
         }
     }
@@ -313,15 +313,15 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func runOutput(input: Input, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
             .text("ok")
         }
     }
 
     @Test("a cancelled tool aborts the round instead of becoming a ToolResult")
     func cancellationPropagates() async {
-        let registry = ToolRegistry()
-        await registry.register(CancellationThrowingTool())
+        var registry = AgentScope()
+        registry.register(CancellationThrowingTool())
 
         await #expect(throws: AgentRuntimeError.cancelled) {
             _ = try await registry.execute([
@@ -336,8 +336,8 @@ struct ToolRegistryCancellationTests {
 
     @Test("ordinary tool errors still become model-visible ToolResults")
     func ordinaryErrorsStillBecomeToolResults() async throws {
-        let registry = ToolRegistry()
-        await registry.register(FailingTool())
+        var registry = AgentScope()
+        registry.register(FailingTool())
 
         let results = try await registry.execute([
             ToolCall(
@@ -353,8 +353,8 @@ struct ToolRegistryCancellationTests {
 
     @Test("decoding failures are classified as invalid arguments")
     func decodingFailureIdentifiesArgumentPath() async throws {
-        let registry = ToolRegistry()
-        await registry.register(NestedInputTool())
+        var registry = AgentScope()
+        registry.register(NestedInputTool())
 
         let results = try await registry.execute([
             ToolCall(

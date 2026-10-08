@@ -41,10 +41,7 @@ struct FoundationModelsProbeTests {
             ClockEffect()
         }
 
-        func runOutput(
-            input: ProbeInput,
-            token: borrowing EffectToken<ClockEffect>
-        ) async throws -> ToolOutput {
+        func run(_ input: ProbeInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
             .text("scheduled")
         }
     }

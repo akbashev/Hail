@@ -20,10 +20,7 @@ struct AnyLanguageModelEndpointTests {
             ClockEffect()
         }
 
-        func runOutput(
-            input: EffectInput,
-            token: borrowing EffectToken<ClockEffect>
-        ) async throws -> ToolOutput {
+        func run(_ input: EffectInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
             .text(input.message)
         }
     }

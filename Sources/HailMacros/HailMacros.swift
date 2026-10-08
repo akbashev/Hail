@@ -101,7 +101,7 @@ private func hasRenderMethod(in declaration: some DeclGroupSyntax) -> Bool {
 
 private func hasExistingToolImplementation(in declaration: some DeclGroupSyntax) -> Bool {
     return declaration.memberBlock.members.contains { member in
-        member.decl.as(FunctionDeclSyntax.self)?.name.text == "runOutput"
+        member.decl.as(FunctionDeclSyntax.self)?.name.text == "run"
     }
 }
 
@@ -161,12 +161,9 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                 ),
                 DeclSyntax(
                     stringLiteral: """
-                        public func runOutput(
-                            input: Input,
-                            token: borrowing EffectToken<Effect>
-                        ) async throws -> ToolOutput {
+                        public func run(_ input: Input, in scope: borrowing HailCore.ToolScope<Never>, token: borrowing EffectToken<Effect>) async throws -> HailCore.Page {
                             let output: Effect.Output = try await Effect.run(in: token)
-                            return render(output)
+                            return HailCore.Page(render(output))
                         }
                         """),
             ])
@@ -210,9 +207,9 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                             public var description: String { "\(command.description ?? command.name)" }
                             public var schema: ToolDefinition { ToolDefinition(name: name, description: description, parameters: Input.generationSchema) }
                             public func effect(for input: Input) throws -> Effect { \(invocation) }
-                            public func runOutput(input: Input, token: borrowing EffectToken<Effect>) async throws -> ToolOutput {
+                            public func run(_ input: Input, in scope: borrowing HailCore.ToolScope<Never>, token: borrowing EffectToken<Effect>) async throws -> HailCore.Page {
                                 let output: Effect.Output = try await Effect.run(in: token)
-                                return owner.render(output)
+                                return HailCore.Page(owner.render(output))
                             }
                         }
                         """))

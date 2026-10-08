@@ -97,6 +97,30 @@ public enum ToolOutput: Codable, Sendable, Equatable {
     }
 }
 
+/// What a tool returns: what the model reads, and the tools it can call next. The links are
+/// offers inside the call's scope: the model calls them by name until it leaves the scope.
+public struct Page: Sendable {
+    public var output: ToolOutput
+    public var links: [any Tool]
+
+    public init(_ output: ToolOutput, links: [any Tool] = []) {
+        self.output = output
+        self.links = links
+    }
+
+    public init(_ page: Page) {
+        self = page
+    }
+
+    public static func text(_ text: String, links: [any Tool] = []) -> Page {
+        Page(.text(text), links: links)
+    }
+
+    public static func data(_ data: ToolData, links: [any Tool] = []) -> Page {
+        Page(.data(data), links: links)
+    }
+}
+
 public enum ToolOutputError: Error, Equatable, Sendable {
     case binaryDataNotRepresentable
 }
@@ -131,6 +155,9 @@ public protocol Tool<Input>: Sendable {
     /// provider and conversion from provider-generated content.
     associatedtype Input: Generable & Sendable
     associatedtype Effect: ScopedEffect
+    /// What the model's calls inside its scope are, for a tool that offers tools of its own while
+    /// it works; `Never` for one that has its result at once.
+    associatedtype Call: Sendable = Never
 
     var name: String { get }
     var description: String { get }
@@ -142,28 +169,26 @@ public protocol Tool<Input>: Sendable {
     /// Pure: decoded model input to the concrete effect being requested.
     func effect(for input: Input) throws -> Effect
 
-    /// Runs only after the registry has authorized the effect and vended its
-    /// non-escapable token. The typed ToolOutput is the authoritative result;
-    /// text is one possible provider representation, not the tool contract.
-    func runOutput(input: Input, token: borrowing EffectToken<Effect>) async throws -> ToolOutput
+    /// Runs the call in its scope, only after the registry has authorized the effect and vended
+    /// its non-escapable token. A tool that has its result at once returns it; one that needs
+    /// more from the model shows it pages in `scope` and answers its calls there, then returns.
+    /// The typed ToolOutput is the authoritative result; text is one possible provider
+    /// representation, not the tool contract. Its links are the tools the model can call next.
+    func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<Effect>) async throws -> Page
 }
 
 extension Tool {
     public var authorityRestriction: (any Authority)? { nil }
 
-    /// The only direct tool entry point: derive the concrete effect, authorize
-    /// it, and invoke the token-requiring implementation.
-    public func runOutput(input: Input, authority: any Authority) async throws -> ToolOutput {
-        let effect = try effect(for: input)
-        let effectiveAuthority: any Authority
-        if let restriction = authorityRestriction {
-            effectiveAuthority = IntersectingAuthority([authority, restriction])
-        } else {
-            effectiveAuthority = authority
-        }
-        return try await withEffect(effect, authority: effectiveAuthority) { token in
-            try await runOutput(input: input, token: token)
-        }
+    /// The authority its effects are checked against: the lane's, narrowed by its own restriction.
+    func effective(_ authority: any Authority) -> any Authority {
+        authorityRestriction.map { IntersectingAuthority([authority, $0]) } ?? authority
+    }
+
+    /// Runs a call with no model to work with: its result, or the first page its scope shows.
+    public func runOutput(input: Input, authority: any Authority) async throws -> Page {
+        let origin = Origin.direct(ToolCall(id: UUID().uuidString, name: name, arguments: input.generatedContent))
+        return try await call(self, input, authority: authority, origin: origin).resultWithoutModel()
     }
 }
 
@@ -182,24 +207,38 @@ public struct AnyTool: Sendable {
     public let schema: ToolDefinition
     /// Type erasure closes over the concrete effect type, so only this path
     /// can manufacture the matching token and invoke the tool.
-    private let _runGeneratedWithAuthority: @Sendable (GeneratedContent, any Authority) async throws -> ToolOutput
+    private let _call: @Sendable (GeneratedContent, any Authority, Origin) throws -> RunningCall
 
     public init<T: Tool>(_ tool: T) {
         self.name = tool.name
         self.description = tool.description
         self.schema = tool.schema
-        self._runGeneratedWithAuthority = { generated, authority in
-            let decoded: T.Input
-            decoded = try T.Input(leniently: generated)
-            return try await tool.runOutput(input: decoded, authority: authority)
+        self._call = { generated, authority, origin in
+            try HailCore.call(tool, try T.Input(leniently: generated), authority: authority, origin: origin)
         }
     }
 
+    /// A tool a scope offers, as the model sees it: the scope answers its calls, so it never
+    /// starts one of its own.
+    init(offered schema: ToolDefinition) {
+        self.name = schema.name
+        self.description = schema.description
+        self.schema = schema
+        self._call = { _, _, _ in throw ToolError.notConfigured("\(schema.name) is answered by the scope that offers it") }
+    }
+
+    /// Calls it in a scope of its own: the running call the caller talks to it through.
+    func call(generatedContent: GeneratedContent, authority: any Authority, origin: Origin) throws -> RunningCall {
+        try _call(generatedContent, authority, origin)
+    }
+
+    /// Runs a call with no model to work with: its result, or the first page its scope shows.
     public func runOutput(
         generatedContent: GeneratedContent,
         authority: any Authority
-    ) async throws -> ToolOutput {
-        try await _runGeneratedWithAuthority(generatedContent, authority)
+    ) async throws -> Page {
+        let origin = Origin.direct(ToolCall(id: UUID().uuidString, name: name, arguments: generatedContent))
+        return try await call(generatedContent: generatedContent, authority: authority, origin: origin).resultWithoutModel()
     }
 
 }

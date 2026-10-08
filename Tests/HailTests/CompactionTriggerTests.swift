@@ -182,7 +182,7 @@ struct CompactionFailurePolicyTests {
             },
             rebuildContext: { $0 },
             endpoint: { _ in StubEndpoint() },
-            tools: { _ in ToolRegistry() },
+            tools: { _ in AgentScope() },
             emit: { event in
                 await events.append(event)
             },

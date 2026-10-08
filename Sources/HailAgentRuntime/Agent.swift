@@ -91,6 +91,9 @@ public distributed actor Agent: AsyncSequence {
     // turn and corrupt the conversation thread. Each new turn chains behind the
     // previous one via this actor-isolated task.
     private var processingTask: Task<Void, Never>?
+    /// The agent's scope, between turns: the tool calls still open when the last turn ended, for
+    /// the next to continue inside. A turn holds it while it runs.
+    private var scope: AgentScope?
 
     // Ephemeral activity stream (status/thinking/text/tool), shaped like
     // `DistributedSequence`: each subscriber (iterator) carries a stable UUID; the
@@ -639,13 +642,14 @@ public distributed actor Agent: AsyncSequence {
                 }
             },
             modelReasoningPolicy: actorSystem.agentRuntime.modelReasoningPolicy,
-            tools: { (turnContext: AgentTurnContext) async throws(AgentRuntimeError) -> ToolRegistry in
-                try await self.toolRegistry(
+            tools: { (turnContext: AgentTurnContext) async throws(AgentRuntimeError) -> AgentScope in
+                try await self.turnScope(
                     lane: lane,
                     defaultAuthority: turnAuthority,
                     turnContext: turnContext
                 )
             },
+            keepScopes: { await self.keep($0) },
             emit: { (event: AgentEvent) async throws(AgentRuntimeError) in
                 try await self.emitReasoningEvent(event)
             },
@@ -744,33 +748,29 @@ public distributed actor Agent: AsyncSequence {
     /// providers' journal replays, against turns that are seconds apart.
     /// A laned turn builds under the lane's authority, an unlaned one under
     /// the agent's plugin-derived authority.
-    private func toolRegistry(
+    private func turnScope(
         lane: TurnAuthorityLane?,
         defaultAuthority: any Authority,
         turnContext: AgentTurnContext
-    ) async throws(AgentRuntimeError) -> ToolRegistry {
-        let registry = ToolRegistry(authority: lane?.authority ?? defaultAuthority)
-        try await registerTools(in: registry, turnContext: turnContext)
-        return registry
+    ) async throws(AgentRuntimeError) -> AgentScope {
+        // The turn holds the agent's scope while it runs, under this turn's authority and tools.
+        var scope = self.scope.take() ?? AgentScope()
+        scope.authority = lane?.authority ?? defaultAuthority
+        try await registerTools(in: &scope, turnContext: turnContext)
+        return scope
     }
 
-    /// Registers the agent's default tools and the host's turn tools into
-    /// `registry`. Runs once per turn (see ``toolRegistry(lane:)``).
+    /// Takes the agent's scope back from a turn that ended.
+    private func keep(_ scope: consuming AgentScope) {
+        self.scope = consume scope
+    }
+
+    /// Registers the host's turn tools into the turn's `scope`. Runs once per turn
+    /// (see ``turnScope(lane:defaultAuthority:turnContext:)``).
     private func registerTools(
-        in registry: ToolRegistry,
+        in scope: inout AgentScope,
         turnContext: AgentTurnContext
     ) async throws(AgentRuntimeError) {
-        await registry.register(NowTool())
-        await registry.register(
-            FileTool(projectRoot: URL(fileURLWithPath: workspace.rootPath))
-        )
-        await registry.register(tools: [
-            AgentTool(
-                sourceAgentID: state.agentID,
-                system: actorSystem
-            )
-        ])
-
         let runtime = actorSystem.agentRuntime
         let turnTools: TurnTools
         do {
@@ -781,11 +781,7 @@ public distributed actor Agent: AsyncSequence {
         } catch {
             throw mapInfrastructureDependencyError(error, operation: "Could not load agent tools")
         }
-        await registry.register(tools: turnTools.tools)
-        for source in turnTools.sources {
-            await registry.register(source: source)
-        }
-        await registry.refresh()
+        scope.offer(turnTools.tools)
     }
 
     private static func mapEndpointDependencyError(_ error: any Error) -> AgentRuntimeError {

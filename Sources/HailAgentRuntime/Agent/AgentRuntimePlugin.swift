@@ -1,3 +1,4 @@
+import Foundation
 import DistributedCluster
 import EventSourcing
 import HailCore
@@ -411,14 +412,31 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     // MARK: Tool injection
 
-    /// Returns the host's tools for one turn.
-    /// Hail registers only its intrinsic tools; the host supplies environmental
-    /// and product-specific tools here.
+    /// Returns the tools for one turn: the host's, or, without a provider,
+    /// Hail's own ``agentTools(for:actorSystem:)``. An agent is offered only
+    /// what's here, so a host includes Hail's tools only where it grants them.
     public func turnTools(
         for context: AgentTurnContext,
         actorSystem: ClusterSystem
     ) async throws -> TurnTools {
-        try await turnToolsProvider?(context, actorSystem) ?? TurnTools()
+        guard let turnToolsProvider else {
+            return TurnTools(tools: try await agentTools(for: context, actorSystem: actorSystem))
+        }
+        return try await turnToolsProvider(context, actorSystem)
+    }
+
+    /// Hail's own tools for the agent of `context`: the time, the files in
+    /// its workspace, and messaging other agents.
+    public func agentTools(
+        for context: AgentTurnContext,
+        actorSystem: ClusterSystem
+    ) async throws(AgentRuntimeError) -> [any Tool] {
+        let workspace = try await workspace(for: try await spawnConfig(for: context.agentID))
+        return [
+            NowTool(),
+            FileTool(projectRoot: URL(fileURLWithPath: workspace.rootPath)),
+            AgentTool(sourceAgentID: context.agentID, system: actorSystem),
+        ]
     }
 
     // MARK: Lifecycle hooks

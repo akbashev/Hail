@@ -34,7 +34,7 @@ public struct NowTool {
         ClockEffect()
     }
 
-    public func runOutput(input: NowToolInput, token: borrowing EffectToken<ClockEffect>) async throws -> ToolOutput {
+    public func run(_ input: NowToolInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
         let instant = try await ClockEffect.run(in: token)
         let utc = instant.ISO8601Format()
         guard let timeZone = TimeZone(identifier: input.timeZone) else {

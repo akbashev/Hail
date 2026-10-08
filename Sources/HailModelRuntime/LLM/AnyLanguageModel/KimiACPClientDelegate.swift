@@ -20,7 +20,7 @@ import Synchronization
 /// auto-approved with the safest available allow option (`allow_once`
 /// preferred, then `allow_always`, then any allow option) so the local agent
 /// can run unattended; reject options or unknown requests are rejected.
-/// Hail's `ToolRegistry` dispatches tool calls that go through the
+/// Hail's `TurnScope` dispatches tool calls that go through the
 /// native reasoning loop.
 final class KimiACPClientDelegate: ClientDelegate, Sendable {
     private let fileSystem = FileSystemDelegate()

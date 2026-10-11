@@ -162,36 +162,28 @@ struct ACPSessionCancellationTests {
     }
 }
 
-/// A cancelled turn is the caller abandoning the work, not a failure: it must
-/// map to `AgentRuntimeError.cancelled` and must not be emitted as `turnFailed`.
-/// The loop keeps this decision in one pure boundary function so lifecycle
-/// handling does not spread across the model/tool transitions.
+/// A cancelled turn is the caller abandoning the work, not a failure: the turn closes as
+/// cancelled, never as failed. The loop keeps this decision in one pure boundary type.
 @Suite("ReasoningLoop cancellation mapping")
 struct ReasoningLoopCancellationTests {
-    @Test("cancellation maps to .cancelled and bypasses turnFailed emission")
-    func cancellationBypassesFailureEmission() {
-        let raw = ReasoningLoop<ContinuousClock>.mapTurnError(CancellationError())
-        #expect(raw.mapped == .cancelled)
-        #expect(!raw.emitsFailure)
-
-        let endpointReported = ReasoningLoop<ContinuousClock>.mapTurnError(AgentRuntimeError.cancelled)
-        #expect(endpointReported.mapped == .cancelled)
-        #expect(!endpointReported.emitsFailure)
+    @Test("cancellation closes the turn as cancelled, not failed")
+    func cancellationClosesAsCancelled() {
+        let at = Date(timeIntervalSince1970: 1)
+        #expect(TurnEnd(CancellationError()) == .cancelled)
+        #expect(TurnEnd(AgentRuntimeError.cancelled) == .cancelled)
+        #expect(TurnEnd(CancellationError()).event(at: at) == .cancelled(at: at))
     }
 
-    @Test("genuine failures still emit turnFailed")
-    func failuresStillEmit() {
-        let rateLimit = ReasoningLoop<ContinuousClock>.mapTurnError(AgentRuntimeError.rateLimit)
-        #expect(rateLimit.mapped == .rateLimit)
-        #expect(rateLimit.emitsFailure)
+    @Test("genuine failures close the turn as failed")
+    func failuresCloseAsFailed() {
+        let at = Date(timeIntervalSince1970: 1)
+        #expect(TurnEnd(AgentRuntimeError.rateLimit).event(at: at) == .failed(.init(error: .rateLimit, at: at)))
 
         struct UnexpectedError: Error {}
-        let wrapped = ReasoningLoop<ContinuousClock>.mapTurnError(UnexpectedError())
-        guard case .infrastructureFailure = wrapped.mapped else {
-            Issue.record("unexpected errors must wrap as infrastructureFailure, got \(wrapped.mapped)")
+        guard case .failed(.infrastructureFailure) = TurnEnd(UnexpectedError()) else {
+            Issue.record("unexpected errors must wrap as infrastructureFailure")
             return
         }
-        #expect(wrapped.emitsFailure)
     }
 
     @Test("repeated identical tool failures stop after one correction attempt")
@@ -209,19 +201,21 @@ struct ReasoningLoopCancellationTests {
             id: "call-1",
             output: "Error: tool timer received invalid arguments at trigger: expected object; found string"
         )
-        let tracker = ToolFailureTracker()
-
-        let first = tracker.recording(results: [failure])
-        let second = first.tracker.recording(results: [failure])
-        let changed = second.tracker.recording(results: [
+        let first = try TurnCalls(limit: 8).resulted(failure)
+        #expect(throws: AgentRuntimeError.self) { try first.resulted(failure) }
+        _ = try first.resulted(
             try result(
                 id: "call-3",
                 output: "Error: tool timer received invalid arguments at trigger: expected object; found array"
-            )
-        ])
-        #expect(!first.repeated)
-        #expect(second.repeated)
-        #expect(!changed.repeated)
+            ))
+    }
+
+    @Test("a turn's tool calls stop at its limit")
+    func toolCallsAreLimited() throws {
+        let one = try TurnCalls(limit: 1).calling()
+        #expect(throws: AgentRuntimeError.modelMisbehavior("Model exceeded the maximum of 1 tool calls in a single turn.")) {
+            try one.calling()
+        }
     }
 
     @Test("transient tool failures do not trigger the deterministic failure guard")
@@ -232,14 +226,7 @@ struct ReasoningLoopCancellationTests {
             output: .text("Error: service unavailable"),
             failureKind: .unavailable
         )
-        let tracker = ToolFailureTracker()
-
-        let first = tracker.recording(results: [failure])
-        let second = first.tracker.recording(results: [failure])
-        let third = second.tracker.recording(results: [failure])
-        #expect(!first.repeated)
-        #expect(!second.repeated)
-        #expect(!third.repeated)
+        _ = try TurnCalls(limit: 8).resulted(failure).resulted(failure).resulted(failure)
     }
 }
 
@@ -264,7 +251,7 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             throw CancellationError()
         }
     }
@@ -285,7 +272,7 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             throw ToolError.notConfigured("test")
         }
     }
@@ -313,14 +300,14 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             .text("ok")
         }
     }
 
     @Test("a cancelled tool aborts the round instead of becoming a ToolResult")
     func cancellationPropagates() async {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(CancellationThrowingTool())
 
         await #expect(throws: AgentRuntimeError.cancelled) {
@@ -336,7 +323,7 @@ struct ToolRegistryCancellationTests {
 
     @Test("ordinary tool errors still become model-visible ToolResults")
     func ordinaryErrorsStillBecomeToolResults() async throws {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(FailingTool())
 
         let results = try await registry.execute([
@@ -353,7 +340,7 @@ struct ToolRegistryCancellationTests {
 
     @Test("decoding failures are classified as invalid arguments")
     func decodingFailureIdentifiesArgumentPath() async throws {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(NestedInputTool())
 
         let results = try await registry.execute([

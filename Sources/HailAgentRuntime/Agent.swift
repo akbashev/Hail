@@ -55,7 +55,6 @@ public distributed actor Agent: AsyncSequence {
     // Convenience accessors for the event-sourced state.
     var role: Role { state.agentID.role }
     var contextID: AgentContextID { state.agentID.contextID }
-    var conversationThread: [ChatMessage] { state.conversationThread }
 
     /// The journaled harness session to resume, if one was recorded.
     private var modelSessionResume: ModelSessionResume? {
@@ -71,7 +70,7 @@ public distributed actor Agent: AsyncSequence {
     /// persisted.
     let workspace: AgentWorkspace
     let agentDirectoryID: AgentDirectoryID
-    let resumesInterruptedTurns: Bool
+    let interruptedTurns: InterruptedTurns
     /// The host's configuration for this agent's identity. Kept so
     /// ``shouldDeactivate()`` can restore its active-index entry when a turn
     /// starts mid-deactivation — registration otherwise happens only on
@@ -88,12 +87,12 @@ public distributed actor Agent: AsyncSequence {
 
     // Serializes reasoning turns. Distributed actors are reentrant, so while one
     // turn awaits the model stream another `stream`/`respond` could start a second
-    // turn and corrupt the conversation thread. Each new turn chains behind the
+    // turn and corrupt the agent's history. Each new turn chains behind the
     // previous one via this actor-isolated task.
     private var processingTask: Task<Void, Never>?
-    /// The agent's scope, between turns: the tool calls still open when the last turn ended, for
-    /// the next to continue inside. A turn holds it while it runs.
-    private var scope: AgentScope?
+    /// The agent's session, between turns: its scopes, as the last turn left them, for the next
+    /// to continue in. A turn holds it while it runs.
+    private var session: AgentSession?
 
     // Ephemeral activity stream (status/thinking/text/tool), shaped like
     // `DistributedSequence`: each subscriber (iterator) carries a stable UUID; the
@@ -127,7 +126,7 @@ public distributed actor Agent: AsyncSequence {
         self.definition = definition
         self.workspace = workspace
         self.agentDirectoryID = spawnConfig.agentDirectoryID
-        self.resumesInterruptedTurns = spawnConfig.resumesInterruptedTurns
+        self.interruptedTurns = spawnConfig.interruptedTurns
         self.spawnConfig = spawnConfig
         self.authority = await actorSystem.agentRuntime.authority(
             for: spawnConfig,
@@ -160,30 +159,39 @@ public distributed actor Agent: AsyncSequence {
             )
         }
 
-        // After replay, a turn that started but never completed was interrupted
-        // by the crash. Interactive agents re-run it once; externally driven
-        // externally driven agents leave re-execution to their driver.
+        // After replay, a turn that started but never closed was cut off by the crash. The host's
+        // policy says whether the agent finishes it or closes it for its driver.
         self.state.normalizeAfterReplay()
-        if resumesInterruptedTurns, let message = state.pendingTurnRerun {
-            let stream = AgentStream<String>(actorSystem: actorSystem)
-            Task { [weak self] in
-                guard let self else { return }
-                defer { stream.finish() }
-                do {
-                    try await self.stream(
-                        message,
-                        message: message,
-                        through: stream.connection
-                    )
-                } catch {
-                    actorSystem.log.error(
-                        "Interrupted turn replay failed",
-                        metadata: [
-                            "agentID": .string(agentID.rawValue),
-                            "error": .string(String(describing: error)),
-                        ]
-                    )
+        if let turn = state.history.open {
+            switch interruptedTurns {
+            case .resume:
+                let stream = AgentStream<String>(actorSystem: actorSystem)
+                Task { [weak self] in
+                    guard let self else { return }
+                    defer { stream.finish() }
+                    do {
+                        try await self.whenLocal { agent in
+                            try await agent.run(
+                                turn.input.content,
+                                opening: .resumed(turn),
+                                referenceEntries: [],
+                                inputID: nil,
+                                through: stream.connection,
+                                authority: nil
+                            )
+                        }
+                    } catch {
+                        actorSystem.log.error(
+                            "Interrupted turn replay failed",
+                            metadata: [
+                                "agentID": .string(agentID.rawValue),
+                                "error": .string(String(describing: error)),
+                            ]
+                        )
+                    }
                 }
+            case .close:
+                try await emit(event: .history(.interrupted(at: Date())))
             }
         }
 
@@ -262,8 +270,9 @@ public distributed actor Agent: AsyncSequence {
         return false
     }
 
-    public distributed func getConversationHistory() -> [ChatMessage] {
-        return conversationThread
+    /// Who said what to the agent, and its work on each: the history hosts read.
+    public distributed func history() -> AgentHistory {
+        state.history
     }
 
     public distributed var persistentAgentID: String {
@@ -282,7 +291,7 @@ public distributed actor Agent: AsyncSequence {
     }
 
     /// Recent durable model requests for a dashboard. Complete history can be
-    /// projected from journal events with ``AgentHistoryReader``.
+    /// projected from journal events with ``AgentJournalReader``.
     public distributed var modelRequests: [ModelRequestRecord] {
         state.modelRequests
     }
@@ -307,8 +316,8 @@ public distributed actor Agent: AsyncSequence {
             contextUsage: state.latestContextUsage,
             usageSummary: state.usageSummary,
             recentModelRequestCount: state.modelRequests.count,
-            conversationMessageCount: state.conversationThread.count,
-            hasContextSummary: state.contextSummary != nil
+            historyTurnCount: state.history.closed.count + (state.history.open == nil ? 0 : 1),
+            hasContextSummary: state.history.earlier != nil
         )
     }
 
@@ -327,61 +336,62 @@ public distributed actor Agent: AsyncSequence {
     /// are unaffected.
     public distributed func stream<Input: Codable & Sendable, Output>(
         _ input: Input,
-        message: ChatMessage,
+        received: AgentHistory.Input,
         referenceEntries: [Transcript.Entry] = [],
         inputID: String? = nil,
         through connection: AgentConnection<Output>,
         authority lane: TurnAuthorityLane? = nil
     ) async throws
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
+        try await run(
+            input, opening: .received(received), referenceEntries: referenceEntries, inputID: inputID,
+            through: connection, authority: lane)
+    }
+
+    /// Runs one turn after the one before it: the history's turns come in order. The loop
+    /// records how it opens and how it ends; a turn left open is one a crash interrupted.
+    private func run<Input: Codable & Sendable, Output>(
+        _ input: Input,
+        opening: TurnOpening,
+        referenceEntries: [Transcript.Entry],
+        inputID: String?,
+        through connection: AgentConnection<Output>,
+        authority lane: TurnAuthorityLane?
+    ) async throws
+    where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         let previousTask = processingTask
-        let turnID = TurnID()
+        let turnID: TurnID =
+            switch opening {
+            case .received: TurnID()
+            case .resumed(let turn): turn.id
+            }
         let workTask = Task<Void, Error> { [input, connection] in
             await previousTask?.value
             let loop = await self.reasoningLoop(lane: lane, turnID: turnID)
-            // The turn is bracketed so a crash mid-turn is detectable on
-            // replay: `turnStarted` without `turnCompleted` is re-run once
-            // after activation (see `resumesInterruptedTurns`).
-            try await self.emit(event: .turnStarted(at: Date()))
-            try await self.emit(event: .turnIdentified(id: turnID))
             recordActivity(.turn(.started, at: Date()))
+            defer { recordActivity(.turn(.completed, at: Date())) }
             do {
                 try await loop.run(
                     input,
-                    message: message,
+                    opening: opening,
                     referenceEntries: referenceEntries,
                     inputID: inputID,
                     through: connection
                 )
             } catch let loopError as ReasoningLoopError {
                 switch loopError {
-                case .failureNotEmitted(let runtimeError):
-                    // Do not manufacture a completed turn when its failure
-                    // never reached the event stream. The unmatched opening
-                    // remains recoverable on replay.
-                    recordActivity(.turn(.completed, at: Date()))
-                    throw runtimeError
-                case .failed(let runtimeError):
-                    // The error is surfaced to the caller, so the turn is
-                    // closed; only a crash before this point triggers a re-run.
-                    do {
-                        try await self.emit(event: .turnCompleted(at: Date()))
-                    } catch {
-                        throw AgentRuntimeError.persistenceFailure(
-                            "Could not close failed turn in the event stream: \(error). Original failure: \(runtimeError)"
-                        )
-                    }
-                    recordActivity(.turn(.completed, at: Date()))
+                case .failureNotEmitted(let runtimeError), .failed(let runtimeError):
                     throw runtimeError
                 }
             }
-            try await self.emit(event: .turnCompleted(at: Date()))
-            recordActivity(.turn(.completed, at: Date()))
         }
         // Chain a fire-and-forget task so the next turn waits for this one
-        // regardless of whether the caller awaits the result.
+        // regardless of whether the caller awaits the result. After the turn, the history is
+        // compacted if the context is past the threshold: the caller has its answer already, and
+        // the next turn waits for it.
         processingTask = Task<Void, Never> { [workTask] in
             _ = try? await workTask.value
+            await self.reasoningLoop(lane: lane).compactAfterTurn()
         }
         try await workTask.value
     }
@@ -393,7 +403,7 @@ public distributed actor Agent: AsyncSequence {
     /// an effect lane, exactly as in ``stream(_:through:authority:)``.
     public distributed func respond<Input: Codable & Sendable, Output>(
         _ input: Input,
-        message: ChatMessage,
+        received: AgentHistory.Input,
         referenceEntries: [Transcript.Entry] = [],
         inputID: String? = nil,
         authority lane: TurnAuthorityLane? = nil
@@ -414,7 +424,7 @@ public distributed actor Agent: AsyncSequence {
 
         try await self.stream(
             input,
-            message: message,
+            received: received,
             referenceEntries: referenceEntries,
             inputID: inputID,
             through: stream.connection,
@@ -428,10 +438,9 @@ public distributed actor Agent: AsyncSequence {
         return outcome
     }
 
-    /// Whether a turn is currently running on this actor — the live signal the
-    /// `AgentObserver` uses to reconcile entries added on `turnStarted`.
+    /// Whether a turn is open on this actor: the live signal the `AgentObserver` uses.
     public distributed var isWorking: Bool {
-        state.activeTurn != nil
+        state.history.open != nil
     }
 
     // MARK: Activity stream
@@ -440,17 +449,6 @@ public distributed actor Agent: AsyncSequence {
     /// `report_status` tool sink). Ephemeral — not journaled.
     public distributed func recordStatusActivity(_ message: String, at: Date) async {
         recordActivity(.turn(.progress(.status(GeneratedContent(message))), at: at))
-    }
-
-    /// Journals a display-only message into the conversation thread and
-    /// broadcasts it live to activity subscribers. No reasoning turn is
-    /// started. This is the sender-side display path — e.g. the supervisor
-    /// posting a decision request into its own thread — so the message
-    /// persists in scrollback (journaled) and reaches open chats immediately
-    /// (activity).
-    public distributed func post(_ message: ChatMessage) async throws {
-        try await emit(event: .messageReceived(message))
-        recordActivity(.message(message, at: message.timestamp))
     }
 
     /// Resumes the subscriber with the next activity fragment: a buffered one
@@ -551,14 +549,26 @@ public distributed actor Agent: AsyncSequence {
         activityBuffers[subscriber] = buffer
     }
 
+    /// Applies a journaled event. Events are checked against the state before they're journaled
+    /// (``emitReasoningEvent(_:)``), so one the state can't take means the journal isn't this
+    /// agent's: replay stops there, loudly.
     public func handleEvent(_ event: AgentEvent) {
-        state.apply(event)
+        do {
+            try state.apply(event)
+        } catch {
+            preconditionFailure("Journal of \(state.agentID.rawValue) has an event its history can't take: \(error)")
+        }
     }
 
     /// Adapts the event-sourcing API to the typed event port consumed by
     /// ``ReasoningLoop``. Infrastructure errors are translated once here;
     /// the loop cannot accidentally leak a raw storage failure.
     private func emitReasoningEvent(_ event: AgentEvent) async throws(AgentRuntimeError) {
+        do {
+            _ = try state.applying(event)
+        } catch {
+            throw AgentRuntimeError.invalidHistory(error)
+        }
         do {
             try await emit(event: event)
         } catch {
@@ -642,14 +652,14 @@ public distributed actor Agent: AsyncSequence {
                 }
             },
             modelReasoningPolicy: actorSystem.agentRuntime.modelReasoningPolicy,
-            tools: { (turnContext: AgentTurnContext) async throws(AgentRuntimeError) -> AgentScope in
-                try await self.turnScope(
+            session: { (turnContext: AgentTurnContext) async throws(AgentRuntimeError) -> AgentSession in
+                try await self.takeSession(
                     lane: lane,
                     defaultAuthority: turnAuthority,
                     turnContext: turnContext
                 )
             },
-            keepScopes: { await self.keep($0) },
+            keepSession: { await self.keep($0) },
             emit: { (event: AgentEvent) async throws(AgentRuntimeError) in
                 try await self.emitReasoningEvent(event)
             },
@@ -677,7 +687,7 @@ public distributed actor Agent: AsyncSequence {
 
         if let snapshot {
             // A turn owns these inputs for its entire lifetime. Only the
-            // journal-derived conversation and summary below are refreshed.
+            // journal-derived history and summary below are refreshed.
             agentID = snapshot.promptContext.agentID
             definition = snapshot.promptContext.definition
             contextManifest = snapshot.promptContext.contextManifest
@@ -726,8 +736,7 @@ public distributed actor Agent: AsyncSequence {
             agentID: agentID,
             definition: definition,
             modelConfiguration: modelConfiguration,
-            contextSummary: state.contextSummary,
-            conversationThread: conversationThread,
+            history: state.history,
             contextManifest: contextManifest,
             instructions: instructions
         )
@@ -748,27 +757,27 @@ public distributed actor Agent: AsyncSequence {
     /// providers' journal replays, against turns that are seconds apart.
     /// A laned turn builds under the lane's authority, an unlaned one under
     /// the agent's plugin-derived authority.
-    private func turnScope(
+    private func takeSession(
         lane: TurnAuthorityLane?,
         defaultAuthority: any Authority,
         turnContext: AgentTurnContext
-    ) async throws(AgentRuntimeError) -> AgentScope {
-        // The turn holds the agent's scope while it runs, under this turn's authority and tools.
-        var scope = self.scope.take() ?? AgentScope()
-        scope.authority = lane?.authority ?? defaultAuthority
-        try await registerTools(in: &scope, turnContext: turnContext)
-        return scope
+    ) async throws(AgentRuntimeError) -> AgentSession {
+        // The turn holds the agent's session while it runs, under this turn's authority and tools.
+        var session = self.session.take() ?? AgentSession()
+        session.authority = lane?.authority ?? defaultAuthority
+        try await registerTools(in: &session, turnContext: turnContext)
+        return session
     }
 
-    /// Takes the agent's scope back from a turn that ended.
-    private func keep(_ scope: consuming AgentScope) {
-        self.scope = consume scope
+    /// Takes the agent's session back from a turn that ended.
+    private func keep(_ session: consuming AgentSession) {
+        self.session = consume session
     }
 
     /// Registers the host's turn tools into the turn's `scope`. Runs once per turn
-    /// (see ``turnScope(lane:defaultAuthority:turnContext:)``).
+    /// (see ``takeSession(lane:defaultAuthority:turnContext:)``).
     private func registerTools(
-        in scope: inout AgentScope,
+        in session: inout AgentSession,
         turnContext: AgentTurnContext
     ) async throws(AgentRuntimeError) {
         let runtime = actorSystem.agentRuntime
@@ -781,7 +790,7 @@ public distributed actor Agent: AsyncSequence {
         } catch {
             throw mapInfrastructureDependencyError(error, operation: "Could not load agent tools")
         }
-        scope.offer(turnTools.tools)
+        session.offer(turnTools)
     }
 
     private static func mapEndpointDependencyError(_ error: any Error) -> AgentRuntimeError {

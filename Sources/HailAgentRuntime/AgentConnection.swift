@@ -64,14 +64,14 @@ extension AgentStream {
     /// final response appears as a ``AgentRunEvent/responseRecorded`` event.
     public func send<Input: Codable & Sendable>(
         _ input: Input,
-        message: ChatMessage,
+        received: AgentHistory.Input,
         referenceEntries: [Transcript.Entry] = [],
         inputID: String? = nil,
         to agent: Agent
     ) async throws {
         try await agent.stream(
             input,
-            message: message,
+            received: received,
             referenceEntries: referenceEntries,
             inputID: inputID,
             through: connection

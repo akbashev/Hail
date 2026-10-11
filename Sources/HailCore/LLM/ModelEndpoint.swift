@@ -1,4 +1,5 @@
 import AnyLanguageModel
+import Synchronization
 
 /// Indicates whether a token count came from the provider/tokenizer or from a
 /// conservative Hail-side estimate.
@@ -58,32 +59,55 @@ public enum ModelActivity: Sendable, Equatable {
     case status(GeneratedContent)
 }
 
-/// The complete assistant response that ended a model request by asking Hail
-/// to execute tools. Providers assemble this value at their transport
-/// boundary. The reasoning loop receives an already completed round and never
-/// reconstructs it from activity fragments.
-public struct ModelToolRound: Codable, Sendable, Equatable {
-    /// Assistant-visible content, when the provider emitted any before the
-    /// tool calls. Transcript segments preserve structured content without
-    /// reducing it to a text sentinel.
-    public let narration: Transcript.Response?
+/// A tool call a model makes inside its request: the session the request runs in runs it and
+/// replies; the request waits for the reply, then goes on, in the same request.
+public struct ModelToolCall: Sendable {
+    public let call: ToolCall
+    public let reply: ToolReply
 
-    /// Provider reasoning retained for protocols that require it to accompany
-    /// the subsequent tool result. AnyLanguageModel has no native reasoning
-    /// segment, so Hail preserves it as ordered transcript segments.
-    public let reasoning: [Transcript.Segment]
+    public init(call: ToolCall, reply: ToolReply) {
+        self.call = call
+        self.reply = reply
+    }
+}
 
-    /// Complete tool calls with their provider-native generated arguments.
-    public let calls: [ToolCall]
+/// What the session gives back for a tool call: the call's result, and the tools it offers now,
+/// for the rest of the request.
+public struct ToolAnswer: Sendable {
+    /// What the call did, as the history keeps it.
+    public let result: ToolResult
+    /// The page it landed on, as it is now: read after the result, in this request only.
+    public let page: Page?
+    public let tools: [AnyTool]
 
-    public init(
-        narration: Transcript.Response? = nil,
-        reasoning: [Transcript.Segment] = [],
-        calls: [ToolCall]
-    ) {
-        self.narration = narration
-        self.reasoning = reasoning
-        self.calls = calls
+    public init(result: ToolResult, page: Page? = nil, tools: [AnyTool]) {
+        self.result = result
+        self.page = page
+        self.tools = tools
+    }
+
+    /// What the model reads for the call: the result, then the page it landed on.
+    public var reading: String {
+        ([result.output.textRepresentation] + (page.map { [$0.reading] } ?? []))
+            .joined(separator: "\n\n")
+    }
+}
+
+/// The way back to the request for one tool call's answer.
+public struct ToolReply: Sendable {
+    private let continuation: AsyncStream<ToolAnswer>.Continuation
+
+    /// For the endpoint: a reply to hand out with the call, and the answer it waits for. The wait
+    /// ends without an answer if the request is cancelled first.
+    public static func awaiting() -> (reply: ToolReply, answer: AsyncStream<ToolAnswer>) {
+        let (answer, continuation) = AsyncStream.makeStream(of: ToolAnswer.self, bufferingPolicy: .bufferingNewest(1))
+        return (ToolReply(continuation: continuation), answer)
+    }
+
+    /// Answers the call; the first answer is the one the request goes on with.
+    public func give(_ answer: ToolAnswer) {
+        continuation.yield(answer)
+        continuation.finish()
     }
 }
 
@@ -93,9 +117,9 @@ where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendabl
     /// Non-terminal provider activity.
     case activity(ModelActivity)
 
-    /// A complete assistant round requesting one or more tools. The caller
-    /// executes the tools and feeds their results back into the next turn.
-    case toolsRequested(ModelToolRound)
+    /// A tool call the model makes inside its request. The session the request runs in runs it
+    /// and answers; the model goes on with the answer, in the same request.
+    case toolCall(ModelToolCall)
 
     /// A partial generated value as it is being generated. Providers that
     /// support native streaming yield cumulative snapshots; plain-text typed
@@ -115,7 +139,6 @@ where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendabl
     case failed(ModelEndpointError)
 }
 
-extension ModelEvent: Equatable where Output: Equatable, Output.PartiallyGenerated: Equatable {}
 
 /// Identifies which layer owns the model-visible conversation window.
 ///
@@ -205,18 +228,15 @@ public enum TokenCounting: Sendable {
 public struct ModelRequest<Input: Sendable>: Sendable {
     public let input: Input
     public let entries: [Transcript.Entry]
-    public let reasoningRounds: [[Transcript.Segment]]
     public let reasoning: ModelReasoningOverride
 
     public init(
         input: Input,
         entries: [Transcript.Entry],
-        reasoningRounds: [[Transcript.Segment]] = [],
         reasoning: ModelReasoningOverride = .providerDefault
     ) {
         self.input = input
         self.entries = entries
-        self.reasoningRounds = reasoningRounds
         self.reasoning = reasoning
     }
 }
@@ -307,6 +327,8 @@ public enum HailErrorFormatter {
             "The run was cancelled."
         case .sandboxViolation(let reason):
             "Sandbox violation: \(reason)"
+        case .invalidHistory(let invalid):
+            "Invalid history event: \(invalid)"
         }
     }
 

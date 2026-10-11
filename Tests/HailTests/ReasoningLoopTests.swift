@@ -33,31 +33,25 @@ struct ReasoningLoopTests {
         #expect(at == timestamp)
     }
 
-    @Test("a completed tool round carries its content and calls together")
-    func forwardsCompletedToolRound() {
-        let round = ModelToolRound(
-            narration: Transcript.Response(
-                assetIDs: [],
-                segments: [.text(.init(content: "I will check that."))]
+    @Test("a tool call the model makes in its request reaches typed stream updates")
+    func forwardsToolCall() {
+        let toolCall = ModelToolCall(
+            call: ToolCall(
+                id: "call-1",
+                name: "read_file",
+                arguments: GeneratedContent(properties: [:])
             ),
-            reasoning: [.text(.init(content: "Inspecting the request."))],
-            calls: [
-                ToolCall(
-                    id: "call-1",
-                    name: "read_file",
-                    arguments: GeneratedContent(properties: [:])
-                )
-            ]
+            reply: ToolReply.awaiting().reply
         )
         let updates = TurnReducer.reduce(
-            event: ModelEvent<String>.toolsRequested(round),
+            event: ModelEvent<String>.toolCall(toolCall),
             at: Date(timeIntervalSince1970: 1)
         )
 
         guard case .toolRequested(let call, _) = updates.first else {
-            Issue.record("Expected the complete tool round to request its tool")
+            Issue.record("Expected the tool call to be requested")
             return
         }
-        #expect(call == round.calls[0])
+        #expect(call == toolCall.call)
     }
 }

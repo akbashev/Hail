@@ -167,7 +167,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     /// Optional compactor for non-session-owning endpoints (Ollama, hosted
     /// chat APIs): consulted before requests, its result is journaled as one
-    /// `conversationCompacted` event. Session-owning harnesses manage their
+    /// `compacted` conversation event. Session-owning harnesses manage their
     /// own context and are never offered compaction.
     public let contextCompactor: (any ContextCompactor)?
 
@@ -264,7 +264,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     }
 
     private static let snapshotOnCompaction: @Sendable (AgentEvent, AgentState, Int64) -> Bool = { event, _, _ in
-        if case .conversationCompacted = event { return true }
+        if case .history(.compacted) = event { return true }
         return false
     }
 

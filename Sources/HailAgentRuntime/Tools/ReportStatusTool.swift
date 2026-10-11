@@ -56,7 +56,7 @@ public struct ReportStatusTool {
     }
 
     public func run(_ input: ReportStatusToolInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<CoordinationEffect>) async throws
-        -> Page
+        -> CallReturn
     {
         _ = token
         let agent: Agent = try await system.agent(sourceAgentID)

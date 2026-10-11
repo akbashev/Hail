@@ -23,8 +23,8 @@ struct NowToolTests {
             )
         }
 
-        #expect(result.output.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
-        #expect(result.output.textRepresentation.contains("Local (Europe/Berlin):"))
+        #expect(result.result.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(result.result.textRepresentation.contains("Local (Europe/Berlin):"))
     }
 
     @Test("renders the wall clock in the explicitly requested timezone")
@@ -39,8 +39,8 @@ struct NowToolTests {
             )
         }
 
-        #expect(result.output.textRepresentation.contains("Local (America/New_York):"))
-        #expect(result.output.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(result.result.textRepresentation.contains("Local (America/New_York):"))
+        #expect(result.result.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
     }
 
     @Test("withDependencies changes the clock seen by tools")
@@ -61,8 +61,8 @@ struct NowToolTests {
             authority: FullAuthority()
         )
 
-        #expect(overridden.output.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
-        #expect(!live.output.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(overridden.result.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
+        #expect(!live.result.textRepresentation.contains("UTC instant: \(expected.ISO8601Format())"))
     }
 
     @Test("requires an explicit timezone")

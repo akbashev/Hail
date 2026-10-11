@@ -1,6 +1,7 @@
 import AnyLanguageModel
 import HailCore
 import Logging
+import Synchronization
 
 import struct AsyncHTTPClient.HTTPClientError
 import struct Foundation.URLError
@@ -132,132 +133,111 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     {
         AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
-                // Retry only this model request, with the same transcript. Tools
-                // remain owned by Hail and completed results are already in it.
+                // Retry only a request that failed before it produced anything or asked for a
+                // tool call: one that did is under way in the agent's session.
                 for attempt in 0...1 {
-                    var receivedSnapshot = false
-                    let delegate = StopOnToolCallsDelegate()
+                    // The tools the agent's session offers this request: what it starts with,
+                    // then what each answered call leaves it offering.
+                    let offered = OfferedTools(tools)
+                    // Each tool call the model makes goes to the agent's session, and the model
+                    // goes on with the session's answer, in this same request.
+                    let delegate = SessionToolsDelegate { call in
+                        // The text written before it streams as narration; it isn't tied to the
+                        // call, which reaches the delegate independently of the relayed text.
+                        let (reply, answer) = ToolReply.awaiting()
+                        continuation.yield(.activity(.status(GeneratedContent("Calling \(call.toolName)."))))
+                        continuation.yield(
+                            .toolCall(
+                                ModelToolCall(
+                                    call: ToolCall(id: call.id, name: call.toolName, arguments: call.arguments),
+                                    reply: reply)))
+                        guard let answer = await answer.first(where: { _ in true }) else {
+                            // Cancelled: the request is over, and nothing more runs in it.
+                            return .stop
+                        }
+                        offered.replace(answer.tools)
+                        // TEMP DUMP: what the model reads back, and the tools it's offered next.
+                        tempDump("TEMP DUMP call \(call.toolName) \(call.arguments.jsonString)\nTEMP DUMP reads:\n\(answer.reading)\nTEMP DUMP offered:\n\(tempTools(answer.tools))")
+                        return .provideOutput([.text(.init(content: answer.reading))])
+                    }
                     do {
                         try Task.checkCancellation()
-                        let mapped = try TranscriptMapping.transcriptAndPrompt(from: request.entries)
+                        let mapped = try TranscriptMapping.request(from: request.entries)
+                        // TEMP DUMP: the request as it starts.
+                        tempDump("TEMP DUMP request\ninstructions: \(String(describing: mapped.instructions))\nhistory: \(mapped.history)\nprompt: \(String(describing: mapped.prompt))\nTEMP DUMP tools:\n\(tempTools(offered.current))")
 
                         continuation.yield(.activity(.status(GeneratedContent("Generating"))))
 
-                        let adaptedTools = tools.map {
-                            AuthorizedAnyLanguageModelTool(tool: $0, authority: authority)
-                        }
                         let session = LanguageModelSession(
                             model: languageModel,
-                            tools: adaptedTools,
-                            transcript: mapped.transcript
+                            dynamicInstructions: OfferedInstructions(instructions: mapped.instructions, tools: offered),
+                            history: mapped.history
                         )
 
                         session.toolExecutionDelegate = delegate
-
-                        let stream = session.streamResponse(
-                            to: mapped.prompt,
-                            generating: outputType,
-                            options: options(for: purpose, thinking: request.reasoning)
-                        )
+                        // On a typed repeated-round failure, continue from the completed tool
+                        // exchanges in the same session transcript.
+                        session.transcriptErrorHandlingPolicy = .preserveTranscript
 
                         var lastComplete: Output?
                         var latestUsage: LanguageModelSession.Usage?
+                        // How full the context is: the latest request's input, not the usage of
+                        // every request a response with tools made, added up.
+                        var latestContext: LanguageModelSession.Usage.Input?
                         var accumulatedText = ""
-                        // This is only an adapter-level rendering decision for
-                        // observer activity. The requested output contract is
-                        // `T` itself; Hail does not classify it as plain text or
-                        // a report tool.
                         let isPlainText = Output.self == String.self
-                        for try await snapshot in stream {
-                            receivedSnapshot = true
-                            latestUsage = snapshot.usage
-                            if isPlainText,
-                                case .string(let snapshotText) = snapshot.rawContent.kind
-                            {
-                                let delta = Self.textDelta(
-                                    from: snapshotText,
-                                    after: &accumulatedText
+                        var repeatedRoundRecoveryUsed = false
+                        while true {
+                            let prompt = repeatedRoundRecoveryUsed
+                                ? Prompt("The previous set of tool calls with the same names and arguments completed. This repeated set was not run. Continue from the previous results or choose a different next step.")
+                                : mapped.prompt
+                            do {
+                                let stream = session.streamResponse(
+                                    to: prompt,
+                                    generating: outputType,
+                                    options: options(for: purpose, thinking: request.reasoning)
                                 )
-                                if !delta.isEmpty {
-                                    continuation.yield(.activity(.narrationDelta(GeneratedContent(delta))))
+                                for try await snapshot in stream {
+                                    await delegate.underWay()
+                                    latestUsage = snapshot.usage
+                                    latestContext = snapshot.context
+                                    if isPlainText,
+                                        case .string(let snapshotText) = snapshot.rawContent.kind
+                                    {
+                                        let delta = Self.textDelta(
+                                            from: snapshotText,
+                                            after: &accumulatedText
+                                        )
+                                        if !delta.isEmpty {
+                                            continuation.yield(.activity(.narrationDelta(GeneratedContent(delta))))
+                                        }
+                                        continuation.yield(.partialUpdated(snapshot.content))
+                                    } else if !snapshot.rawContent.isComplete {
+                                        continuation.yield(.partialUpdated(snapshot.content))
+                                    }
+                                    if snapshot.rawContent.isComplete {
+                                        if let typed = snapshot.content as? Output {
+                                            lastComplete = typed
+                                        } else {
+                                            lastComplete = try Output(snapshot.rawContent)
+                                        }
+                                    }
                                 }
-                                // String is itself Generable. Keep the text delta
-                                // for chat consumers, while also exposing the
-                                // cumulative typed snapshot to generic clients.
-                                continuation.yield(.partialUpdated(snapshot.content))
-                            } else if !snapshot.rawContent.isComplete {
-                                continuation.yield(.partialUpdated(snapshot.content))
-                            }
-
-                            if snapshot.rawContent.isComplete {
-                                if let typed = snapshot.content as? Output {
-                                    lastComplete = typed
-                                } else {
-                                    lastComplete = try Output(snapshot.rawContent)
+                                break
+                            } catch {
+                                guard !repeatedRoundRecoveryUsed, Self.isRepeatedToolRoundFailure(error) else {
+                                    throw error
                                 }
+                                repeatedRoundRecoveryUsed = true
+                                lastComplete = nil
+                                latestUsage = nil
+                                latestContext = nil
+                                accumulatedText = ""
+                                continuation.yield(.activity(.status(GeneratedContent("Continuing after repeated tool calls"))))
                             }
                         }
 
-                        if let latestUsage,
-                            latestUsage.input.totalTokenCount > 0
-                                || latestUsage.output.totalTokenCount > 0
-                        {
-                            let inputTokens = Self.reportedCount(latestUsage.input.totalTokenCount)
-                            let outputTokens = Self.reportedCount(latestUsage.output.totalTokenCount)
-                            continuation.yield(
-                                .usage(
-                                    ModelUsage(
-                                        inputTokens: inputTokens,
-                                        outputTokens: outputTokens,
-                                        reasoningTokens: Self.reportedCount(
-                                            latestUsage.output.reasoningTokenCount
-                                        ),
-                                        cachedReadTokens: Self.reportedCount(
-                                            latestUsage.input.cachedTokenCount
-                                        ),
-                                        totalTokens: latestUsage.totalTokenCount,
-                                        source: .reported
-                                    )))
-                            if let effectiveContextWindow, let inputTokens {
-                                continuation.yield(
-                                    .contextUsage(
-                                        ContextUsage(
-                                            usedTokens: inputTokens,
-                                            limitTokens: effectiveContextWindow,
-                                            source: .reported
-                                        )))
-                            }
-                        }
-
-                        let generatedCalls = await delegate.generatedToolCalls
-                        if !generatedCalls.isEmpty {
-                            let calls = generatedCalls.map { call in
-                                ToolCall(
-                                    id: call.id,
-                                    name: call.toolName,
-                                    arguments: call.arguments
-                                )
-                            }
-                            // The text the model wrote before its tool calls, as one
-                            // segment: the deltas are for live observers, not separate
-                            // pieces of the response.
-                            let narration =
-                                accumulatedText.isEmpty
-                                ? nil
-                                : Transcript.Response(
-                                    assetIDs: [],
-                                    segments: [.text(.init(content: accumulatedText))]
-                                )
-                            for call in calls {
-                                continuation.yield(.activity(.status(GeneratedContent("Calling \(call.name)."))))
-                            }
-                            continuation.yield(
-                                .toolsRequested(
-                                    ModelToolRound(
-                                        narration: narration,
-                                        calls: calls
-                                    )))
-                        } else if let outcome = lastComplete {
+                        if let outcome = lastComplete {
                             continuation.yield(.generated(outcome))
                         } else {
                             continuation.yield(
@@ -267,8 +247,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                         continuation.finish()
                         return
                     } catch {
-                        let calls = await delegate.generatedToolCalls
-                        if attempt == 0, !receivedSnapshot, calls.isEmpty,
+                        if attempt == 0, await delegate.progress == .notStarted,
                             !Task.isCancelled, Self.isTransientTransportFailure(error)
                         {
                             Logger(label: "HailModelRuntime").warning(
@@ -295,6 +274,13 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    private static func isRepeatedToolRoundFailure(_ error: any Error) -> Bool {
+        guard let error = error as? LanguageModelSession.GenerationError,
+            case .repeatedToolCallRound = error
+        else { return false }
+        return true
     }
 
     private static func isTransientTransportFailure(_ error: any Error) -> Bool {
@@ -327,7 +313,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             switch error {
             case .exceededContextWindowSize: return .contextLengthExceeded
             case .rateLimited: return .rateLimit
-            case .decodingFailure(let context): return .decodingError(context.debugDescription)
+            case .decodingFailure(let context), .repeatedToolCallRound(let context):
+                return .decodingError(context.debugDescription)
             default: break
             }
         }
@@ -424,23 +411,64 @@ public actor LlamaCPPEndpointCache {
     }
 }
 
-// MARK: - Delegate
+// MARK: - The agent's session, from inside the request
 
-/// Prevents AnyLanguageModel from executing tools itself. Hail wants to
-/// own execution so it can enforce budgets and runtime accounting.
-private actor StopOnToolCallsDelegate: ToolExecutionDelegate {
-    private(set) var generatedToolCalls: [Transcript.ToolCall] = []
+/// The tools the agent's session offers a request, as they change: each answered call leaves
+/// the session offering what it offers then.
+private final class OfferedTools: Sendable {
+    private let tools: Mutex<[AnyTool]>
 
-    func didGenerateToolCalls(_ toolCalls: [Transcript.ToolCall], in session: LanguageModelSession)
-        async
-    {
-        generatedToolCalls.append(contentsOf: toolCalls)
+    init(_ tools: [AnyTool]) {
+        self.tools = Mutex(tools)
     }
+
+    var current: [AnyTool] { tools.withLock { $0 } }
+
+    func replace(_ tools: [AnyTool]) {
+        self.tools.withLock { $0 = tools }
+    }
+}
+
+/// What the model sees of the agent's session before each step of its request: the
+/// instructions, and the tools the session offers now.
+private struct OfferedInstructions: DynamicInstructions {
+    let instructions: Instructions?
+    let tools: OfferedTools
+
+    var body: some DynamicInstructions {
+        if let instructions { instructions }
+        tools.current.map { OfferedTool($0) as any AnyLanguageModel.Tool }
+    }
+}
+
+/// How far a request got: one under way has produced output or a tool call, which may already
+/// have run in the agent's session, so it's never retried.
+private enum RequestProgress {
+    case notStarted
+    case underWay
+}
+
+/// Sends each tool call the model makes to the agent's session, through `ask`, and gives the
+/// model the session's answer.
+private actor SessionToolsDelegate: ToolExecutionDelegate {
+    private let ask: @Sendable (Transcript.ToolCall) async -> ToolExecutionDecision
+    private(set) var progress = RequestProgress.notStarted
+
+    func underWay() {
+        progress = .underWay
+    }
+
+    init(ask: @escaping @Sendable (Transcript.ToolCall) async -> ToolExecutionDecision) {
+        self.ask = ask
+    }
+
+    func didGenerateToolCalls(_ toolCalls: [Transcript.ToolCall], in session: LanguageModelSession) async {}
 
     func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
         -> ToolExecutionDecision
     {
-        .stop
+        progress = .underWay
+        return await ask(toolCall)
     }
 
     func didExecuteToolCall(
@@ -450,4 +478,18 @@ private actor StopOnToolCallsDelegate: ToolExecutionDelegate {
     func didFailToolCall(
         _ toolCall: Transcript.ToolCall, error: any Error, in session: LanguageModelSession
     ) async {}
+}
+
+// TEMP DUMP: helpers, removed with the dump.
+private func tempDump(_ text: String) {
+    FileHandle.standardError.write(Data((text + "\n").utf8))
+}
+
+private func tempTools(_ tools: [AnyTool]) -> String {
+    var lines: [String] = []
+    for tool in tools {
+        let schema = (try? JSONEncoder().encode(tool.schema.parameters)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        lines.append("  " + tool.name + ": " + tool.description + "\n    " + schema)
+    }
+    return lines.joined(separator: "\n")
 }

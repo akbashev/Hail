@@ -161,9 +161,9 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                 ),
                 DeclSyntax(
                     stringLiteral: """
-                        public func run(_ input: Input, in scope: borrowing HailCore.ToolScope<Never>, token: borrowing EffectToken<Effect>) async throws -> HailCore.Page {
+                        public func run(_ input: Input, in scope: borrowing HailCore.ToolScope<Never>, token: borrowing EffectToken<Effect>) async throws -> HailCore.CallReturn {
                             let output: Effect.Output = try await Effect.run(in: token)
-                            return HailCore.Page(render(output))
+                            return HailCore.CallReturn(HailCore.Page(render(output)))
                         }
                         """),
             ])
@@ -207,9 +207,9 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                             public var description: String { "\(command.description ?? command.name)" }
                             public var schema: ToolDefinition { ToolDefinition(name: name, description: description, parameters: Input.generationSchema) }
                             public func effect(for input: Input) throws -> Effect { \(invocation) }
-                            public func run(_ input: Input, in scope: borrowing HailCore.ToolScope<Never>, token: borrowing EffectToken<Effect>) async throws -> HailCore.Page {
+                            public func run(_ input: Input, in scope: borrowing HailCore.ToolScope<Never>, token: borrowing EffectToken<Effect>) async throws -> HailCore.CallReturn {
                                 let output: Effect.Output = try await Effect.run(in: token)
-                                return HailCore.Page(owner.render(output))
+                                return HailCore.CallReturn(HailCore.Page(owner.render(output)))
                             }
                         }
                         """))
@@ -217,6 +217,14 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
 
         generated.append(
             DeclSyntax(stringLiteral: "public var tools: [any HailCore.Tool] { [\(tools.joined(separator: ", "))] }"))
+        // The group itself, with what it's for: its commands are offered under it.
+        if let description = metadata(node).description {
+            generated.append(
+                DeclSyntax(
+                    stringLiteral:
+                        #"public var group: HailCore.ToolGroup { HailCore.ToolGroup(name: "\#(groupName)", description: "\#(description)", tools: tools) }"#
+                ))
+        }
         return generated
     }
 

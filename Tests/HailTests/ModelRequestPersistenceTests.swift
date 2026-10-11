@@ -17,12 +17,11 @@ struct ModelRequestPersistenceTests {
         )
         let stream = AsyncStream<ModelEvent<String>> { $0.finish() }
 
-        await #expect(throws: AgentRuntimeError.persistenceFailure("journal unavailable")) {
-            _ = try await runner.run(
-                model: "test/model",
-                kind: .generation,
-                stream: stream
-            ) { _ in }
+        do {
+            try await runner.run(model: "test/model", kind: .generation, stream: stream, from: ()) { _, _ in }
+            Issue.record("Expected persistence failure")
+        } catch {
+            #expect(error.error == .persistenceFailure("journal unavailable"))
         }
     }
 
@@ -44,24 +43,19 @@ struct ModelRequestPersistenceTests {
         }
 
         do {
-            _ = try await runner.run(
-                model: "test/model",
-                kind: .generation,
-                stream: stream
-            ) { (event: ModelEvent<String>) async throws(AgentRuntimeError) in
+            try await runner.run(model: "test/model", kind: .generation, stream: stream, from: ()) {
+                (_: Void, event: ModelEvent<String>) async throws(AgentRuntimeError) in
                 if case .failed = event {
                     throw AgentRuntimeError.rateLimit
                 }
             }
             Issue.record("Expected persistence failure")
-        } catch let error as AgentRuntimeError {
-            guard case .persistenceFailure(let message) = error else {
-                Issue.record("Expected persistence failure, got \(error)")
+        } catch {
+            guard case .persistenceFailure(let message) = error.error else {
+                Issue.record("Expected persistence failure, got \(error.error)")
                 return
             }
             #expect(message.contains("Original failure"))
-        } catch {
-            Issue.record("Expected AgentRuntimeError, got \(error)")
         }
     }
 }

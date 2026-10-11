@@ -41,7 +41,7 @@ struct FoundationModelsProbeTests {
             ClockEffect()
         }
 
-        func run(_ input: ProbeInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: ProbeInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             .text("scheduled")
         }
     }
@@ -80,6 +80,13 @@ struct FoundationModelsProbeTests {
             purpose: .generation
         ) {
             print("PROBE EVENT:", String(describing: event))
+            // Answered as the agent's session would.
+            if case .toolCall(let toolCall) = event {
+                toolCall.reply.give(
+                    ToolAnswer(
+                        result: ToolResult(toolCallID: toolCall.call.id, name: toolCall.call.name, output: .text("Reminder set.")),
+                        tools: [AnyTool(ProbeTool())]))
+            }
         }
     }
 }

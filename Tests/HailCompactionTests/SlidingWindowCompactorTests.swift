@@ -15,67 +15,71 @@ import Testing
 @Suite("SlidingWindowCompactor")
 struct SlidingWindowCompactorTests {
     private let agentID = AgentID(role: Role("scout"), contextID: AgentContextID("c1"))
-    private let taskInstructions = PromptAssemblyInstructions(
-        task: """
-            Rules:
-            1. Work ONLY on the task described in the user message.
-            2. Do not write to files outside the workspace.
-            3. Use the available tools to complete the task.
-            """
-    )
 
     // MARK: Helpers
 
-    private func text(_ content: String, _ offset: TimeInterval) -> ChatMessage {
-        .text(sender: "user", content: content, timestamp: Date(timeIntervalSince1970: offset))
+    /// A turn as the model made it: what was said, each call with its result, then the answer;
+    /// open when there's no answer.
+    private struct Exchange {
+        let said: String
+        var work: [(name: String, result: String)] = []
+        var answer: String? = "ok"
     }
 
-    private func context(
-        thread: [ChatMessage],
-        summary: GeneratedContent? = nil,
-        memory: [String] = []
-    ) throws -> PromptContext {
+    private func history(_ exchanges: [Exchange], summary: String? = nil) throws -> (AgentHistory, [TurnID]) {
+        var history = AgentHistory()
+        if let summary {
+            let earlier = TurnID()
+            history = try history
+                .applying(.received(.init(from: .user(id: "u"), content: GeneratedContent("before"), at: Date()), turn: earlier))
+                .applying(.replied(.init(content: GeneratedContent("ok"), at: Date())))
+                .applying(
+                    .compacted(.init(context: GeneratedContent(summary), report: GeneratedContent(summary)), through: .after(earlier), kept: .none))
+        }
+        var ids: [TurnID] = []
+        for (index, exchange) in exchanges.enumerated() {
+            let id = TurnID()
+            ids.append(id)
+            let at = Date(timeIntervalSince1970: TimeInterval(index))
+            history = try history.applying(
+                .received(AgentHistory.Input(from: .user(id: "u"), content: GeneratedContent(exchange.said), at: at), turn: id))
+            for (step, work) in exchange.work.enumerated() {
+                let call = ToolCall(id: "\(index)-\(step)", name: work.name, arguments: GeneratedContent(properties: [:]))
+                history = try history.applying(.called(call, at: at))
+                history = try history.applying(
+                    .resulted(ToolResult(toolCallID: call.id, name: work.name, output: .text(work.result)), at: at))
+            }
+            if let answer = exchange.answer {
+                history = try history.applying(.replied(AgentHistory.Reply(content: GeneratedContent(answer), at: at)))
+            }
+        }
+        return (history, ids)
+    }
+
+    private func context(_ history: AgentHistory) throws -> PromptContext {
         PromptContext(
             agentID: agentID,
-            definition: AgentDefinition(
-                role: agentID.role,
-                behavior: .init(
-                    systemPrompt: "sys"
-                ),
-            ),
+            definition: AgentDefinition(role: agentID.role, behavior: .init(systemPrompt: "sys")),
             modelConfiguration: ModelConfiguration(model: try AgentModel("test/fake")),
-            contextSummary: summary,
-            conversationThread: thread,
-            contextManifest: ContextManifest(items: []),
-            instructions: taskInstructions
+            history: history,
+            contextManifest: ContextManifest(items: [])
         )
-    }
-
-    private func preparedRequest(for context: PromptContext) -> PreparedRequest {
-        assembleStandardPrompt(context)
     }
 
     private func text(in entry: Transcript.Entry) -> String {
         let segments: [Transcript.Segment]
         switch entry {
-        case .instructions(let value):
-            segments = value.segments
-        case .prompt(let value):
-            segments = value.segments
-        case .response(let value):
-            segments = value.segments
-        case .toolCalls, .toolOutput, .reasoning:
-            return ""
+        case .instructions(let value): segments = value.segments
+        case .prompt(let value): segments = value.segments
+        case .response(let value): segments = value.segments
+        case .toolOutput(let value): segments = value.segments
+        case .toolCalls, .reasoning: return ""
         }
-
         return segments.map { segment in
             switch segment {
-            case .text(let value):
-                return value.content
-            case .structure(let value):
-                return value.content.jsonString
-            case .image:
-                return "[image]"
+            case .text(let value): value.content
+            case .structure(let value): value.content.jsonString
+            case .image: "[image]"
             }
         }.joined(separator: "\n")
     }
@@ -91,733 +95,245 @@ struct SlidingWindowCompactorTests {
         return compaction
     }
 
-    /// A compactor with a request-sized 1,000-token window. The fixture uses a
-    /// 15% soft threshold and reserves 400 tokens, leaving enough room for
-    /// the assembled prompt and the retained suffix in this small fixture.
+    /// A 15% threshold with 400 tokens reserved for the summary; the window is the budget's.
+    /// The most recent history kept within 11% of the window: two of these turns of about 200
+    /// tokens each, on 4,000 tokens.
     private func makeCompactor(
-        keepRecent: Int = 2,
-        outputReserve: Int = 400
+        keepRecentShare: Double = 0.11, outputReserve: Int = 400, keptInputsShare: Double = 0.2
     ) -> SlidingWindowCompactor {
         SlidingWindowCompactor(
-            threshold: 0.15,
-            keepRecent: keepRecent,
-            outputReserve: outputReserve,
-            toolResultReserve: 0
-        )
+            threshold: 0.15, keepRecentShare: keepRecentShare, outputReserve: outputReserve, toolResultReserve: 0,
+            keptInputsShare: keptInputsShare)
     }
 
-    private func budget() throws -> CompactionBudget {
-        try CompactionBudget(contextWindow: 1_000)
+    private func budget(_ window: Int = 4_000) throws -> CompactionBudget {
+        try CompactionBudget(contextWindow: window)
     }
 
-    // MARK: Tests
+    private func fiveTurns() throws -> (AgentHistory, [TurnID]) {
+        try history((0..<5).map { Exchange(said: "message \($0) " + String(repeating: "a", count: 790)) })
+    }
+
+    // MARK: When
 
     @Test("a context under the threshold compacts nothing")
     func underThresholdNoCompaction() async throws {
-        let compactor = makeCompactor()
-        // Two short messages: far below 70 tokens.
-        let ctx = try context(thread: [text("hi", 0), text("hello", 1)])
-
-        let result = try await compactor.compact(
-            context: ctx,
-            request: preparedRequest(for: ctx),
-            budget: try budget()
+        let (history, _) = try history([Exchange(said: "hi"), Exchange(said: "hello")])
+        let ctx = try context(history)
+        let result = try await makeCompactor().compact(
+            context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()
         ) { _ in "unused" }
         #expect(result == .unchanged)
     }
 
-    @Test("over threshold, the oldest messages are archived and the tail kept")
-    func compactionArchivesPrefix() async throws {
-        let compactor = makeCompactor(keepRecent: 2)
-        // 5 messages of 40 chars each ≈ 5 × 14 = 70 tokens → triggers.
-        let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-
-        let ctx = try context(thread: thread)
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try budget()
-            ) { _ in "rolled" }
-        )
-
-        #expect(result.output == "rolled")
-        // The preferred tail is kept when it fits. Compaction archives the
-        // complete older prefix, rather than stopping after an arbitrary
-        // minimum amount of progress.
-        #expect(result.archivedCount == 4)
-    }
-
-    @Test("an oversized archived message still uses one summarization request")
-    func oversizedArchivedMessageUsesOneRequest() async throws {
-        let compactor = makeCompactor(keepRecent: 2)
-        let thread = [
-            text(String(repeating: "a", count: 12_000), 0),
-            text("recent one", 1),
-            text("recent two", 2),
-        ]
-        let calls = Box<Int>()
-        calls.value = 0
-
-        let ctx = try context(thread: thread)
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try budget(),
-                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
-                measure: { candidate in
-                    RequestMeasurement(
-                        tokenCount: candidate.entries.count * 10,
-                        source: .reported
-                    )
-                },
-                summarize: { _ in
-                    calls.value = (calls.value ?? 0) + 1
-                    return "rolled"
-                },
-                trigger: .threshold
-            )
-        )
-
-        #expect(result.archivedCount == 1)
-        #expect(calls.value == 1)
-    }
-
-    @Test("the existing rolling summary is folded into the summarize prompt")
-    func priorSummaryFoldedIn() async throws {
-        let compactor = makeCompactor(keepRecent: 1)
-        let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let calls = Box<[[Transcript.Entry]]>()
-
-        let ctx = try context(thread: thread, summary: GeneratedContent("v1"))
-        _ = try await compactor.compact(
-            context: ctx,
-            request: preparedRequest(for: ctx),
-            budget: try budget()
-        ) { request in
-            calls.value = (calls.value ?? []) + [request.entries]
-            return "v2"
-        }
-
-        let prompts = try #require(calls.value)
-        #expect(!prompts.isEmpty)
-        #expect(
-            prompts.contains {
-                $0.contains { message in
-                    let rendered = text(in: message)
-                    return rendered.contains("Summary so far:") && rendered.contains("\"v1\"")
-                }
-            }
-        )
-    }
-
-    @Test("the cut never splits a tool call from its result")
-    func toolPairIntegrity() async throws {
-        let compactor = makeCompactor(keepRecent: 2)
-        // Thread over threshold where the naive cut lands right after a
-        // toolCall — its result would be orphaned in the kept suffix.
-        let call = ToolCall(id: "1", name: "read_file", arguments: GeneratedContent(properties: [:]))
-        let thread: [ChatMessage] = [
-            text(String(repeating: "a", count: 40), 0),
-            text(String(repeating: "b", count: 40), 1),
-            text(String(repeating: "c", count: 40), 2),
-            .toolCall(calls: [call], timestamp: Date(timeIntervalSince1970: 3)),
-            .toolResult(
-                id: "1", name: "read_file", output: .text("contents"), timestamp: Date(timeIntervalSince1970: 4)),
-            text(String(repeating: "d", count: 40), 5),
-        ]
-
-        let ctx = try context(thread: thread)
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try budget()
-            ) { _ in "rolled" }
-        )
-
-        // The preferred suffix contains the complete tool interaction, but it
-        // is still too large for the retained request budget. The fallback
-        // therefore archives that complete interaction as one unit and keeps
-        // only the final semantic message.
-        #expect(result.archivedCount == 5)
-    }
-
-    @Test("the current assistant tool-round representation stays paired with its result")
-    func assistantToolRoundIntegrity() async throws {
-        let compactor = makeCompactor(keepRecent: 2)
-        let call = ToolCall(id: "1", name: "read_file", arguments: GeneratedContent(properties: [:]))
-        let thread: [ChatMessage] = [
-            text(String(repeating: "a", count: 40), 0),
-            text(String(repeating: "b", count: 40), 1),
-            text(String(repeating: "c", count: 40), 2),
-            .assistantToolCall(
-                round: ModelToolRound(
-                    narration: Transcript.Response(
-                        assetIDs: [],
-                        segments: [.text(.init(content: "working"))]
-                    ),
-                    reasoning: [.text(.init(content: "checking"))],
-                    calls: [call]
-                ),
-                timestamp: Date(timeIntervalSince1970: 3)
-            ),
-            .toolResult(
-                id: "1",
-                name: "read_file",
-                output: .text("contents"),
-                timestamp: Date(timeIntervalSince1970: 4)
-            ),
-            text(String(repeating: "d", count: 40), 5),
-        ]
-
-        let ctx = try context(thread: thread)
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try budget()
-            ) { _ in "rolled" }
-        )
-
-        #expect(result.archivedCount == 5)
-    }
-
-    @Test("the cut keeps every result of a parallel tool call with its call")
-    func parallelToolResultsStayTogether() async throws {
-        let compactor = makeCompactor(keepRecent: 2, outputReserve: 400)
-        let first = ToolCall(id: "1", name: "read_file", arguments: GeneratedContent(properties: [:]))
-        let second = ToolCall(id: "2", name: "read_file", arguments: GeneratedContent(properties: [:]))
-        let thread: [ChatMessage] = [
-            text(String(repeating: "a", count: 80), 0),
-            text(String(repeating: "b", count: 80), 1),
-            .toolCall(calls: [first, second], timestamp: Date(timeIntervalSince1970: 2)),
-            .toolResult(id: "1", name: "read_file", output: .text("first"), timestamp: Date(timeIntervalSince1970: 3)),
-            .toolResult(id: "2", name: "read_file", output: .text("second"), timestamp: Date(timeIntervalSince1970: 4)),
-            text(String(repeating: "c", count: 80), 5),
-        ]
-
-        let ctx = try context(thread: thread)
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try budget(),
-                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
-                measure: { candidate in
-                    RequestMeasurement(
-                        tokenCount: candidate.entries.count * 40,
-                        source: .reported
-                    )
-                },
-                summarize: { _ in "rolled" },
-                trigger: .threshold
-            )
-        )
-
-        // The preferred suffix contains the complete parallel interaction,
-        // but the rebuilt request does not fit. The fallback archives the
-        // whole call/results group; it never leaves either result orphaned.
-        #expect(result.archivedCount == 2)
-    }
-
-    @Test("the message opening the in-flight turn is never archived")
-    func lastMessageNeverArchived() async throws {
-        let compactor = makeCompactor(keepRecent: 1)
-        let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-
-        let ctx = try context(thread: thread)
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try budget()
-            ) { _ in "rolled" }
-        )
-        // The newest message is protected. The rebuilt request fits only
-        // after the older five-message prefix has been summarized.
-        #expect(result.archivedCount == 5)
-    }
-
-    @Test("context projection is separate from the generated compaction output")
-    func contextProjectionIsPersistedSeparately() async throws {
-        let compactor = makeCompactor(keepRecent: 1)
-        let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let ctx = try context(thread: thread)
-
-        let decision: CompactionDecision<GeneratedContent> = try await compactor.compact(
-            context: ctx,
-            request: preparedRequest(for: ctx),
-            budget: try budget(),
-            summarize: { _ in GeneratedContent("complete report") },
-            contextProjection: { _, _ in GeneratedContent("conversation context") },
-            trigger: .threshold
-        )
-        let result: CompactionResult<GeneratedContent>
-        guard case .compacted(let compacted) = decision else {
-            Issue.record("Expected a compaction decision")
-            throw TestFailure()
-        }
-        result = compacted
-
-        #expect(result.output == GeneratedContent("complete report"))
-        #expect(result.context == GeneratedContent("conversation context"))
-    }
-
-    @Test("nothing to archive when the whole thread fits the kept tail")
-    func nothingToArchive() async throws {
-        // Huge estimator weight via working memory, tiny thread.
-        let compactor = makeCompactor(keepRecent: 10)
-        let thread = [text("hi", 0), text("hello", 1)]
-        let memory = [String(repeating: "m", count: 400)]  // 100 tokens → triggers
-
-        let ctx = try context(thread: thread, memory: memory)
-        let result = try await compactor.compact(
-            context: ctx,
-            request: preparedRequest(for: ctx),
-            budget: try budget()
-        ) { _ in
-            "unused"
-        }
+    @Test("past the threshold, a history that fits its share whole is left as it is")
+    func smallConversationUnchangedPastThreshold() async throws {
+        let (history, _) = try history([Exchange(said: "one"), Exchange(said: "two")])
+        let ctx = try context(history)
+        let result = try await makeCompactor().compact(
+            context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(),
+            measuring: .reportedFloor(RequestMeasurement(tokenCount: 900, source: .reported)),
+            summarize: { _ in "rolled" }, trigger: .threshold)
         #expect(result == .unchanged)
     }
 
-    @Test("endpoint token counter is used for candidate fitting")
-    func endpointCounterFitsCandidates() async throws {
-        let compactor = makeCompactor(keepRecent: 1, outputReserve: 800)
-        let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let ctx = try context(thread: thread)
-        let measuredCandidates = Box<[[Transcript.Entry]]>()
+    // MARK: What folds
 
-        let request = assembleStandardPrompt(ctx)
+    @Test("past the threshold, the oldest turns fold and the most recent stay whole, within their share")
+    func foldsOldestKeepingRecent() async throws {
+        let (history, ids) = try fiveTurns()
+        let ctx = try context(history)
         let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: request,
-                budget: try budget(),
-                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
-                measure: { candidate in
-                    measuredCandidates.value =
-                        (measuredCandidates.value ?? []) + [candidate.entries]
-                    // Deliberately disagree with the character estimator: the exact
-                    // tokenizer says each rendered message costs 40 tokens.
-                    return RequestMeasurement(
-                        tokenCount: candidate.entries.count * 40,
-                        source: .reported
-                    )
-                },
-                summarize: { _ in "rolled" },
-                trigger: .threshold
-            )
-        )
-
-        // The task prompt has two stable system messages. With a 200-token
-        // retained target, the exact counter includes the newly inserted
-        // summary and allows only the final thread message to remain.
-        #expect(result.archivedCount == 4)
-        #expect(
-            measuredCandidates.value?.contains { messages in
-                messages.contains {
-                    let rendered = text(in: $0)
-                    return rendered.contains("Earlier conversation, summarized:")
-                        && rendered.contains("\"rolled\"")
-                }
-            } == true
-        )
+            await makeCompactor().compact(
+                context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()
+            ) { _ in "rolled" })
+        #expect(result.through == .after(ids[2]))
+        let after = try history.applying(
+            .compacted(.init(context: GeneratedContent("rolled"), report: GeneratedContent("rolled")), through: result.through, kept: result.kept))
+        #expect(after.closed.map(\.id) == Array(ids[3...]))
     }
 
-    @Test("assistant narration stays attached to the following tool group")
-    func assistantNarrationToolGroupIntegrity() async throws {
-        let compactor = makeCompactor(keepRecent: 2, outputReserve: 760)
-        let call = ToolCall(id: "1", name: "read_file", arguments: GeneratedContent(properties: [:]))
-        let thread: [ChatMessage] = [
-            text(String(repeating: "a", count: 40), 0),
-            .text(sender: agentID.rawValue, content: "I will inspect it.", timestamp: Date(timeIntervalSince1970: 1)),
-            .toolCall(calls: [call], timestamp: Date(timeIntervalSince1970: 2)),
-            .toolResult(
-                id: "1", name: "read_file", output: .text("contents"), timestamp: Date(timeIntervalSince1970: 3)),
-            text(String(repeating: "b", count: 40), 4),
-            text(String(repeating: "c", count: 40), 5),
-        ]
-        let ctx = try context(thread: thread)
-
-        let request = assembleStandardPrompt(ctx)
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: request,
-                budget: try budget(),
-                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
-                measure: { candidate in
-                    RequestMeasurement(
-                        tokenCount: candidate.entries.count * 40,
-                        source: .reported
-                    )
-                },
-                summarize: { _ in "rolled" },
-                trigger: .threshold
-            )
-        )
-
-        // A cut after the narration would orphan the tool call. The preferred
-        // suffix is semantically valid, but the rebuilt request is too large,
-        // so the next valid boundary archives the complete group.
-        #expect(result.archivedCount == 4)
-    }
-
-    @Test("reused tool IDs do not merge separate interactions")
-    func repeatedToolIDsStaySeparate() async throws {
-        let compactor = makeCompactor(keepRecent: 1, outputReserve: 400)
-        let call1 = ToolCall(id: "repeat", name: "read_file", arguments: GeneratedContent(properties: [:]))
-        let call2 = ToolCall(id: "repeat", name: "read_file", arguments: GeneratedContent(properties: [:]))
-        let thread: [ChatMessage] = [
-            text("old", 0),
-            .toolCall(calls: [call1], timestamp: Date(timeIntervalSince1970: 1)),
-            .toolResult(
-                id: "repeat", name: "read_file", output: .text("first"), timestamp: Date(timeIntervalSince1970: 2)),
-            text("between", 3),
-            .toolCall(calls: [call2], timestamp: Date(timeIntervalSince1970: 4)),
-            .toolResult(
-                id: "repeat", name: "read_file", output: .text("second"), timestamp: Date(timeIntervalSince1970: 5)),
-            text("tail", 6),
-        ]
-        let ctx = try context(thread: thread)
-        let request = assembleStandardPrompt(ctx)
-
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: request,
-                budget: try budget(),
-                measurement: RequestMeasurement(tokenCount: 900, source: .reported),
-                measure: { candidate in
-                    RequestMeasurement(
-                        tokenCount: candidate.entries.count * 100,
-                        source: .reported
-                    )
-                },
-                summarize: { _ in "rolled" },
-                trigger: .threshold
-            )
-        )
-
-        // The first call/result pair is archivable independently. A global
-        // ID-based range would incorrectly merge both rounds. The final
-        // request budget nevertheless requires archiving both complete
-        // interactions while retaining the final text message.
-        #expect(result.archivedCount == 6)
-    }
-
-    @Test("a latest message that cannot fit produces no false compaction")
-    func oversizedLatestMessageFailsForcedRecovery() async throws {
-        let compactor = makeCompactor(keepRecent: 1, outputReserve: 850)
-        let thread = [
-            text("old", 0),
-            text(String(repeating: "x", count: 12_000), 1),
-        ]
-        let ctx = try context(thread: thread)
-
-        await #expect(throws: AgentRuntimeError.contextLengthExceeded) {
-            try await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try budget(),
-                measurement: RequestMeasurement(tokenCount: 1_000, source: .reported),
-                measure: { candidate in
-                    let hasOversizedTail = candidate.entries.contains {
-                        text(in: $0).count > 10_000
-                    }
-                    return RequestMeasurement(
-                        tokenCount: hasOversizedTail ? 1_000 : 1,
-                        source: .reported
-                    )
-                },
-                summarize: { _ in "rolled" },
-                trigger: .contextLengthExceeded
-            )
+    @Test("a bigger window keeps more of the same history whole")
+    func keptHistoryScalesWithTheWindow() async throws {
+        let (history, ids) = try fiveTurns()
+        let ctx = try context(history)
+        func cut(_ window: Int) async throws -> AgentHistory.Cut {
+            try requireCompaction(
+                await makeCompactor().compact(
+                    context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(window),
+                    measuring: .reportedFloor(RequestMeasurement(tokenCount: window, source: .reported)),
+                    summarize: { _ in "rolled" }, trigger: .contextLengthExceeded)
+            ).through
         }
+        #expect(try await cut(4_000) == .after(ids[2]))
+        #expect(try await cut(40_000) == .after(ids[0]))
     }
 
-    @Test("a post-generation overrun on a threshold decision keeps the context unchanged")
-    func thresholdOverrunKeepsContextUnchanged() async throws {
-        let compactor = makeCompactor(keepRecent: 1, outputReserve: 400)
-        let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let ctx = try context(thread: thread)
-
-        let decision = try await compactor.compact(
-            context: ctx,
-            request: preparedRequest(for: ctx),
-            budget: try budget(),
-            measurement: RequestMeasurement(tokenCount: 500, source: .reported),
-            measure: { candidate in
-                // The kept tail fits the retained budget; the rebuilt request
-                // with its projected summary does not.
-                let includesSummary = candidate.entries.contains {
-                    text(in: $0).contains("Earlier conversation, summarized:")
-                }
-                return RequestMeasurement(
-                    tokenCount: includesSummary ? 900 : 500,
-                    source: .reported
-                )
-            },
-            summarize: { _ in "rolled" },
-            trigger: .threshold
-        )
-
-        #expect(decision == .unchanged)
-    }
-
-    @Test("a post-generation overrun on a forced recovery propagates the typed overflow")
-    func forcedRecoveryOverrunThrows() async throws {
-        let compactor = makeCompactor(keepRecent: 1, outputReserve: 400)
-        let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let ctx = try context(thread: thread)
-
-        await #expect(throws: AgentRuntimeError.contextLengthExceeded) {
-            try await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try budget(),
-                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
-                measure: { candidate in
-                    let includesSummary = candidate.entries.contains {
-                        text(in: $0).contains("Earlier conversation, summarized:")
-                    }
-                    return RequestMeasurement(
-                        tokenCount: includesSummary ? 900 : 500,
-                        source: .reported
-                    )
-                },
-                summarize: { _ in "rolled" },
-                trigger: .contextLengthExceeded
-            )
+    @Test("what was said stays word for word, newest first, within its share of the window")
+    func inputsStayWithinTheirShare() async throws {
+        let (history, ids) = try history((0..<5).map { _ in Exchange(said: String(repeating: "b", count: 800)) })
+        let ctx = try context(history)
+        func kept(_ share: Double) async throws -> AgentHistory.KeptInputs {
+            try requireCompaction(
+                await makeCompactor(keptInputsShare: share).compact(
+                    context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()
+                ) { _ in "rolled" }
+            ).kept
         }
+        // Each input costs 200 tokens of the 4,000-token window; the fold archives turns 0 to 2.
+        #expect(try await kept(0.2) == .all)
+        #expect(try await kept(0.1) == .from(ids[1]))
+        #expect(try await kept(0.02) == .none)
     }
 
-    @Test("the summarizer is capped by the budget left after the kept tail")
-    func summarizeIsCappedByRemainingBudget() async throws {
-        let compactor = makeCompactor(keepRecent: 1, outputReserve: 400)
-        let thread = (0..<5).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let ctx = try context(thread: thread)
-        let budgets = Box<[Int]>()
-
+    @Test("an overflow cuts inside the open turn: its latest work stays, and its input stays first")
+    func overflowFoldsTheOpenTurn() async throws {
+        let (history, ids) = try history([
+            Exchange(said: "build it", work: (0..<4).map { ("step", String(repeating: "x", count: 1_000) + "\($0)") }, answer: nil)
+        ])
+        let ctx = try context(history)
+        let captured = Box<[Transcript.Entry]>()
         let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try budget(),
-                measurement: RequestMeasurement(tokenCount: 500, source: .reported),
-                measure: { _ in
-                    // Both the kept tail and the rebuilt request fit the
-                    // retained budget of 600, so the only limit left for the
-                    // summary is 600 − 500 = 100 tokens.
-                    RequestMeasurement(tokenCount: 500, source: .reported)
-                },
+            await makeCompactor().compact(
+                context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(),
+                measuring: .reportedFloor(RequestMeasurement(tokenCount: 1_200, source: .reported)),
                 summarize: { request in
-                    budgets.value = (budgets.value ?? []) + [request.maxOutputTokens]
+                    captured.value = request.entries
                     return "rolled"
                 },
-                trigger: .threshold
-            )
-        )
-
-        #expect(result.archivedCount == 4)
-        #expect(budgets.value == [100])
+                trigger: .contextLengthExceeded))
+        // Each result is about 250 tokens: the last call and its result fit 11% of 4,000.
+        #expect(result.through == .within(ids[0], steps: 6))
+        let after = try history.applying(
+            .compacted(.init(context: GeneratedContent("rolled"), report: GeneratedContent("rolled")), through: result.through, kept: result.kept))
+        #expect(after.open?.steps.count == 2)
+        let request = assembleStandardPrompt(try context(after))
+        #expect(request.openTurn.first.map(text(in:)) == "build it")
+        #expect(captured.value?.map(text(in:)).joined().contains("This turn so far, still in progress:") == true)
     }
 
-    @Generable(description: "The test report task, authored on the type itself.")
-    struct DescribedReport: Codable, Sendable {
-        let note: String
+    @Test("an overflow compacts even a conversation smaller than it keeps")
+    func overflowCompactsSmallConversations() async throws {
+        let (history, _) = try history((0..<3).map { _ in Exchange(said: String(repeating: "c", count: 1_000)) })
+        let ctx = try context(history)
+        _ = try requireCompaction(
+            await makeCompactor().compact(
+                context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(8_000),
+                measuring: .reportedFloor(RequestMeasurement(tokenCount: 7_000, source: .reported)),
+                summarize: { _ in "rolled" }, trigger: .contextLengthExceeded))
     }
 
-    @Test("the task instruction is the built-in summary task, not the type description")
+    // MARK: The summary
+
+    @Test("the summary so far is folded into the summary prompt")
+    func priorSummaryInPrompt() async throws {
+        let (history, _) = try history(
+            (0..<5).map { Exchange(said: "message \($0) " + String(repeating: "a", count: 790)) }, summary: "earlier facts")
+        let ctx = try context(history)
+        let captured = Box<[Transcript.Entry]>()
+        _ = try requireCompaction(
+            await makeCompactor().compact(context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()) { request in
+                captured.value = request.entries
+                return "rolled"
+            })
+        #expect(captured.value?.map(text(in:)).joined().contains("earlier facts") == true)
+    }
+
+    @Test("oversized tool results are excerpted in the summary prompt")
+    func oversizedResultsExcerpted() async throws {
+        // The turn being worked on read something large, then something small: the large result
+        // is folded, and the summarizer gets an excerpt of it.
+        var exchanges = (0..<4).map { Exchange(said: "message \($0) " + String(repeating: "a", count: 40)) }
+        exchanges[3].work = [("read", String(repeating: "r", count: 5_000)), ("read", "small")]
+        exchanges[3].answer = nil
+        let (history, _) = try history(exchanges)
+        let ctx = try context(history)
+        let captured = Box<[Transcript.Entry]>()
+        _ = try requireCompaction(
+            await makeCompactor(keepRecentShare: 0.05).compact(
+                context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(8_000),
+                measuring: .reportedFloor(RequestMeasurement(tokenCount: 7_000, source: .reported)),
+                summarize: { request in
+                    captured.value = request.entries
+                    return "rolled"
+                }, trigger: .threshold))
+        #expect(captured.value?.map(text(in:)).joined().contains("…[truncated]") == true)
+    }
+
+    @Test("the summarizer is capped by the budget it has")
+    func summarizerCapped() async throws {
+        let (history, _) = try fiveTurns()
+        let ctx = try context(history)
+        let captured = Box<Int>()
+        _ = try requireCompaction(
+            await makeCompactor(outputReserve: 300).compact(context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()) {
+                request in
+                captured.value = request.maxOutputTokens
+                return "rolled"
+            })
+        #expect((captured.value ?? .max) <= 300)
+    }
+
+    @Test("the task instruction is the built-in summary task")
     func taskInstructionIsTheBuiltInSummaryTask() async throws {
-        let compactor = makeCompactor(keepRecent: 1)
-        let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let ctx = try context(thread: thread)
-        let captured = Box<[[Transcript.Entry]]>()
-
-        _ = try await compactor.compact(
-            context: ctx,
-            request: preparedRequest(for: ctx),
-            budget: try budget(),
-            summarize: { request in
-                captured.value = (captured.value ?? []) + [request.entries]
-                return DescribedReport(note: "rolled")
-            }
-        )
-
-        let entries = try #require(captured.value?.first)
-        let instruction = entries.first.map(text(in:)) ?? ""
-        // Recovering the type-level description would require resolving
-        // `$defs`/`$ref` shapes here; Hail leaves that to the schema's
-        // owner, so the built-in task is used even for described reports.
+        let (history, _) = try fiveTurns()
+        let ctx = try context(history)
+        let captured = Box<[Transcript.Entry]>()
+        _ = try requireCompaction(
+            await makeCompactor().compact(context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()) { request in
+                captured.value = request.entries
+                return "rolled"
+            })
+        let instruction = try #require(captured.value?.first).map(text(in:)) ?? ""
         #expect(instruction.contains("Rewrite the"))
-        #expect(!instruction.contains("The test report task, authored on the type itself."))
         #expect(instruction.contains("fit within"))
     }
 
-    @Test("report types without a description keep the plain-text summary task")
-    func undescribedReportUsesPlainTextTask() async throws {
-        let compactor = makeCompactor(keepRecent: 1)
-        let thread = (0..<6).map { text(String(repeating: "a", count: 40), TimeInterval($0)) }
-        let ctx = try context(thread: thread)
-        let captured = Box<[[Transcript.Entry]]>()
+    // MARK: Fitting
 
-        _ = try await compactor.compact(
-            context: ctx,
-            request: preparedRequest(for: ctx),
-            budget: try budget(),
-            summarize: { request in
-                captured.value = (captured.value ?? []) + [request.entries]
-                return "rolled"
-            }
-        )
-
-        let entries = try #require(captured.value?.first)
-        let instruction = entries.first.map(text(in:)) ?? ""
-        #expect(instruction.contains("Rewrite the"))
-        #expect(!instruction.contains("described below"))
+    @Test("the endpoint's token counter is used to fit candidates")
+    func endpointCounterFitsCandidates() async throws {
+        let (history, _) = try fiveTurns()
+        let ctx = try context(history)
+        let measured = Box<Int>()
+        _ = try requireCompaction(
+            await makeCompactor(keepRecentShare: 0.05, outputReserve: 800).compact(
+                context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(1_000),
+                measuring: .counted(RequestMeasurement(tokenCount: 500, source: .reported), by: { candidate in
+                    measured.value = (measured.value ?? 0) + 1
+                    return RequestMeasurement(tokenCount: candidate.entries.count * 20, source: .reported)
+                }),
+                summarize: { _ in "rolled" }, trigger: .threshold))
+        #expect((measured.value ?? 0) > 0)
     }
 
-    @Test("oversized tool results are excerpted in the archive transcript")
-    func oversizedToolResultIsExcerpted() async throws {
-        let compactor = makeCompactor(keepRecent: 1)
-        let tail = "END-OF-TOOL-OUTPUT-MARKER"
-        let toolOutput = String(repeating: "x", count: 12_000) + tail
-        let thread: [ChatMessage] = [
-            text(String(repeating: "a", count: 40), 0),
-            .toolResult(
-                id: "1",
-                name: "read_file",
-                output: .text(toolOutput),
-                timestamp: Date(timeIntervalSince1970: 1)
-            ),
-            text(String(repeating: "b", count: 40), 2),
-            text(String(repeating: "c", count: 40), 3),
-            text(String(repeating: "d", count: 40), 4),
-            text(String(repeating: "e", count: 40), 5),
-        ]
-        let ctx = try context(thread: thread)
-        let captured = Box<[[Transcript.Entry]]>()
+    @Test("an overrun after summarizing keeps the context on a threshold decision")
+    func thresholdOverrunKeepsContextUnchanged() async throws {
+        let (history, _) = try fiveTurns()
+        let ctx = try context(history)
+        let decision = try await makeCompactor(keepRecentShare: 0.05).compact(
+            context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(1_000),
+            measuring: .counted(RequestMeasurement(tokenCount: 500, source: .reported), by: { candidate in
+                let withSummary = candidate.entries.contains { text(in: $0).contains("rolled") }
+                return RequestMeasurement(tokenCount: withSummary ? 900 : 300, source: .reported)
+            }),
+            summarize: { _ in "rolled" }, trigger: .threshold)
+        #expect(decision == .unchanged)
+    }
 
-        _ = try await compactor.compact(
-            context: ctx,
-            request: preparedRequest(for: ctx),
-            budget: try budget()
-        ) { request in
-            captured.value = (captured.value ?? []) + [request.entries]
-            return "rolled"
+    @Test("an overrun after summarizing a recovery propagates the overflow")
+    func recoveryOverrunPropagates() async throws {
+        let (history, _) = try fiveTurns()
+        let ctx = try context(history)
+        await #expect(throws: AgentRuntimeError.contextLengthExceeded) {
+            _ = try await makeCompactor(keepRecentShare: 0.05).compact(
+                context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(1_000),
+                measuring: .counted(RequestMeasurement(tokenCount: 1_100, source: .reported), by: { candidate in
+                    let withSummary = candidate.entries.contains { text(in: $0).contains("rolled") }
+                    return RequestMeasurement(tokenCount: withSummary ? 900 : 300, source: .reported)
+                }),
+                summarize: { _ in "rolled" }, trigger: .contextLengthExceeded)
         }
-
-        let entries = try #require(captured.value?.first)
-        let transcript = entries.map(text(in:)).joined(separator: "\n")
-        #expect(transcript.contains("read_file result:"))
-        #expect(transcript.contains("…[truncated]"))
-        #expect(!transcript.contains(tail))
-    }
-
-    @Test("estimator fitting margins the retained budget and escalates the cut")
-    func estimatorMarginEscalatesTheCut() async throws {
-        // Window 8000, output reserve 400 -> retained 7600, margined 5700.
-        // Keeping the preferred two recent messages costs between 5700 and
-        // 7600 estimated: it would fit an exact counter but not the estimator
-        // margin, so the policy archives deeper.
-        let compactor = makeCompactor(keepRecent: 2, outputReserve: 400)
-        let thread = [
-            text(String(repeating: "a", count: 500), 0),
-            text(String(repeating: "b", count: 40), 1),
-            text(String(repeating: "c", count: 13_500), 2),
-            text(String(repeating: "d", count: 13_500), 3),
-        ]
-        let ctx = try context(thread: thread)
-        let budgets = Box<[Int]>()
-
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try CompactionBudget(contextWindow: 8_000),
-                measurement: RequestMeasurement(tokenCount: 6_000, source: .reported),
-                summarize: { request in
-                    budgets.value = (budgets.value ?? []) + [request.maxOutputTokens]
-                    return "rolled"
-                },
-                trigger: .threshold
-            )
-        )
-
-        #expect(result.archivedCount == 3)
-        #expect(budgets.value?.first ?? 0 >= 256)
-    }
-
-    @Test("a cut without summary room is skipped for a deeper archive")
-    func cutWithoutSummaryRoomIsSkipped() async throws {
-        // Same budget shape, but the preferred tail fits the margined budget
-        // while leaving less than this policy's (deliberately huge) minimum
-        // summary room: the shallow cut is skipped and the deeper archive
-        // with real room wins.
-        let compactor = SlidingWindowCompactor(
-            threshold: 0.15,
-            keepRecent: 2,
-            outputReserve: 400,
-            toolResultReserve: 0,
-            fittingMargin: 0.75,
-            minimumSummaryBudget: 5_000
-        )
-        let thread = [
-            text(String(repeating: "a", count: 2_500), 0),
-            text(String(repeating: "b", count: 2_500), 1),
-            text(String(repeating: "c", count: 2_500), 2),
-            text(String(repeating: "d", count: 40), 3),
-        ]
-        let ctx = try context(thread: thread)
-        let budgets = Box<[Int]>()
-
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try CompactionBudget(contextWindow: 8_000),
-                measurement: RequestMeasurement(tokenCount: 6_000, source: .reported),
-                summarize: { request in
-                    budgets.value = (budgets.value ?? []) + [request.maxOutputTokens]
-                    return "rolled"
-                },
-                trigger: .threshold
-            )
-        )
-
-        #expect(result.archivedCount == 3)
-        #expect(budgets.value?.first ?? 0 >= 256)
-    }
-
-    @Test("a thread no larger than keepRecent still compacts when it must")
-    func recoveryEscalatesBelowKeepRecent() async throws {
-        // Three messages with keepRecent 3 used to dead-end at the guard and
-        // return .unchanged even during forced recovery. Recovery bypasses
-        // the preferred-tail floor and the fallback cuts archive.
-        let compactor = makeCompactor(keepRecent: 3, outputReserve: 400)
-        let thread = [
-            text(String(repeating: "a", count: 11_600), 0),
-            text(String(repeating: "b", count: 11_600), 1),
-            text(String(repeating: "c", count: 11_600), 2),
-        ]
-        let ctx = try context(thread: thread)
-
-        let result = try requireCompaction(
-            await compactor.compact(
-                context: ctx,
-                request: preparedRequest(for: ctx),
-                budget: try CompactionBudget(contextWindow: 8_000),
-                measurement: RequestMeasurement(tokenCount: 7_000, source: .reported),
-                summarize: { _ in "rolled" },
-                trigger: .contextLengthExceeded
-            )
-        )
-
-        #expect(result.archivedCount == 2)
     }
 }
 

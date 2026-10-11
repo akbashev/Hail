@@ -6,8 +6,8 @@ import Testing
 
 @Suite("Model transport failures")
 struct ModelTransportFailureTests {
-    @Test("a failed continuation retries the same completed tool results")
-    func retriesContinuation() async {
+    @Test("a failed request is retried with the same transcript")
+    func retriesRequest() async {
         let recorder = RequestRecorder()
         let model = FailingLanguageModel(recorder: recorder, failure: .timeoutOnce)
         let entries: [Transcript.Entry] = [
@@ -18,15 +18,20 @@ struct ModelTransportFailureTests {
                 ])),
             .toolOutput(
                 .init(id: "call-1", toolName: "weather", segments: [.text(.init(content: "7 degrees"))])),
+            .response(.init(assetIDs: [], segments: [.text(.init(content: "It's 7 degrees."))])),
+            .prompt(.init(segments: [.text(.init(content: "and tomorrow?"))])),
         ]
         let events = await collect(model, entries: entries)
         let requests = await recorder.requests
         #expect(requests.count == 2)
-        #expect(requests.allSatisfy { Array($0.prefix(entries.count)) == entries })
+        #expect(requests.first.map { Array($0.prefix(entries.count - 1)) } == Array(entries.dropLast()))
         #expect(
             RequestContentHash.chain(tools: [], messages: requests[0])
                 == RequestContentHash.chain(tools: [], messages: requests[1]))
-        #expect(events.last == .generated("done"))
+        guard case .generated("done") = events.last else {
+            Issue.record("Expected the generated value last")
+            return
+        }
         #expect(
             !events.contains {
                 if case .failed = $0 { return true }
@@ -67,10 +72,9 @@ struct ModelTransportFailureTests {
             let recorder = RequestRecorder()
             let events = await collect(FailingLanguageModel(recorder: recorder, failure: failure))
             #expect(await recorder.requests.count == 1)
-            if failure == .cancelled {
-                #expect(events.last == .failed(.cancelled))
-            } else {
-                #expect(events.last == .failed(.decodingError("bad output")))
+            switch (failure, events.last) {
+            case (.cancelled, .failed(.cancelled)), (.decoding, .failed(.decodingError("bad output"))): break
+            default: Issue.record("Unexpected last event for \(failure)")
             }
         }
     }
@@ -98,6 +102,13 @@ struct ModelTransportFailureTests {
             tools: [], authority: FullAuthority(), generating: String.self, purpose: .generation
         ) {
             events.append(event)
+            // Answered as the agent's session would.
+            if case .toolCall(let toolCall) = event {
+                toolCall.reply.give(
+                    ToolAnswer(
+                        result: ToolResult(toolCallID: toolCall.call.id, name: toolCall.call.name, output: .text("ok")),
+                        tools: []))
+            }
         }
         return events
     }
@@ -153,11 +164,10 @@ private struct FailingLanguageModel: LanguageModel {
                         throw LanguageModelSession.GenerationError.decodingFailure(
                             .init(debugDescription: "bad output"))
                     case .afterToolCall:
-                        await session.toolExecutionDelegate?.didGenerateToolCalls(
-                            [
-                                .init(
-                                    id: "new-call", toolName: "weather", arguments: GeneratedContent(properties: [:]))
-                            ], in: session)
+                        let call = Transcript.ToolCall(
+                            id: "new-call", toolName: "weather", arguments: GeneratedContent(properties: [:]))
+                        await session.toolExecutionDelegate?.didGenerateToolCalls([call], in: session)
+                        _ = await session.toolExecutionDelegate?.toolCallDecision(for: call, in: session)
                     default: break
                     }
                     throw URLError(.timedOut)

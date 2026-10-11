@@ -82,7 +82,7 @@ public struct AgentTool {
     }
 
     public func run(_ input: AgentToolInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<CoordinationEffect>) async throws
-        -> Page
+        -> CallReturn
     {
         _ = token
         switch input.action {
@@ -130,15 +130,9 @@ public struct AgentTool {
             let logger = system.log
             let deliveryID = await system.agentRuntime.enqueueDelivery {
                 do {
-                    let message = ChatMessage.text(
-                        sender: sourceAgentID.rawValue,
-                        content: messageText,
-                        timestamp: Date()
-                    )
-                    let _: String = try await other.respond(
-                        message,
-                        message: message
-                    )
+                    let received = AgentHistory.Input(
+                        from: .agent(sourceAgentID), content: GeneratedContent(messageText), at: Date())
+                    let _: String = try await other.respond(messageText, received: received)
                 } catch {
                     logger.error(
                         "Asynchronous agent delivery failed",

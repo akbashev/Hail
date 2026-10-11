@@ -26,10 +26,9 @@ public struct PromptContext: Sendable {
     public let agentID: AgentID
     public let definition: AgentDefinition
     public let modelConfiguration: ModelConfiguration
-    /// The rolling summary of compacted-away history, if any compaction ran.
-    /// Compactors read it to fold the old summary into the new one.
-    public let contextSummary: GeneratedContent?
-    public let conversationThread: [ChatMessage]
+    /// Who said what to the agent, and its work on each; with the summary of archived work, which
+    /// compactors fold into the next one.
+    public let history: AgentHistory
     public let contextManifest: ContextManifest
     /// Host-supplied product instructions. Hail renders them but does not
     /// invent task rules for its callers.
@@ -39,18 +38,30 @@ public struct PromptContext: Sendable {
         agentID: AgentID,
         definition: AgentDefinition,
         modelConfiguration: ModelConfiguration,
-        contextSummary: GeneratedContent? = nil,
-        conversationThread: [ChatMessage],
+        history: AgentHistory,
         contextManifest: ContextManifest,
         instructions: PromptAssemblyInstructions = PromptAssemblyInstructions()
     ) {
         self.agentID = agentID
         self.definition = definition
         self.modelConfiguration = modelConfiguration
-        self.contextSummary = contextSummary
-        self.conversationThread = conversationThread
+        self.history = history
         self.contextManifest = contextManifest
         self.instructions = instructions
+    }
+}
+
+extension PromptContext {
+    /// The same context over another state of the history, such as a compaction candidate.
+    public func with(history: AgentHistory) -> PromptContext {
+        PromptContext(
+            agentID: agentID,
+            definition: definition,
+            modelConfiguration: modelConfiguration,
+            history: history,
+            contextManifest: contextManifest,
+            instructions: instructions
+        )
     }
 }
 
@@ -60,9 +71,11 @@ public struct PromptContext: Sendable {
 /// that can drift from the request actually sent.
 public typealias PromptAssembler = @Sendable (PromptContext) -> PreparedRequest
 
-/// Hail's standard prompt assembly function. Prompt assembly never truncates
-/// history; a configured context compactor is solely responsible for replacing
-/// old history with a summary.
+/// Hail's standard prompt assembly function: the agent's history as the model sees it. Earlier
+/// turns show what was said and answered, and where their work led: each page's address, at the
+/// call that last landed on it, for the model to open again. The turn being worked on is shown
+/// whole. A configured context compactor replaces earlier turns with a summary when the window
+/// needs it.
 public let assembleStandardPrompt: PromptAssembler = { context in
     let isInteractiveSession =
         context.agentID.contextID.isChat || context.agentID.contextID == .main
@@ -70,13 +83,91 @@ public let assembleStandardPrompt: PromptAssembler = { context in
         isInteractiveSession
         ? buildChatPrefix(context: context)
         : buildContextPrefix(context: context)
-    let conversation = context.conversationThread.enumerated().flatMap {
-        index, message in
-        modelEntries(from: message, context: context).map {
-            PreparedRequest.ConversationEntry(sourceIndex: index, entry: $0)
-        }
+    let history = context.history
+    let shown = Landings(in: history)
+    return PreparedRequest(
+        prefix: prefix,
+        history: (history.earlier?.kept ?? []).map { inputEntry($0.input) }
+            + history.closed.enumerated().flatMap { closedTurnEntries($1, shown.in(turn: $0)) },
+        openTurn: history.open.map { turnEntries(input: $0.input, steps: $0.steps, shown.in(turn: history.closed.count)) } ?? []
+    )
+}
+
+/// The calls that last landed on each page, found by their place in the history, since a model may
+/// reuse call IDs: an earlier turn keeps them, to show where its work led.
+struct Landings {
+    /// A step's place: its turn, counting the open one last, and its index in the turn.
+    struct Place: Hashable {
+        let turn: Int
+        let step: Int
     }
-    return PreparedRequest(prefix: prefix, conversation: conversation)
+
+    /// The results that last landed on a page, and the calls they answer.
+    private let places: Set<Place>
+
+    init(in history: AgentHistory) {
+        let turns = history.closed.map(\.steps) + (history.open.map { [$0.steps] } ?? [])
+        let landings = turns.enumerated().flatMap { turn, steps in
+            steps.enumerated().compactMap { step, value in value.landed.map { (address: $0, place: Place(turn: turn, step: step)) } }
+        }
+        let latest = Dictionary(landings.map { ($0.address, $0.place) }) { _, later in later }.values
+        // Each result's call: the nearest call before it, in its turn, with its ID.
+        let calls = latest.compactMap { place -> Place? in
+            guard case .resulted(let result, _) = turns[place.turn][place.step] else { return nil }
+            let call = turns[place.turn][..<place.step].lastIndex {
+                if case .called(let call, _) = $0 { call.id == result.toolCallID } else { false }
+            }
+            return call.map { Place(turn: place.turn, step: $0) }
+        }
+        places = Set(latest).union(calls)
+    }
+
+    /// The landings in one turn, by step.
+    func `in`(turn: Int) -> InTurn {
+        InTurn(steps: Set(places.filter { $0.turn == turn }.map(\.step)))
+    }
+
+    struct InTurn {
+        let steps: Set<Int>
+
+        /// Whether the step is a call that last landed on a page, or its result.
+        func shows(_ step: Int) -> Bool { steps.contains(step) }
+    }
+}
+
+func inputEntry(_ input: AgentHistory.Input) -> Transcript.Entry {
+    .prompt(.init(segments: transcriptSegments(input.content)))
+}
+
+/// A turn as the model sees it: what was said, then each call and its result.
+func turnEntries(input: AgentHistory.Input, steps: [AgentHistory.Step], _ shown: Landings.InTurn) -> [Transcript.Entry] {
+    [inputEntry(input)]
+        + steps.map { step in
+            switch step {
+            case .called(let call, _):
+                .toolCalls(.init([transcriptToolCall(call)]))
+            case .resulted(let result, _):
+                .toolOutput(.init(id: result.toolCallID, toolName: result.name, segments: resultSegments(result)))
+            }
+        }
+}
+
+/// A call's result as the model reads it later: what it did, and the page it landed on, by
+/// address, to open again.
+func resultSegments(_ result: ToolResult) -> [Transcript.Segment] {
+    result.output.transcriptSegments + (result.landed.map { [.text(.init(content: "→ \($0)"))] } ?? [])
+}
+
+/// A closed turn: what was said, the calls that show an open tab, and its answer. A failed,
+/// cancelled or interrupted turn has no answer: the model never sees its own failures.
+func closedTurnEntries(_ turn: AgentHistory.ClosedTurn, _ shown: Landings.InTurn) -> [Transcript.Entry] {
+    let answer: [Transcript.Entry] =
+        switch turn.outcome {
+        case .replied(let reply): [.response(.init(assetIDs: [], segments: transcriptSegments(reply.content)))]
+        case .failed, .cancelled, .interrupted: []
+        }
+    let steps = turn.steps.enumerated().filter { shown.shows($0.offset) }.map(\.element)
+    return turnEntries(input: turn.input, steps: steps, shown) + answer
 }
 
 // MARK: - Chat context
@@ -157,7 +248,7 @@ private func appendContextSummary(
     from context: PromptContext,
     to messages: inout [Transcript.Entry]
 ) {
-    guard let summary = context.contextSummary else { return }
+    guard let summary = context.history.earlier?.summary.context else { return }
     messages.append(
         .instructions(
             .init(
@@ -171,53 +262,6 @@ private func appendContextSummary(
             )
         )
     )
-}
-
-func modelEntries(from msg: ChatMessage, context: PromptContext) -> [Transcript.Entry] {
-    switch msg {
-    case .text(let sender, let content, _):
-        let segment = Transcript.Segment.text(.init(content: content))
-        if sender == context.agentID.rawValue {
-            return [.response(.init(assetIDs: [], segments: [segment]))]
-        }
-        return [.prompt(.init(segments: [segment]))]
-    case .response(let sender, let content, _):
-        let segments = transcriptSegments(content)
-        if sender == context.agentID.rawValue {
-            return [.response(.init(assetIDs: [], segments: segments))]
-        }
-        return [.prompt(.init(segments: segments))]
-    case .toolCall(let calls, _):
-        return [.toolCalls(.init(calls.map(transcriptToolCall)))]
-    case .assistantToolCall(let round, _):
-        var entries: [Transcript.Entry] = []
-        let narrationSegments = round.narration?.segments ?? []
-        // Transcript has no provider-neutral reasoning segment. Keep the
-        // reasoning on the typed/journaled tool round; the runtime carries it
-        // as provider metadata when a provider needs it during replay.
-        let responseSegments = narrationSegments
-        if !responseSegments.isEmpty {
-            entries.append(
-                .response(
-                    .init(
-                        assetIDs: round.narration?.assetIDs ?? [],
-                        segments: responseSegments
-                    )
-                )
-            )
-        }
-        if !round.calls.isEmpty {
-            entries.append(.toolCalls(.init(round.calls.map(transcriptToolCall))))
-        }
-        return entries
-    case .toolResult(let id, let name, let output, _, _):
-        return [.toolOutput(.init(id: id, toolName: name, segments: output.transcriptSegments))]
-    case .failure:
-        return []
-    case .decisionRequest, .decisionResolved:
-        // Display-only messages; the model never sees them.
-        return []
-    }
 }
 
 private func instructions(_ content: GeneratedContent) -> Transcript.Entry {

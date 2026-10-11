@@ -8,36 +8,11 @@ import AnyLanguageModel
 
 public enum AgentEvent: Codable, Sendable {
     case activated(agentID: AgentID)
-    /// The `at` is optional only so journals written before turn timing was
-    /// introduced still replay; new events always carry it.
-    case turnStarted(at: Date?)
-    /// Identifies the current turn without changing the old turnStarted wire
-    /// shape, so pre-identification journals remain replayable.
-    case turnIdentified(id: TurnID)
-    case messageReceived(ChatMessage)
-    /// The exact assistant message sent before executing a tool round. Keeping
-    /// narration, provider reasoning, and calls together matters for model
-    /// protocols that require reasoning to accompany tool calls.
-    case assistantToolRound(round: ModelToolRound, at: Date)
-    case toolResult(ToolResult, at: Date?)
-    /// The oldest `archivedCount` thread entries were compacted into
-    /// `summary`, which replaces ``AgentState/contextSummary`` (rolling
-    /// summary). One atomic event: the summary is a non-deterministic fold
-    /// of the archived prefix, so it must be journaled with the boundary —
-    /// a snapshot-less replay cannot reproduce it otherwise.
-    /// `output` is optional only so journals written before the typed
-    /// compaction report still replay; new events always carry it.
-    case conversationCompacted(
-        archivedCount: Int,
-        content: GeneratedContent,
-        output: GeneratedContent?
-    )
-    case responseReceived(sender: String, content: GeneratedContent, at: Date)
-    case turnFailed(error: AgentRuntimeError, at: Date)
-    case turnCompleted(at: Date?)
+    /// Something happened in the agent's history.
+    case history(AgentHistory.Event)
     /// Durable per-request accounting. Providers may report only a subset of
     /// fields; unknown values remain nil in ``ModelUsage``. These events are
-    /// intentionally separate from the conversation transcript so a dashboard
+    /// intentionally separate from the agent's history so a dashboard
     /// can project usage without replaying model output.
     case modelUsage(ModelUsage, at: Date)
     /// Durable context occupancy for session-owning endpoints.
@@ -65,69 +40,7 @@ public enum AgentEvent: Codable, Sendable {
     case deactivated(reason: String)
 }
 
-/// A single entry in the agent's conversation thread.
-///
-/// This is a domain type: it distinguishes text messages, assistant tool-call
-/// requests, and tool results. Every text message carries an explicit `sender`
-/// so consumers know which actor produced it. The LLM-facing role is derived
-/// at the boundary by comparing the sender with the agent being addressed.
-public enum ChatMessage: Codable, Sendable, Equatable {
-    case text(sender: String, content: String, timestamp: Date)
-    case response(sender: String, content: GeneratedContent, timestamp: Date)
-    case toolCall(calls: [ToolCall], timestamp: Date)
-    case assistantToolCall(round: ModelToolRound, timestamp: Date)
-    /// A tool call's result; `failure` says why it failed, when it did.
-    case toolResult(id: String, name: String, output: ToolOutput, failure: ToolFailureKind? = nil, timestamp: Date)
-    /// A turn that failed (model error, rate limit, ...). Journaled so the
-    /// failure stays visible in the transcript after a reload; prompt
-    /// assembly skips it — the model never sees its own turn failures.
-    case failure(error: AgentRuntimeError, timestamp: Date)
-    /// A human-decision request posted into the thread as a display-only
-    /// message (no reasoning turn). Host-agnostic by design: a coordinator
-    /// maps its decision values onto these primitives at the boundary. Prompt
-    /// assembly skips it — the model learns about resolutions through the
-    /// `ask_user` tool result or resume messages, never through these.
-    case decisionRequest(id: String, question: String, options: [ChatDecisionOption], timestamp: Date)
-    /// The outcome of a ``decisionRequest``, posted when the decision is
-    /// resolved. Display-only; skipped by prompt assembly.
-    case decisionResolved(id: String, question: String, resolution: String, comment: String?, timestamp: Date)
-
-    /// The moment the entry was journaled.
-    public var timestamp: Date {
-        switch self {
-        case .text(_, _, let timestamp), .response(_, _, let timestamp), .toolCall(_, let timestamp),
-            .assistantToolCall(_, let timestamp),
-            .toolResult(_, _, _, _, let timestamp), .failure(_, let timestamp),
-            .decisionRequest(_, _, _, let timestamp), .decisionResolved(_, _, _, _, let timestamp):
-            return timestamp
-        }
-    }
-
-    /// Returns a copy of the message with the sender set to the given raw ID.
-    /// Non-text messages are returned unchanged.
-    public func withSender(_ sender: String) -> ChatMessage {
-        switch self {
-        case .text(_, let content, let timestamp):
-            return .text(sender: sender, content: content, timestamp: timestamp)
-        case .response:
-            return self
-        default:
-            return self
-        }
-    }
-}
-
-/// One selectable option of a ``ChatMessage/decisionRequest(id:question:options:timestamp:)``.
-public struct ChatDecisionOption: Codable, Sendable, Equatable, Hashable {
-    public let id: String
-    public let label: String
-
-    public init(id: String, label: String) {
-        self.id = id
-        self.label = label
-    }
-}
-
+/// A tool call the model made, as the agent's history records it.
 public struct ToolCall: Codable, Sendable, Equatable {
     public let id: String
     public let name: String
@@ -156,7 +69,10 @@ public enum ToolFailureKind: String, Codable, Sendable, Equatable {
 public struct ToolResult: Codable, Sendable, Equatable {
     public let toolCallID: String
     public let name: String
+    /// What the call did.
     public let output: ToolOutput
+    /// The page the call landed on: only its address is kept, never what it showed.
+    public let landed: PageAddress?
     public let failureKind: ToolFailureKind?
 
     public var isError: Bool { failureKind != nil }
@@ -165,11 +81,13 @@ public struct ToolResult: Codable, Sendable, Equatable {
         toolCallID: String,
         name: String,
         output: ToolOutput,
+        landed: PageAddress? = nil,
         failureKind: ToolFailureKind? = nil
     ) {
         self.toolCallID = toolCallID
         self.name = name
         self.output = output
+        self.landed = landed
         self.failureKind = failureKind
     }
 
@@ -177,6 +95,7 @@ public struct ToolResult: Codable, Sendable, Equatable {
         case toolCallID = "tool_call_id"
         case name
         case output
+        case landed
         case failureKind = "failure_kind"
     }
 }

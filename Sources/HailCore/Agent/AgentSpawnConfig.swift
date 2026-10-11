@@ -22,20 +22,28 @@ public struct AgentSpawnConfig: Codable, Sendable {
     /// rather than toward sharing.
     public let workspaceID: WorkspaceID
     public let agentDirectoryID: AgentDirectoryID
-    public let resumesInterruptedTurns: Bool
+    public let interruptedTurns: InterruptedTurns
     public let snapshotPolicy: AgentSnapshotPolicy
 
     public init(
         agentID: AgentID,
         workspaceID: WorkspaceID? = nil,
         agentDirectoryID: AgentDirectoryID = "agent-directory",
-        resumesInterruptedTurns: Bool = true,
+        interruptedTurns: InterruptedTurns = .resume,
         snapshotPolicy: AgentSnapshotPolicy = .default
     ) {
         self.agentID = agentID
         self.workspaceID = workspaceID ?? WorkspaceID(agentID.rawValue)
         self.agentDirectoryID = agentDirectoryID
-        self.resumesInterruptedTurns = resumesInterruptedTurns
+        self.interruptedTurns = interruptedTurns
         self.snapshotPolicy = snapshotPolicy
     }
+}
+
+/// What an agent does, on activation, with the turn a crash cut off.
+public enum InterruptedTurns: Codable, Sendable, Equatable {
+    /// Finish it, from its work so far.
+    case resume
+    /// Close it as interrupted, for whoever drives the agent to decide what's next.
+    case close
 }

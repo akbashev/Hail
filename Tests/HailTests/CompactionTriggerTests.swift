@@ -1,6 +1,7 @@
 import AnyLanguageModel
 import HailCore
 import Testing
+import Synchronization
 
 @testable import HailAgentRuntime
 
@@ -63,8 +64,7 @@ struct CompactionFailurePolicyTests {
             context: PromptContext,
             request: PreparedRequest,
             budget: CompactionBudget,
-            measurement: RequestMeasurement?,
-            measure: RequestMeasurer?,
+            measuring: RequestMeasuring,
             assemble: PromptAssembler,
             summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
             contextProjection:
@@ -73,6 +73,27 @@ struct CompactionFailurePolicyTests {
             trigger: ContextCompactionTrigger
         ) async throws(AgentRuntimeError) -> CompactionDecision<Output> {
             throw AgentRuntimeError.modelMisbehavior("summarizer exploded")
+        }
+    }
+
+    /// A compactor that records the triggers it's asked with, and leaves the context as it is.
+    private final class RecordingCompactor: ContextCompactor, Sendable {
+        let triggers = Mutex<[ContextCompactionTrigger]>([])
+
+        func compact<Output: Codable & Sendable & Generable>(
+            context: PromptContext,
+            request: PreparedRequest,
+            budget: CompactionBudget,
+            measuring: RequestMeasuring,
+            assemble: PromptAssembler,
+            summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
+            contextProjection:
+                @Sendable (Output, ContextProjectionBudget) throws(AgentRuntimeError)
+                -> GeneratedContent,
+            trigger: ContextCompactionTrigger
+        ) async throws(AgentRuntimeError) -> CompactionDecision<Output> {
+            triggers.withLock { $0.append(trigger) }
+            return .unchanged
         }
     }
 
@@ -104,12 +125,13 @@ struct CompactionFailurePolicyTests {
         }
     }
 
-    private func message(_ content: String, at offset: TimeInterval) -> ChatMessage {
-        .text(
-            sender: "user",
-            content: content,
-            timestamp: Date(timeIntervalSince1970: offset)
-        )
+    private func history(_ said: [String]) throws -> AgentHistory {
+        try said.enumerated().reduce(AgentHistory()) { history, next in
+            let at = Date(timeIntervalSince1970: TimeInterval(next.offset))
+            return try history
+                .applying(.received(.init(from: .user(id: "u"), content: GeneratedContent(next.element), at: at), turn: TurnID()))
+                .applying(.replied(.init(content: GeneratedContent("ok"), at: at)))
+        }
     }
 
     private func definition() throws -> AgentDefinition {
@@ -125,17 +147,12 @@ struct CompactionFailurePolicyTests {
         PromptAssemblyInstructions(task: "Rules: test.")
     }
 
-    private func turnContext(definition: AgentDefinition) -> TurnContext {
+    private func turnContext(definition: AgentDefinition) throws -> TurnContext {
         let promptContext = PromptContext(
             agentID: agentID,
             definition: definition,
             modelConfiguration: ModelConfiguration(model: try! AgentModel("test/fake")),
-            contextSummary: nil,
-            conversationThread: [
-                message("one", at: 1),
-                message("two", at: 2),
-                message("three", at: 3),
-            ],
+            history: try history(["one", "two", "three"]),
             contextManifest: ContextManifest(items: []),
             instructions: instructions()
         )
@@ -145,10 +162,10 @@ struct CompactionFailurePolicyTests {
             sessionIdentity: SessionIdentity("test-session"),
             modelSession: nil
         )
-        // Above the compactor's 0.7 threshold, so a threshold pass is offered
+        // Above the compactor's 0.8 threshold, so a threshold pass is offered
         // even without a token counter.
         turnContext.latestContextUsage = ContextUsage(
-            usedTokens: 12_000,
+            usedTokens: 14_000,
             limitTokens: 16_384,
             source: .reported
         )
@@ -158,7 +175,8 @@ struct CompactionFailurePolicyTests {
     private func makeLoop(
         definition: AgentDefinition,
         events: EventLog,
-        compactor: any ContextCompactor
+        compactor: any ContextCompactor,
+        reported: ContextUsage? = nil
     ) -> ReasoningLoop<ContinuousClock> {
         ReasoningLoop(
             agentID: agentID,
@@ -168,21 +186,22 @@ struct CompactionFailurePolicyTests {
                     agentID: agentID,
                     definition: definition,
                     modelConfiguration: ModelConfiguration(model: try! AgentModel("test/fake")),
-                    contextSummary: nil,
-                    conversationThread: [],
+                    history: AgentHistory(),
                     contextManifest: ContextManifest(items: []),
                     instructions: PromptAssemblyInstructions(task: "Rules: test.")
                 )
-                return TurnContext(
+                var turnContext = TurnContext(
                     preparedRequest: assembleStandardPrompt(promptContext),
                     promptContext: promptContext,
                     sessionIdentity: SessionIdentity("test-session"),
                     modelSession: nil
                 )
+                turnContext.latestContextUsage = reported
+                return turnContext
             },
             rebuildContext: { $0 },
             endpoint: { _ in StubEndpoint() },
-            tools: { _ in AgentScope() },
+            session: { _ in AgentSession() },
             emit: { event in
                 await events.append(event)
             },
@@ -193,24 +212,36 @@ struct CompactionFailurePolicyTests {
         )
     }
 
+    @Test("after a turn, a context the last request reported past the threshold is offered compaction")
+    func compactsAfterTheTurn() async throws {
+        let compactor = RecordingCompactor()
+        let loop = makeLoop(
+            definition: try definition(), events: EventLog(), compactor: compactor,
+            reported: ContextUsage(usedTokens: 14_000, limitTokens: 16_384, source: .reported))
+
+        await loop.compactAfterTurn()
+
+        #expect(compactor.triggers.withLock { $0 } == [.threshold])
+    }
+
     @Test("a threshold-triggered compaction failure continues the turn un-compacted")
     func thresholdFailureContinuesTurn() async throws {
         let definition = try definition()
         let events = EventLog()
         let loop = makeLoop(definition: definition, events: events, compactor: ThrowingCompactor())
-        let turnContext = turnContext(definition: definition)
+        let turnContext = try turnContext(definition: definition)
 
         let returned = try await loop.compactIfNeeded(
             turnContext: turnContext,
             endpoint: StubEndpoint()
         )
 
-        #expect(returned.promptContext.conversationThread == turnContext.promptContext.conversationThread)
+        #expect(returned.promptContext.history == turnContext.promptContext.history)
         #expect(returned.preparedRequest.entries == turnContext.preparedRequest.entries)
         let recorded = await events.events
         #expect(
             !recorded.contains { event in
-                if case .conversationCompacted = event {
+                if case .history(.compacted) = event {
                     return true
                 }
                 return false
@@ -222,7 +253,7 @@ struct CompactionFailurePolicyTests {
         let definition = try definition()
         let events = EventLog()
         let loop = makeLoop(definition: definition, events: events, compactor: ThrowingCompactor())
-        let turnContext = turnContext(definition: definition)
+        let turnContext = try turnContext(definition: definition)
 
         do {
             _ = try await loop.compactIfNeeded(

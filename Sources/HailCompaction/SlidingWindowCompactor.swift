@@ -2,49 +2,58 @@ import AnyLanguageModel
 import HailAgentRuntime
 import HailCore
 
-/// Selects one safe archive boundary and performs one compaction request.
-/// The model operation itself belongs to the agent loop; this value only owns
-/// the pure transcript-boundary policy and budget checks.
+/// Folds the oldest history into the summary, one compaction request at a time, keeping the most
+/// recent history whole within a share of the window: so an 8K window keeps the last few calls,
+/// and a 256K one a long stretch.
+///
+/// What was said to the agent stays word for word, newest first, within a share of the window of
+/// its own; the work on it — calls, results, answers — is what the summary replaces. The cut can
+/// fall inside the turn being worked on, after a call's result: its input always stays, last.
+///
+/// The model operation itself belongs to the agent loop; this value only owns the policy: which
+/// turns to fold, which inputs to keep, and the budget checks.
 public struct SlidingWindowCompactor: ContextCompactor {
     public var estimator: TokenEstimator
     public var threshold: Double
-    public var keepRecent: Int
+    /// The share of the window the most recent history may take, kept whole.
+    public var keepRecentShare: Double
     public var outputReserve: Int
     public var toolResultReserve: Int
-    /// Multiplier applied to the retained budget when candidate fitting runs
-    /// on the fallback estimator instead of an exact provider counter. The
-    /// estimator undercounts rendered chat templates, so an unmargined
-    /// "fitting" cut can still overflow the real window.
+    /// Multiplier applied to the retained budget when candidate fitting runs on the fallback
+    /// estimator instead of an exact provider counter. The estimator undercounts rendered chat
+    /// templates, so an unmargined "fitting" fold can still overflow the real window.
     public var fittingMargin: Double
-    /// Minimum tokens a cut must leave for the projected summary. Cuts that
-    /// squeeze the summary to nothing are skipped in favor of deeper
-    /// archives; an empty rolling summary would silently drop history.
+    /// Minimum tokens a fold must leave for the projected summary. Folds that squeeze the summary
+    /// to nothing are skipped in favor of deeper ones; an empty summary would drop history.
     public var minimumSummaryBudget: Int
+    /// The share of the window archived inputs may take, word for word, newest first.
+    public var keptInputsShare: Double
 
     public init(
         estimator: TokenEstimator = .init(),
-        threshold: Double = 0.7,
-        keepRecent: Int = 10,
+        threshold: Double = 0.8,
+        keepRecentShare: Double = 0.3,
         outputReserve: Int = 512,
         toolResultReserve: Int = 512,
         fittingMargin: Double = 0.75,
-        minimumSummaryBudget: Int = 256
+        minimumSummaryBudget: Int = 256,
+        keptInputsShare: Double = 0.2
     ) {
         self.estimator = estimator
         self.threshold = threshold
-        self.keepRecent = keepRecent
+        self.keepRecentShare = min(1, max(0, keepRecentShare))
         self.outputReserve = max(0, outputReserve)
         self.toolResultReserve = max(0, toolResultReserve)
         self.fittingMargin = min(1, max(0.1, fittingMargin))
         self.minimumSummaryBudget = max(0, minimumSummaryBudget)
+        self.keptInputsShare = min(1, max(0, keptInputsShare))
     }
 
     public func compact<Output: Codable & Sendable & Generable>(
         context: PromptContext,
         request: PreparedRequest,
         budget: CompactionBudget,
-        measurement: RequestMeasurement? = nil,
-        measure: RequestMeasurer? = nil,
+        measuring: RequestMeasuring = .estimated,
         assemble: PromptAssembler = assembleStandardPrompt,
         summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
         contextProjection: @Sendable (Output, ContextProjectionBudget) throws(AgentRuntimeError) -> GeneratedContent = {
@@ -53,245 +62,202 @@ public struct SlidingWindowCompactor: ContextCompactor {
         trigger: ContextCompactionTrigger
     ) async throws(AgentRuntimeError) -> CompactionDecision<Output> {
         let window = budget.contextWindow
-        let thresholdTrigger = Int(Double(window) * threshold)
-        let used = try await measured(
-            request,
-            provided: measurement,
-            measure: measure
-        )
-        guard trigger == .contextLengthExceeded || used >= thresholdTrigger else {
+        let used = try await currentSize(of: request, measuring: measuring)
+        guard trigger == .contextLengthExceeded || used >= Int(Double(window) * threshold) else {
             return .unchanged
         }
-        // Recovery from a real overflow may always archive down to the
-        // in-flight exchange; a threshold trigger leaves threads no larger
-        // than the preferred tail alone.
-        guard context.conversationThread.count > 1,
-            !request.conversation.isEmpty
-        else {
-            return .unchanged
-        }
-        if trigger == .threshold && context.conversationThread.count <= max(keepRecent, 1) {
-            return .unchanged
-        }
-
+        let history = context.history
         let outputBudget = budget.outputReserve(maximum: outputReserve)
-        let retainedBudget = max(1, window - outputBudget - toolResultReserve)
-        // Fitting decisions trust the measurement source. A provider counter
-        // is exact; the fallback estimator counts Hail's serialization, which
-        // provider chat templates render larger (observed ~30% on
-        // tool-result-heavy contexts). Margin the budget for estimator
-        // fitting so a "fitting" cut also fits in reality.
-        let effectiveRetainedBudget =
-            measure == nil
-            ? max(minimumSummaryBudget + 1, Int(Double(retainedBudget) * fittingMargin))
-            : retainedBudget
-        let preferred = Self.validCuts(
-            in: context.conversationThread,
-            maximum: context.conversationThread.count - max(keepRecent, 1),
-            assistantSender: context.agentID.rawValue
-        )
-        let fallback = Self.validCuts(
-            in: context.conversationThread,
-            maximum: context.conversationThread.count - 1,
-            assistantSender: context.agentID.rawValue
-        )
-        let cuts = Self.compactionCuts(preferred: preferred, fallback: fallback)
+        let retained = retainedBudget(window: window, outputBudget: outputBudget, measuring: measuring)
+        let inputBudget = Int(Double(window) * keptInputsShare)
+        let recentBudget = Int(Double(window) * keepRecentShare)
 
-        // Boundary selection is deliberately completed before generation. It
-        // ensures the following call is the only compaction model request.
-        // We iterate smallest-archive-first so the maximal keepRecent tail is
-        // kept verbatim; we escalate to larger cuts when a candidate leaves
-        // too little summary room or would not fit. A cut that keeps every
-        // recent message is a preference, never a wall: recovery from a real
-        // overflow must always be able to archive deeper.
-        var selected: (count: Int, entries: [Transcript.Entry], summaryBudget: Int)?
-        var lastResort: (count: Int, entries: [Transcript.Entry], summaryBudget: Int)?
-        for count in cuts {
-            let keptRequest = Self.keptRequest(
-                context: context,
-                cut: count,
-                assemble: assemble,
-                originalRequest: request
-            )
-            let keptCost = try await measured(keptRequest, provided: nil, measure: measure)
-            guard keptCost <= effectiveRetainedBudget else { continue }
-            let summaryRoom = effectiveRetainedBudget - keptCost
-            let summaryBudget = min(outputBudget, summaryRoom)
-            let entries = SummaryPrompt.entries(
-                priorSummary: context.contextSummary,
-                archived: Array(context.conversationThread.prefix(count)),
-                agentID: context.agentID,
-                task: CompactionTask.instructions(for: Output.self),
-                outputBudget: summaryBudget
-            )
-            // The summary room is a preference among fitting cuts, never a
-            // dead end: a deeper cut with real room always wins, but the
-            // shallowest fitting cut remains the last resort.
-            if summaryRoom >= minimumSummaryBudget {
-                selected = (count, entries, summaryBudget)
-                break
-            }
-            if lastResort == nil {
-                lastResort = (count, entries, summaryBudget)
-            }
+        // The shallowest fold that fits with room for the summary wins; the shallowest that only
+        // fits is the last resort. Choosing is done before the one compaction model request.
+        var selection = Selection.searching(lastResort: nil)
+        for through in cuts(history, keeping: recentBudget, trigger: trigger) {
+            if case .chosen = selection { break }
+            let kept = try keptInputs(history, through: through, budget: inputBudget)
+            let fold = try Self.fold(history, through: through, kept: kept)
+            let cost = try await candidateSize(
+                of: assemble(context.with(history: fold.summarized(by: .unwritten)))
+                    .adding(context: request.context, tools: request.tools),
+                measuring: measuring)
+            selection = selection.considering(
+                Candidate(through: through, kept: kept, fold: fold, cost: cost),
+                retained: retained, minimumSummary: minimumSummaryBudget)
         }
-
-        guard let choice = selected ?? lastResort else {
-            if trigger == .contextLengthExceeded {
-                throw AgentRuntimeError.contextLengthExceeded
-            }
+        guard let candidate = selection.choice else {
+            if trigger == .contextLengthExceeded { throw AgentRuntimeError.contextLengthExceeded }
             return .unchanged
         }
 
+        let summaryBudget = candidate.summaryBudget(retained: retained, outputBudget: outputBudget)
         let output = try await summarize(
             CompactionSummaryRequest(
-                entries: choice.entries,
-                maxOutputTokens: max(1, choice.summaryBudget)
-            )
-        )
-        let projectionBudget = ContextProjectionBudget(
-            availableTokens: choice.summaryBudget,
-            outputReserve: choice.summaryBudget
-        )
-        let contextValue = try contextProjection(output, projectionBudget)
-        let candidate = Self.compactedContext(
-            context,
-            summary: contextValue,
-            archivedCount: choice.count
-        )
-        let candidateRequest = assemble(candidate)
-            .appending(suffix: request.suffix, tools: request.tools)
-        let candidateCost = try await measured(
-            candidateRequest,
-            provided: nil,
-            measure: measure
-        )
-        guard candidateCost <= effectiveRetainedBudget else {
-            // The rebuilt request still does not fit the retained budget. A
-            // threshold decision may stay with the current context; a
-            // provider-reported overflow has nothing left to retry and must
-            // propagate the typed failure.
-            if trigger == .contextLengthExceeded {
-                throw AgentRuntimeError.contextLengthExceeded
-            }
+                entries: SummaryPrompt.entries(
+                    priorSummary: history.earlier?.summary,
+                    fold: candidate.fold,
+                    task: CompactionTask.instructions(for: Output.self),
+                    outputBudget: summaryBudget),
+                maxOutputTokens: max(1, summaryBudget)))
+        let contextValue = try contextProjection(
+            output, ContextProjectionBudget(availableTokens: summaryBudget, outputReserve: summaryBudget))
+        let compacted = candidate.fold.summarized(
+            by: AgentHistory.Summary(context: contextValue, report: output.generatedContent))
+        let compactedSize = try await candidateSize(
+            of: assemble(context.with(history: compacted)).adding(context: request.context, tools: request.tools),
+            measuring: measuring)
+        guard compactedSize <= retained else {
+            // The rebuilt request still doesn't fit. A threshold decision may stay with the
+            // current context; a provider-reported overflow has nothing left to retry.
+            if trigger == .contextLengthExceeded { throw AgentRuntimeError.contextLengthExceeded }
             return .unchanged
         }
-
         return .compacted(
-            CompactionResult(
-                output: output,
-                context: contextValue,
-                archivedCount: choice.count
+            CompactionResult(output: output, context: contextValue, through: candidate.through, kept: candidate.kept))
+    }
+
+    /// Where to cut, in the order to try them: first the shallowest cut that keeps what comes
+    /// after it within `budget` — the closed turns, oldest folded first, then the open turn's
+    /// work, a call and its result at a time — then deeper ones, keeping less, since keeping recent
+    /// history is a preference, never a wall. Past the threshold, a history that fits `budget`
+    /// whole is left as it is.
+    func cuts(_ history: AgentHistory, keeping budget: Int, trigger: ContextCompactionTrigger) -> [AgentHistory.Cut] {
+        let work = history.open?.steps ?? []
+        let workCost = work.map(cost)
+        // After each closed turn, oldest first: what's kept is the later turns and all the work.
+        let afterTurns = history.closed.indices.map { index in
+            (
+                cut: AgentHistory.Cut.after(history.closed[index].id),
+                kept: history.closed[(index + 1)...].map(cost).reduce(0, +) + workCost.reduce(0, +)
             )
-        )
-    }
-
-    private static func keptRequest(
-        context: PromptContext,
-        cut: Int,
-        assemble: PromptAssembler,
-        originalRequest: PreparedRequest
-    ) -> PreparedRequest {
-        let kept = Array(context.conversationThread.dropFirst(cut))
-        let keptContext = PromptContext(
-            agentID: context.agentID,
-            definition: context.definition,
-            modelConfiguration: context.modelConfiguration,
-            contextSummary: nil,  // summary cost is added separately as outputBudget
-            conversationThread: kept,
-            contextManifest: context.contextManifest,
-            instructions: context.instructions
-        )
-        return assemble(keptContext)
-            .appending(suffix: originalRequest.suffix, tools: originalRequest.tools)
-    }
-
-    private func measured(
-        _ request: PreparedRequest,
-        provided: RequestMeasurement?,
-        measure: RequestMeasurer?
-    ) async throws(AgentRuntimeError) -> Int {
-        if let provided { return provided.tokenCount }
-        if let measure { return try await measure(request).tokenCount }
-        return try await estimator.estimate(messages: request.entries, tools: request.tools)
-    }
-
-    private static func compactionCuts(preferred: [Int], fallback: [Int]) -> [Int] {
-        let preferredCut = preferred.last(where: { $0 > 0 })
-        let additional = fallback.filter { $0 > (preferredCut ?? 0) }
-        return preferredCut.map { [$0] + additional } ?? additional
-    }
-
-    private static func compactedContext(
-        _ context: PromptContext,
-        summary: GeneratedContent,
-        archivedCount: Int
-    ) -> PromptContext {
-        PromptContext(
-            agentID: context.agentID,
-            definition: context.definition,
-            modelConfiguration: context.modelConfiguration,
-            contextSummary: summary,
-            conversationThread: Array(context.conversationThread.dropFirst(archivedCount)),
-            contextManifest: context.contextManifest,
-            instructions: context.instructions
-        )
-    }
-
-    private static func validCuts(
-        in thread: [ChatMessage],
-        maximum: Int,
-        assistantSender: String
-    ) -> [Int] {
-        let groups = interactionBounds(in: thread, assistantSender: assistantSender)
-        return (0...max(0, maximum)).filter { cut in
-            groups.allSatisfy { !($0.first < cut && $0.last >= cut) }
         }
-    }
-
-    private static func interactionBounds(
-        in messages: [ChatMessage],
-        assistantSender: String
-    ) -> [(first: Int, last: Int)] {
-        var groups: [(first: Int, last: Int)] = []
-        var pending: [String: [Int]] = [:]
-
-        for (index, message) in messages.enumerated() {
-            switch message {
-            case .toolCall(let calls, _):
-                let first: Int =
-                    if index > 0,
-                        case .text(let sender, _, _) = messages[index - 1], sender == assistantSender
-                    { index - 1 } else { index }
-                let group = groups.count
-                groups.append((first, index))
-                for call in calls { pending[call.id, default: []].append(group) }
-
-            case .assistantToolCall(let round, _):
-                let group = groups.count
-                groups.append((index, index))
-                for call in round.calls { pending[call.id, default: []].append(group) }
-
-            case .toolResult(let id, _, _, _, _):
-                if var occurrences = pending[id], !occurrences.isEmpty {
-                    let group = occurrences.removeFirst()
-                    pending[id] = occurrences
-                    groups[group].last = max(groups[group].last, index)
-                } else {
-                    groups.append((index, index))
+        // Inside the open turn, after each result: what's kept is the work after it.
+        let insideWork: [(cut: AgentHistory.Cut, kept: Int)] =
+            history.open.map { open in
+                work.indices.compactMap { index in
+                    guard case .resulted = work[index] else { return nil }
+                    return (.within(open.id, steps: index + 1), workCost[(index + 1)...].reduce(0, +))
                 }
+            } ?? []
+        let all = afterTurns + insideWork
+        let whole = history.closed.map(cost).reduce(0, +) + workCost.reduce(0, +)
+        if trigger == .threshold, whole <= budget { return [] }
+        let first = all.firstIndex { $0.kept <= budget } ?? all.indices.last ?? 0
+        return all.isEmpty ? [] : all[first...].map(\.cut)
+    }
 
-            default:
-                break
+    /// What a closed turn takes in a request: what was said, the answer, and the results that
+    /// landed on pages, which earlier turns keep.
+    private func cost(_ turn: AgentHistory.ClosedTurn) -> Int {
+        let answer: Int =
+            switch turn.outcome {
+            case .replied(let reply): estimator.estimate(Self.text(of: reply.content))
+            case .failed, .cancelled, .interrupted: 0
             }
+        let landed = turn.steps.map { step in
+            if case .resulted(let result, _) = step, result.landed != nil { cost(step) } else { 0 }
         }
+        return estimator.estimate(Self.text(of: turn.input.content)) + answer + landed.reduce(0, +)
+    }
 
-        return groups.sorted { $0.first < $1.first }.reduce(into: []) { result, group in
-            if let index = result.indices.last, group.first <= result[index].last {
-                result[index].last = max(result[index].last, group.last)
-            } else {
-                result.append(group)
-            }
+    /// What one step of work takes in a request: a call with its arguments, or a result.
+    private func cost(_ step: AgentHistory.Step) -> Int {
+        switch step {
+        case .called(let call, _): estimator.estimate(call.name + call.arguments.jsonString)
+        case .resulted(let result, _): estimator.estimate(result.output.textRepresentation)
+        }
+    }
+
+    /// The earlier inputs that stay word for word after folding through `through`: the newest
+    /// that fit `budget`.
+    private func keptInputs(
+        _ history: AgentHistory, through: AgentHistory.Cut, budget: Int
+    ) throws(AgentRuntimeError) -> AgentHistory.KeptInputs {
+        let inputs = try Self.fold(history, through: through, kept: .all).kept
+        let newestFirst = inputs.reversed().map { (turn: $0.turn, cost: estimator.estimate(Self.text(of: $0.input.content))) }
+        let totals = newestFirst.reduce(into: [Int]()) { $0.append(($0.last ?? 0) + $1.cost) }
+        let fitting = totals.prefix { $0 <= budget }.count
+        switch fitting {
+        case 0: return .none
+        case inputs.count: return .all
+        default: return .from(newestFirst[fitting - 1].turn)
+        }
+    }
+
+    /// A fold of a turn the history has: one it doesn't is the compactor's own bug.
+    private static func fold(
+        _ history: AgentHistory, through: AgentHistory.Cut, kept: AgentHistory.KeptInputs
+    ) throws(AgentRuntimeError) -> AgentHistory.Fold {
+        do {
+            return try history.folding(through: through, kept: kept)
+        } catch {
+            throw .invalidHistory(error)
+        }
+    }
+
+    private static func text(of content: GeneratedContent) -> String {
+        if case .string(let text) = content.kind { return text }
+        return content.jsonString
+    }
+
+    /// The tokens a compacted request may take. The estimator undercounts rendered chat
+    /// templates, so with it the budget is margined.
+    private func retainedBudget(window: Int, outputBudget: Int, measuring: RequestMeasuring) -> Int {
+        let retained = max(1, window - outputBudget - toolResultReserve)
+        switch measuring {
+        case .counted: return retained
+        case .reportedFloor, .estimated: return max(minimumSummaryBudget + 1, Int(Double(retained) * fittingMargin))
+        }
+    }
+
+    private func currentSize(of request: PreparedRequest, measuring: RequestMeasuring) async throws(AgentRuntimeError) -> Int {
+        switch measuring {
+        case .counted(let current, _), .reportedFloor(let current): current.tokenCount
+        case .estimated: try await estimator.estimate(messages: request.entries, tools: request.tools)
+        }
+    }
+
+    private func candidateSize(of request: PreparedRequest, measuring: RequestMeasuring) async throws(AgentRuntimeError) -> Int {
+        switch measuring {
+        case .counted(_, let count): try await count(request).tokenCount
+        case .reportedFloor, .estimated: try await estimator.estimate(messages: request.entries, tools: request.tools)
+        }
+    }
+}
+
+/// One way to compact: fold the work through a turn, keep these earlier inputs; `cost` is what
+/// stays, with the summary still unwritten.
+struct Candidate {
+    let through: AgentHistory.Cut
+    let kept: AgentHistory.KeptInputs
+    let fold: AgentHistory.Fold
+    let cost: Int
+
+    func summaryBudget(retained: Int, outputBudget: Int) -> Int {
+        min(outputBudget, retained - cost)
+    }
+}
+
+/// Choosing a candidate, shallowest first.
+enum Selection {
+    /// Still looking; a candidate that fits, with too little room for the summary, is the last
+    /// resort.
+    case searching(lastResort: Candidate?)
+    /// One that fits with room for the summary.
+    case chosen(Candidate)
+
+    func considering(_ candidate: Candidate, retained: Int, minimumSummary: Int) -> Selection {
+        guard case .searching(let lastResort) = self, candidate.cost <= retained else { return self }
+        if retained - candidate.cost >= minimumSummary { return .chosen(candidate) }
+        return .searching(lastResort: lastResort ?? candidate)
+    }
+
+    var choice: Candidate? {
+        switch self {
+        case .searching(let lastResort): lastResort
+        case .chosen(let candidate): candidate
         }
     }
 }

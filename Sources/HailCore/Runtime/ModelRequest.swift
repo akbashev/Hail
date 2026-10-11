@@ -104,16 +104,6 @@ public struct ModelRequestRecord: Codable, Sendable, Equatable {
 
 }
 
-/// Coarse durable phase exposed to operators. Detailed streamed narration is
-/// still delivered through ``AgentActivity``.
-public enum AgentPhase: String, Codable, Sendable, Equatable {
-    case idle
-    case generating
-    case compacting
-    case executingTool
-    case failed
-}
-
 /// Public lifecycle state for diagnostics. Provider telemetry is kept outside
 /// this value because it may legitimately be unavailable.
 public enum AgentRuntimeState: String, Codable, Sendable, Equatable {
@@ -149,7 +139,7 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
     public let contextUsage: ContextUsage?
     public let usageSummary: AgentUsageSummary
     public let recentModelRequestCount: Int
-    public let conversationMessageCount: Int
+    public let historyTurnCount: Int
     public let hasContextSummary: Bool
 
     public init(
@@ -158,7 +148,7 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
         contextUsage: ContextUsage? = nil,
         usageSummary: AgentUsageSummary = .init(),
         recentModelRequestCount: Int = 0,
-        conversationMessageCount: Int = 0,
+        historyTurnCount: Int = 0,
         hasContextSummary: Bool = false
     ) {
         self.agentID = agentID
@@ -166,29 +156,30 @@ public struct AgentContextSnapshot: Codable, Sendable, Equatable {
         self.contextUsage = contextUsage
         self.usageSummary = usageSummary
         self.recentModelRequestCount = recentModelRequestCount
-        self.conversationMessageCount = conversationMessageCount
+        self.historyTurnCount = historyTurnCount
         self.hasContextSummary = hasContextSummary
     }
 }
 
-public enum TurnHistoryOutcome: Codable, Sendable, Equatable {
+public enum TurnJournalOutcome: Codable, Sendable, Equatable {
     case running
     case completed
     case failed(AgentRuntimeError)
+    case cancelled
     case interrupted
 }
 
-public struct TurnHistoryRecord: Codable, Sendable, Equatable {
-    public var id: TurnID?
-    public let startedAt: Date?
+public struct TurnJournalRecord: Codable, Sendable, Equatable {
+    public let id: TurnID
+    public let startedAt: Date
     public var completedAt: Date?
-    public var outcome: TurnHistoryOutcome
+    public var outcome: TurnJournalOutcome
 
     public init(
-        id: TurnID? = nil,
-        startedAt: Date? = nil,
+        id: TurnID,
+        startedAt: Date,
         completedAt: Date? = nil,
-        outcome: TurnHistoryOutcome = .running
+        outcome: TurnJournalOutcome = .running
     ) {
         self.id = id
         self.startedAt = startedAt
@@ -197,7 +188,7 @@ public struct TurnHistoryRecord: Codable, Sendable, Equatable {
     }
 }
 
-public struct ToolHistoryRecord: Codable, Sendable, Equatable {
+public struct ToolJournalRecord: Codable, Sendable, Equatable {
     public let call: ToolCall
     public let startedAt: Date?
     public var result: ToolResult?
@@ -216,17 +207,18 @@ public struct ToolHistoryRecord: Codable, Sendable, Equatable {
     }
 }
 
-public struct CompactionHistoryRecord: Codable, Sendable, Equatable {
-    public let archivedCount: Int
+public struct CompactionJournalRecord: Codable, Sendable, Equatable {
+    /// The last turn whose work the summary covers.
+    public let through: AgentHistory.Cut
     public let summary: GeneratedContent
 
-    public init(archivedCount: Int, summary: GeneratedContent) {
-        self.archivedCount = archivedCount
+    public init(through: AgentHistory.Cut, summary: GeneratedContent) {
+        self.through = through
         self.summary = summary
     }
 }
 
-public struct FailureHistoryRecord: Codable, Sendable, Equatable {
+public struct FailureJournalRecord: Codable, Sendable, Equatable {
     public let error: AgentRuntimeError
     public let at: Date
 
@@ -236,15 +228,15 @@ public struct FailureHistoryRecord: Codable, Sendable, Equatable {
     }
 }
 
-/// Projects durable request history from journal events. Hosts that read the
+/// Projects durable request records from journal events. Hosts that read the
 /// event journal can feed events incrementally; the distributed ``Agent`` also
 /// exposes the same recent records through its state-backed properties.
-public struct AgentHistoryReader: Sendable, Equatable {
-    public private(set) var turns: [TurnHistoryRecord] = []
+public struct AgentJournalReader: Sendable, Equatable {
+    public private(set) var turns: [TurnJournalRecord] = []
     public private(set) var modelRequests: [ModelRequestRecord] = []
-    public private(set) var tools: [ToolHistoryRecord] = []
-    public private(set) var compactions: [CompactionHistoryRecord] = []
-    public private(set) var failures: [FailureHistoryRecord] = []
+    public private(set) var tools: [ToolJournalRecord] = []
+    public private(set) var compactions: [CompactionJournalRecord] = []
+    public private(set) var failures: [FailureJournalRecord] = []
     public private(set) var usageSummary: AgentUsageSummary = .init()
     public private(set) var latestContextUsage: ContextUsage?
 
@@ -260,18 +252,25 @@ public struct AgentHistoryReader: Sendable, Equatable {
 
     public mutating func apply(_ event: AgentEvent) {
         switch event {
-        case .turnStarted(let at):
-            turns.append(TurnHistoryRecord(startedAt: at))
-        case .turnIdentified(let id):
-            guard !turns.isEmpty else { return }
-            turns[turns.index(before: turns.endIndex)].id = id
-        case .turnCompleted(let at):
-            guard !turns.isEmpty else { return }
-            let index = turns.index(before: turns.endIndex)
-            turns[index].completedAt = at
-            if case .running = turns[index].outcome {
-                turns[index].outcome = .completed
-            }
+        case .history(.received(let input, let turn)):
+            turns.append(TurnJournalRecord(id: turn, startedAt: input.at))
+        case .history(.called(let call, let at)):
+            tools.append(ToolJournalRecord(call: call, startedAt: at))
+        case .history(.resulted(let result, let at)):
+            guard let index = tools.lastIndex(where: { $0.call.id == result.toolCallID }) else { return }
+            tools[index].result = result
+            tools[index].completedAt = at
+        case .history(.replied(let reply)):
+            closeLastTurn(at: reply.at, as: .completed)
+        case .history(.failed(let failure)):
+            failures.append(FailureJournalRecord(error: failure.error, at: failure.at))
+            closeLastTurn(at: failure.at, as: .failed(failure.error))
+        case .history(.cancelled(let at)):
+            closeLastTurn(at: at, as: .cancelled)
+        case .history(.interrupted(let at)):
+            closeLastTurn(at: at, as: .interrupted)
+        case .history(.compacted(let summary, let through, _)):
+            compactions.append(CompactionJournalRecord(through: through, summary: summary.context))
         case .modelRequestStarted(let record):
             modelRequests.append(record)
         case .modelRequestCompleted(let id, let usage, let durationMilliseconds, let at):
@@ -285,23 +284,6 @@ public struct AgentHistoryReader: Sendable, Equatable {
             modelRequests[index].completedAt = at
             modelRequests[index].durationMilliseconds = durationMilliseconds
             modelRequests[index].outcome = .failed(error)
-        case .assistantToolRound(let round, let at):
-            tools.append(contentsOf: round.calls.map { ToolHistoryRecord(call: $0, startedAt: at) })
-        case .toolResult(let result, let at):
-            guard let index = tools.lastIndex(where: { $0.call.id == result.toolCallID }) else { return }
-            tools[index].result = result
-            tools[index].completedAt = at
-        case .conversationCompacted(let archivedCount, let summary, _):
-            compactions.append(
-                CompactionHistoryRecord(archivedCount: archivedCount, summary: summary)
-            )
-        case .turnFailed(let error, let at):
-            failures.append(FailureHistoryRecord(error: error, at: at))
-            if !turns.isEmpty {
-                let index = turns.index(before: turns.endIndex)
-                turns[index].completedAt = at
-                turns[index].outcome = .failed(error)
-            }
         case .modelUsage(let usage, _):
             usageSummary.record(usage)
         case .contextUsage(let usage, _):
@@ -309,6 +291,12 @@ public struct AgentHistoryReader: Sendable, Equatable {
         default:
             break
         }
+    }
+
+    private mutating func closeLastTurn(at date: Date, as outcome: TurnJournalOutcome) {
+        guard let index = turns.indices.last else { return }
+        turns[index].completedAt = date
+        turns[index].outcome = outcome
     }
 
     /// Finalizes a journal projection loaded after a process restart. Events
@@ -333,7 +321,7 @@ public struct AgentHistoryReader: Sendable, Equatable {
         normalizeAfterReplay()
     }
 
-    public static func project(_ events: [AgentEvent]) -> AgentHistoryReader {
-        AgentHistoryReader(events: events)
+    public static func project(_ events: [AgentEvent]) -> AgentJournalReader {
+        AgentJournalReader(events: events)
     }
 }

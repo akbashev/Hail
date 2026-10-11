@@ -18,6 +18,8 @@ public enum AgentRuntimeError: Error, Sendable, Equatable, Codable {
     case toolFailed(name: String, reason: String)
     case cancelled
     case sandboxViolation(String)
+    /// An event the agent's history can't take: a bug in whoever made it.
+    case invalidHistory(AgentHistory.InvalidEvent)
 }
 
 public struct AgentWorkerReference: Sendable {
@@ -33,7 +35,8 @@ public struct AgentWorkerReference: Sendable {
 public enum AgentRunEvent<Output>: Codable, Sendable
 where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
     case runStarted(agentID: AgentID, at: Date)
-    case messageHandled(message: ChatMessage, at: Date)
+    /// The input the run answers was received.
+    case received(AgentHistory.Input, at: Date)
     /// A cumulative structured snapshot produced while the model is still
     /// generating. Consumers should replace their current preview with this
     /// value; the final typed result arrives separately as

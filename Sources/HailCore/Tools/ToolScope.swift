@@ -139,7 +139,7 @@ func withScope<Call: Sendable, Result>(
 extension Tool where Call == Never {
     /// Runs it with its effect already authorized, and no model to work with: a tool that offers
     /// nothing in its scope has just its result.
-    public func runOutput(input: Input, token: borrowing EffectToken<Effect>) async throws -> Page {
+    public func runOutput(input: Input, token: borrowing EffectToken<Effect>) async throws -> CallReturn {
         let channel = ScopeChannel<Never>(origin: .direct(ToolCall(id: UUID().uuidString, name: name, arguments: input.generatedContent)))
         await channel.end()
         let scope = ToolScope(channel)
@@ -152,11 +152,10 @@ extension Tool where Call == Never {
 /// A tool call running in its scope, held by the scope it was called from. Ending it is how the
 /// call ends: with its result, or cancelled if it's left first. Dropped, it's cancelled.
 struct Scope: ~Copyable, Sendable {
-    /// The call that opened it, and its turn.
-    let origin: Origin
-    /// Its calls whose results are its pages, oldest first: the call that opened it, then the
-    /// calls answered inside it.
-    var pages: [String]
+    /// The call that opened it, and its turn: none for a tab restored from the agent's history.
+    let origin: Origin?
+    /// The page it shows, for a call that landed on one: its tab, opened again whenever it's shown.
+    var address: PageAddress?
     /// The call still working in it; nil once the call has its result.
     let running: RunningCall?
     /// The tools the working call offers.
@@ -248,11 +247,12 @@ struct RunningCall: Sendable {
     }
 
     /// Its result with no model to answer it: the first page it shows, or its result.
-    func resultWithoutModel() async throws -> Page {
+    func resultWithoutModel() async throws -> CallReturn {
         let event = await answer()
         await end()
         switch event {
-        case .shown(let page, _), .finished(let page): return page
+        case .shown(let page, _): return CallReturn(page)
+        case .finished(let returned): return returned
         case .failed(let error), .ended(let error): throw error
         }
     }
@@ -266,12 +266,12 @@ func call<T: Tool>(_ tool: T, _ input: T.Input, authority: any Authority, origin
     let channel = ScopeChannel<T.Call>(origin: origin)
     let task = Task {
         do {
-            let page = try await withScope(channel) { scope in
+            let returned = try await withScope(channel) { scope in
                 try await withEffect(effect, authority: authority) { token in
                     try await tool.run(input, in: scope, token: token)
                 }
             }
-            await channel.finish(.finished(page))
+            await channel.finish(.finished(returned))
         } catch {
             await channel.finish(.ended(error))
         }
@@ -289,7 +289,7 @@ enum ScopeAnswer: Sendable {
     /// The call it answered failed; the scope is open as it was.
     case failed(any Error)
     /// The call's result: the scope has ended.
-    case finished(Page)
+    case finished(CallReturn)
     /// The scope ended with an error, or was cancelled.
     case ended(any Error)
 }

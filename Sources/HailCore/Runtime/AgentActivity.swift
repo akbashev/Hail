@@ -55,15 +55,10 @@ public enum AgentActivity: Codable, Sendable, Equatable {
 
     /// A turn unfolding (see ``Turn``).
     case turn(Turn, at: Date)
-    /// A display-only message journaled into the conversation thread via
-    /// ``Agent/post(_:)`` (e.g. a supervisor decision request). Unlike turn
-    /// activity this one mirrors a durable journal entry, so live and
-    /// reloaded transcripts match. Display posts start no turn.
-    case message(ChatMessage, at: Date)
 
     public var timestamp: Date {
         switch self {
-        case .turn(_, let at), .message(_, let at):
+        case .turn(_, let at):
             return at
         }
     }
@@ -72,7 +67,7 @@ public enum AgentActivity: Codable, Sendable, Equatable {
         switch self {
         case .turn(.progress(.status(let message)), _):
             return message
-        case .turn, .message:
+        case .turn:
             return nil
         }
     }

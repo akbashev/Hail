@@ -7,55 +7,40 @@ import HailCore
     import Foundation
 #endif
 
-/// Maps Hail's transcript entries to an AnyLanguageModel `Transcript`
-/// plus the final `Prompt` that should be sent to `LanguageModelSession.respond(to:)`.
+/// Maps Hail's transcript entries to what an AnyLanguageModel request is made of: the
+/// instructions, the history before the prompt, and the prompt the request answers. A request
+/// always answers a prompt: tool calls and their outputs happen inside it, never between
+/// requests.
 enum TranscriptMapping {
-    /// Returns a transcript seeded with the conversation history and the prompt
-    /// that should be passed to the model. If the last message is a user message,
-    /// it becomes the prompt; otherwise an empty prompt is used and the history
-    /// is left in the transcript.
-    static func transcriptAndPrompt(
-        from entries: [Transcript.Entry]
-    ) throws -> (transcript: Transcript, prompt: Prompt) {
-        var transcriptEntries: [Transcript.Entry] = []
-        var systemSegments: [Transcript.Segment] = []
-
-        for entry in entries {
-            switch entry {
-            case .instructions(let instructions):
-                systemSegments.append(contentsOf: instructions.segments)
-            case .prompt, .response, .toolCalls, .toolOutput, .reasoning:
-                flushSystemSegments(into: &transcriptEntries, segments: &systemSegments)
-                transcriptEntries.append(entry)
-            }
-        }
-
-        flushSystemSegments(into: &transcriptEntries, segments: &systemSegments)
-
-        // If the last message was from the user, use it as the active prompt and
-        // remove it from the transcript (respond(to:) will append it again).
-        if let last = transcriptEntries.last, case .prompt(let lastPrompt) = last {
-            transcriptEntries.removeLast()
-            return (
-                Transcript(entries: transcriptEntries),
-                Prompt(lastPrompt.segments.map(\.description).joined(separator: "\n"))
-            )
-        }
-
-        return (Transcript(entries: transcriptEntries), Prompt(""))
+    struct Request {
+        let instructions: Instructions?
+        let history: [Transcript.Entry]
+        let prompt: Prompt
     }
 
-    private static func flushSystemSegments(
-        into entries: inout [Transcript.Entry],
-        segments: inout [Transcript.Segment],
-    ) {
-        guard !segments.isEmpty else { return }
-        entries.append(
-            .instructions(
-                Transcript.Instructions(
-                    segments: segments,
-                    toolDefinitions: []
-                )))
-        segments.removeAll(keepingCapacity: true)
+    /// The request ends with something other than a prompt to answer.
+    struct NoPrompt: Error, CustomStringConvertible {
+        var description: String { "The request has no prompt to answer: its transcript ends with something else." }
+    }
+
+    static func request(from entries: [Transcript.Entry]) throws -> Request {
+        var instructions: [Transcript.Segment] = []
+        var history: [Transcript.Entry] = []
+        for entry in entries {
+            switch entry {
+            case .instructions(let entryInstructions):
+                instructions.append(contentsOf: entryInstructions.segments)
+            case .prompt, .response, .toolCalls, .toolOutput, .reasoning:
+                history.append(entry)
+            }
+        }
+        guard case .prompt(let last)? = history.last else { throw NoPrompt() }
+        history.removeLast()
+        return Request(
+            instructions: instructions.isEmpty
+                ? nil : Instructions(instructions.map(\.description).joined(separator: "\n")),
+            history: history,
+            prompt: Prompt(last.segments.map(\.description).joined(separator: "\n"))
+        )
     }
 }

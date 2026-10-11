@@ -12,12 +12,60 @@ import ScopedEffect
 
 // MARK: - Turn event projection
 
-/// The only two valid outcomes of one successful model request. Tool calls
-/// are work for the next transition; a generated value completes the turn.
-/// An empty stream and undecodable text are errors, not extra enum cases.
-private enum ModelRoundOutcome<Output> {
-    case completed(Output)
-    case requiresTools(ModelToolRound)
+/// How a turn's request ended: with the generated value, or overflowing the model's context. An
+/// overflow is recovered by compacting and asking again: compaction keeps every input and folds
+/// the rest, the turn's calls so far included, into the summary, so the new request ends with the
+/// input it answers.
+private enum TurnRequestOutcome<Output> {
+    case generated(Output)
+    case overflowed(TurnCalls)
+}
+
+/// A model request's value, before and after the model generates it.
+enum Generation<Output: Sendable>: Sendable {
+    case pending
+    case generated(Output)
+}
+
+/// A turn's request as its events come: the turn's tool calls so far, and the value once
+/// generated.
+struct TurnProgress<Output: Sendable>: Sendable {
+    let calls: TurnCalls
+    let generation: Generation<Output>
+}
+
+/// The tool calls a turn made, as its limits count them: how many, against the turn's maximum,
+/// and the failure the model last repeated. Each step either goes on or ends the turn with why.
+struct TurnCalls: Sendable, Equatable {
+    let limit: Int
+    let count: Int
+    let failures: ToolFailureTracker
+
+    init(limit: Int, count: Int = 0, failures: ToolFailureTracker = ToolFailureTracker()) {
+        self.limit = limit
+        self.count = count
+        self.failures = failures
+    }
+
+    /// The model calls a tool; excess work is rejected before it's journaled or run.
+    func calling() throws(AgentRuntimeError) -> TurnCalls {
+        guard count < limit else {
+            throw .modelMisbehavior("Model exceeded the maximum of \(limit) tool calls in a single turn.")
+        }
+        return TurnCalls(limit: limit, count: count + 1, failures: failures)
+    }
+
+    /// A call's result; the same deterministic failure twice in a row is a loop, not recovery.
+    func resulted(_ result: ToolResult) throws(AgentRuntimeError) -> TurnCalls {
+        switch failures.recording(results: [result]) {
+        case .tracking(let tracker):
+            return TurnCalls(limit: limit, count: count, failures: tracker)
+        case .repeated:
+            throw .toolFailed(
+                name: result.name,
+                reason: "The model repeated the same failed tool call twice. \(result.output.textRepresentation)")
+        }
+    }
 }
 
 /// A compact description of deterministic failures produced by one tool
@@ -61,92 +109,19 @@ struct ToolFailureTracker: Sendable, Equatable {
     private(set) var lastFailure: ToolFailureSignature?
     private(set) var repetitions = 0
 
-    func recording(results: [ToolResult]) -> (tracker: Self, repeated: Bool) {
+    /// What recording results comes to: still tracking, or a failure repeated too often.
+    enum Recorded: Equatable {
+        case tracking(ToolFailureTracker)
+        case repeated(ToolFailureSignature)
+    }
+
+    func recording(results: [ToolResult]) -> Recorded {
         let failure = ToolFailureSignature(results: results)
-        guard !failure.isEmpty else {
-            return (Self(), false)
-        }
-
-        let nextRepetitions: Int
-        if failure == lastFailure {
-            nextRepetitions = repetitions + 1
-        } else {
-            nextRepetitions = 1
-        }
-        return (
-            Self(lastFailure: failure, repetitions: nextRepetitions),
-            nextRepetitions >= Self.maximumRepetitions
-        )
-    }
-}
-
-/// Pure accumulation for one provider request. Provider activity is handled
-/// separately; this value contains only the information needed to decide the
-/// request's terminal domain outcome.
-private struct ModelRoundAccumulator<Output>: Sendable
-where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
-    let requestedTools: ModelToolRound?
-    let generated: Output?
-
-    init(
-        requestedTools: ModelToolRound? = nil,
-        generated: Output? = nil
-    ) {
-        self.requestedTools = requestedTools
-        self.generated = generated
-    }
-
-    func applying(_ event: ModelEvent<Output>) -> Self {
-        switch event {
-        case .toolsRequested(let round):
-            return Self(requestedTools: round, generated: generated)
-        case .generated(let value):
-            return Self(requestedTools: requestedTools, generated: value)
-        default:
-            return self
-        }
-    }
-
-    var outcome: ModelRoundOutcome<Output>? {
-        if let requestedTools { return .requiresTools(requestedTools) }
-        if let generated { return .completed(generated) }
-        return nil
-    }
-}
-
-private struct ToolRoundResult<Input: Sendable> {
-    let input: TurnPrompt<Input>
-    let results: [ToolResult]
-}
-
-/// Pure transcript transition for one model-requested tool round. Journaling,
-/// authorization, execution, and compaction happen after this value is built.
-private struct ToolRoundPlan<Input: Sendable> {
-    let input: TurnPrompt<Input>
-    let calls: [ToolCall]
-}
-
-private enum ReasoningLoopPlanning {
-    static func toolRound<Input: Sendable>(
-        input: TurnPrompt<Input>,
-        round: ModelToolRound
-    ) -> ToolRoundPlan<Input> {
-        var nextInput = input.appendingReasoning(round)
-        let responseSegments = round.narration?.segments ?? []
-        if !responseSegments.isEmpty {
-            nextInput = nextInput.appending(
-                .response(
-                    .init(
-                        assetIDs: round.narration?.assetIDs ?? [],
-                        segments: responseSegments
-                    )
-                )
-            )
-        }
-        if !round.calls.isEmpty {
-            nextInput = nextInput.appending(.toolCalls(.init(round.calls.map(transcriptToolCall))))
-        }
-        return ToolRoundPlan(input: nextInput, calls: round.calls)
+        guard !failure.isEmpty else { return .tracking(Self()) }
+        let repetitions = failure == lastFailure ? self.repetitions + 1 : 1
+        return repetitions >= Self.maximumRepetitions
+            ? .repeated(failure)
+            : .tracking(Self(lastFailure: failure, repetitions: repetitions))
     }
 }
 
@@ -172,8 +147,8 @@ enum TurnReducer {
         case .activity:
             return []
 
-        case .toolsRequested(let round):
-            return round.calls.map { .toolRequested(toolCall: $0, at: timestamp) }
+        case .toolCall(let toolCall):
+            return [.toolRequested(toolCall: toolCall.call, at: timestamp)]
 
         case .generated(let value):
             return [.modelOutputGenerated(content: value, at: timestamp)]
@@ -214,200 +189,64 @@ struct TurnContext: Sendable {
     var latestContextUsage: ContextUsage? = nil
 }
 
-/// The prompt for one live reasoning turn.
-///
-/// The event-sourced transcript is the history. Reference data, the current
-/// input, and outputs produced while this turn is running are the current
-/// prompt. Keeping those parts separate prevents request-local data from
-/// being inserted into the durable history by array surgery.
-struct TurnHistory: Sendable {
-    let entries: [Transcript.Entry]
+/// How a turn that didn't answer ends: failed, or cancelled by whoever asked. Cancellation — a raw
+/// `CancellationError` from a consumer abort, or an endpoint reporting `.cancelled` — isn't a
+/// failure, and must not replay as one.
+enum TurnEnd: Equatable {
+    case failed(AgentRuntimeError)
+    case cancelled
+
+    /// Normalizes the existential `catch` boundary around the typed turn: a value that isn't an
+    /// `AgentRuntimeError` is an infrastructure failure.
+    init(_ error: any Error) {
+        switch error {
+        case is CancellationError: self = .cancelled
+        case let runtimeError as AgentRuntimeError: self = runtimeError == .cancelled ? .cancelled : .failed(runtimeError)
+        default: self = .failed(.infrastructureFailure(String(describing: error)))
+        }
+    }
+
+    var error: AgentRuntimeError {
+        switch self {
+        case .failed(let error): error
+        case .cancelled: .cancelled
+        }
+    }
+
+    func event(at date: Date) -> AgentHistory.Event {
+        switch self {
+        case .failed(let error): .failed(AgentHistory.Failure(error: error, at: date))
+        case .cancelled: .cancelled(at: date)
+        }
+    }
 }
 
-struct TurnInput<Input: Sendable>: Sendable {
-    /// The original request value remains available for the whole turn. The
-    /// transcript entries are the model-facing projection supplied by the
-    /// caller; Hail does not ask `Input` to manufacture one.
+/// How a turn starts: with something just said to the agent, which opens it; or resuming the
+/// open turn a crash interrupted, which is already in the history.
+enum TurnOpening: Sendable {
+    case received(AgentHistory.Input)
+    case resumed(AgentHistory.OpenTurn)
+
+    var input: AgentHistory.Input {
+        switch self {
+        case .received(let input): input
+        case .resumed(let turn): turn.input
+        }
+    }
+
+    /// The tool calls the turn made before it starts here.
+    var callsMade: Int {
+        switch self {
+        case .received: 0
+        case .resumed(let turn): turn.steps.filter { if case .called = $0 { true } else { false } }.count
+        }
+    }
+}
+
+/// One turn's request: the host's typed input, and the request the model is sent for it.
+struct TurnRequest<Input: Sendable>: Sendable {
     let value: Input
-    let entries: [Transcript.Entry]
-    let currentEntry: Transcript.Entry?
-}
-
-struct TurnPrompt<Input: Sendable>: Sendable {
-    let history: TurnHistory
-    let current: TurnInput<Input>
-    let reasoningRounds: [[Transcript.Segment]]
-    private let currentSourceIndex: Int?
-
-    var entries: [Transcript.Entry] {
-        history.entries + current.entries
-    }
-
-    init(
-        input: Input,
-        reference: [Transcript.Entry],
-        currentEntry: Transcript.Entry?,
-        currentSourceIndex: Int? = nil,
-        currentIndex: Int? = nil,
-        reasoningRounds: [[Transcript.Segment]] = [],
-        in entries: [Transcript.Entry]
-    ) {
-        self.currentSourceIndex = currentSourceIndex
-        self.reasoningRounds = reasoningRounds
-
-        guard let currentEntry,
-            let currentIndex = currentIndex ?? entries.lastIndex(of: currentEntry)
-        else {
-            self.history = TurnHistory(entries: entries)
-            self.current = TurnInput(
-                value: input,
-                entries: reference + [currentEntry].compactMap { $0 },
-                currentEntry: currentEntry
-            )
-            return
-        }
-
-        self.history = TurnHistory(entries: Array(entries[..<currentIndex]))
-        self.current = TurnInput(
-            value: input,
-            entries: reference
-                + [currentEntry]
-                + Array(entries[(currentIndex + 1)...]),
-            currentEntry: currentEntry
-        )
-    }
-
-    private init(
-        history: TurnHistory,
-        current: TurnInput<Input>,
-        currentSourceIndex: Int?,
-        reasoningRounds: [[Transcript.Segment]]
-    ) {
-        self.history = history
-        self.current = current
-        self.currentSourceIndex = currentSourceIndex
-        self.reasoningRounds = reasoningRounds
-    }
-
-    func appending(_ entry: Transcript.Entry) -> Self {
-        return Self(
-            history: history,
-            current: TurnInput(
-                value: current.value,
-                entries: current.entries + [entry],
-                currentEntry: current.currentEntry
-            ),
-            currentSourceIndex: currentSourceIndex,
-            reasoningRounds: reasoningRounds
-        )
-    }
-
-    func appendingToolOutput(
-        callID: String,
-        name: String,
-        output: ToolOutput,
-        superseding superseded: [String] = []
-    ) -> Self {
-        let entry = Transcript.Entry.toolOutput(
-            .init(id: callID, toolName: name, segments: transcriptSegments(output))
-        )
-        // A scope's earlier page is replaced by a line, the way a browser shows only the current
-        // page: the model reads one current state, not every one before it.
-        let entries = current.entries.map { entry -> Transcript.Entry in
-            guard case .toolOutput(let earlier) = entry, superseded.contains(earlier.id) else { return entry }
-            return .toolOutput(
-                .init(
-                    id: earlier.id, toolName: earlier.toolName,
-                    segments: [.text(.init(content: "(Replaced by a later page of the same call.)"))]))
-        }
-        return Self(
-            history: history,
-            current: TurnInput(
-                value: current.value,
-                entries: entries + [entry],
-                currentEntry: current.currentEntry
-            ),
-            currentSourceIndex: currentSourceIndex,
-            reasoningRounds: reasoningRounds
-        )
-    }
-
-    func appendingReasoning(_ round: ModelToolRound) -> Self {
-        var reasoning = reasoningRounds
-        reasoning.append(round.reasoning)
-        return Self(
-            history: history,
-            current: current,
-            currentSourceIndex: currentSourceIndex,
-            reasoningRounds: reasoning
-        )
-    }
-
-    /// Keeps the live prompt intact while replacing only its durable history
-    /// after context compaction or provider-overflow recovery.
-    func rebased(on entries: [Transcript.Entry]) -> Self {
-        let retainedReasoning = reasoningRounds(for: entries)
-        guard let currentEntry = current.currentEntry,
-            let currentIndex = entries.lastIndex(of: currentEntry)
-        else {
-            return Self(
-                history: TurnHistory(entries: entries),
-                current: current,
-                currentSourceIndex: currentSourceIndex,
-                reasoningRounds: retainedReasoning
-            )
-        }
-        return Self(
-            history: TurnHistory(entries: Array(entries[..<currentIndex])),
-            current: current,
-            currentSourceIndex: currentSourceIndex,
-            reasoningRounds: retainedReasoning
-        )
-    }
-
-    func rebased(on request: PreparedRequest) -> Self {
-        let retainedReasoning = reasoningRounds(for: request.entries)
-        guard let currentSourceIndex,
-            let currentIndex = request.messageIndex(forSourceIndex: currentSourceIndex)
-        else {
-            return rebased(on: request.entries)
-        }
-        return Self(
-            history: TurnHistory(entries: Array(request.entries[..<currentIndex])),
-            current: current,
-            currentSourceIndex: currentSourceIndex,
-            reasoningRounds: retainedReasoning
-        )
-    }
-
-    private func reasoningRounds(
-        for entries: [Transcript.Entry]
-    ) -> [[Transcript.Segment]] {
-        var assistantToolRoundCount = 0
-        for index in entries.indices.dropLast() {
-            if case .response = entries[index],
-                case .toolCalls = entries[index + 1]
-            {
-                assistantToolRoundCount += 1
-            }
-        }
-        guard assistantToolRoundCount < reasoningRounds.count else {
-            return reasoningRounds
-        }
-        return Array(reasoningRounds.suffix(assistantToolRoundCount))
-    }
-}
-
-private func reasoningRounds(
-    in messages: [ChatMessage]
-) -> [[Transcript.Segment]] {
-    messages.reduce(into: []) { result, message in
-        guard case .assistantToolCall(let round, _) = message else { return }
-        // Keep empty rounds in the sequence: Ollama's request encoder counts
-        // every assistant response/tool-call pair, so later reasoning must
-        // stay aligned even when an earlier provider round had no reasoning.
-        result.append(round.reasoning)
-    }
+    let request: PreparedRequest
 }
 
 private func transcriptSegments(_ output: ToolOutput) -> [Transcript.Segment] {
@@ -438,7 +277,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// process spawns) are checked against the same lane as the tool registry.
     let authority: any Authority
 
-    /// Builds the prompt context (system prompt, memory, conversation thread,
+    /// Builds the prompt context (system prompt, memory, agent history,
     /// context manifest) for one turn.
     let context: @Sendable () async throws(AgentRuntimeError) -> TurnContext
 
@@ -457,7 +296,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// behavior.
     let modelReasoningPolicy: ModelReasoningPolicy
 
-    /// Optional context compactor, consulted before each request for
+    /// Optional context compactor, consulted after each turn, and when a request overflows, for
     /// non-session-owning endpoints. See ``ContextCompactor``.
     let compactor: (any ContextCompactor)?
 
@@ -470,10 +309,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// candidate summary against the request that would actually be sent.
     let assemblePrompt: PromptAssembler
 
-    /// Resolves the tool registry available to this turn.
-    let tools: @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> AgentScope
-    /// Gives the agent's scope back when the turn ends, with the scopes still open in it.
-    let keepScopes: @Sendable (consuming AgentScope) async -> Void
+    /// Takes the agent's session for a turn, with the turn's tools offered in it.
+    let session: @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> AgentSession
+    /// Gives the agent's session back when the turn ends, however it ends.
+    let keepSession: @Sendable (consuming AgentSession) async -> Void
 
     /// Emits a persistent agent event.
     let emit: @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void
@@ -495,35 +334,37 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// Owns the durable lifecycle shared by generation and summarization
     /// requests. The caller only reduces provider events into its operation's
     /// result; starts, usage, completion, failure, and duration are uniform.
+    /// A request that failed, and what its events had come to by then.
+    struct RequestFailure<State: Sendable>: Error {
+        let error: AgentRuntimeError
+        let state: State
+    }
+
     struct ModelRequestRunner: Sendable {
         let turnID: TurnID
         let emit: @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void
         let recordActivity: @Sendable (AgentActivity) async -> Void
         let clock: ClockType
 
-        func run<Output>(
+        /// Runs the request, folding its events into `State` from `initial`.
+        func run<Output, State: Sendable>(
             model: String,
             kind: ModelRequestKind,
             contentHashes: [String]? = nil,
             stream: AsyncStream<ModelEvent<Output>>,
-            handle: (ModelEvent<Output>) async throws(AgentRuntimeError) -> Void
-        ) async throws(AgentRuntimeError) -> ModelUsage?
+            from initial: State,
+            reduce: (State, ModelEvent<Output>) async throws(AgentRuntimeError) -> State
+        ) async throws(RequestFailure<State>) -> State
         where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
             let requestID = ModelRequestID()
             let startedAt = clock.now
-            try await emit(
-                .modelRequestStarted(
-                    ModelRequestRecord(
-                        id: requestID,
-                        turnID: turnID,
-                        model: model,
-                        kind: kind,
-                        startedAt: Date(),
-                        contentHashes: contentHashes
-                    )
-                )
-            )
-
+            do {
+                try await started(requestID, model: model, kind: kind, contentHashes: contentHashes)
+            } catch {
+                throw RequestFailure(error: error, state: initial)
+            }
+            // The fold's accumulator, and the usage last reported, which completes the request.
+            var state = initial
             var usage: ModelUsage?
             do {
                 for await event in stream {
@@ -539,7 +380,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                     default:
                         break
                     }
-                    try await handle(event)
+                    state = try await reduce(state, event)
                 }
                 try ReasoningLoop<ClockType>.checkCancellation()
                 try await emit(
@@ -551,7 +392,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                         at: Date()
                     )
                 )
-                return usage
+                return state
             } catch {
                 let requestError = error
                 do {
@@ -564,12 +405,30 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                             at: Date()
                         ))
                 } catch {
-                    throw AgentRuntimeError.persistenceFailure(
-                        "Could not record failed model request: \(error). Original failure: \(requestError)"
-                    )
+                    throw RequestFailure(
+                        error: .persistenceFailure(
+                            "Could not record failed model request: \(error). Original failure: \(requestError)"),
+                        state: state)
                 }
-                throw requestError
+                throw RequestFailure(error: requestError, state: state)
             }
+        }
+
+        private func started(
+            _ requestID: ModelRequestID, model: String, kind: ModelRequestKind, contentHashes: [String]?
+        ) async throws(AgentRuntimeError) {
+            try await emit(
+                .modelRequestStarted(
+                    ModelRequestRecord(
+                        id: requestID,
+                        turnID: turnID,
+                        model: model,
+                        kind: kind,
+                        startedAt: Date(),
+                        contentHashes: contentHashes
+                    )
+                )
+            )
         }
     }
 
@@ -583,8 +442,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> TurnContext,
         endpoint: @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> ModelEndpoint,
         modelReasoningPolicy: @escaping ModelReasoningPolicy = { _ in .providerDefault },
-        tools: @escaping @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> AgentScope,
-        keepScopes: @escaping @Sendable (consuming AgentScope) async -> Void = { _ in },
+        session: @escaping @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> AgentSession,
+        keepSession: @escaping @Sendable (consuming AgentSession) async -> Void = { _ in },
         emit: @escaping @Sendable (AgentEvent) async throws(AgentRuntimeError) -> Void,
         recordActivity: @escaping @Sendable (AgentActivity) async -> Void,
         compactor: (any ContextCompactor)? = nil,
@@ -600,9 +459,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         self.context = context
         self.rebuildContext = rebuildContext
         self.endpoint = endpoint
-        self.keepScopes = keepScopes
+        self.keepSession = keepSession
         self.modelReasoningPolicy = modelReasoningPolicy
-        self.tools = tools
+        self.session = session
         self.emit = emit
         self.recordActivity = recordActivity
         self.compactor = compactor
@@ -612,6 +471,20 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         self.maxToolRounds = maxToolRounds
     }
 
+    /// After a turn: compacts the history when the context the last request reported is past the
+    /// threshold, so the next turn starts with room, and nobody waits for it. A compaction that
+    /// fails leaves the history as it was; a turn that overflows recovers on its own.
+    func compactAfterTurn() async {
+        do {
+            let turnContext = try await context()
+            _ = try await compactIfNeeded(turnContext: turnContext, endpoint: try await endpoint(turnContext))
+        } catch {
+            logger.warning(
+                "Compaction after a turn failed",
+                metadata: ["agentID": .string(agentID.rawValue), "error": .string(String(describing: error))])
+        }
+    }
+
     /// Runs one full agent turn: builds context, drives the model/tool loop,
     /// journals persistent events, forwards live updates, and broadcasts the
     /// final generated value (if any) through the connection. A failure is
@@ -619,7 +492,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// rethrown, so consumers always see a terminal update.
     func run<Input: Codable & Sendable, Output>(
         _ input: Input,
-        message: ChatMessage,
+        opening: TurnOpening,
         referenceEntries: [Transcript.Entry],
         inputID: String?,
         through connection: AgentConnection<Output>
@@ -632,52 +505,27 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             }
             try await runStreamingTurn(
                 input: input,
-                message: message,
+                opening: opening,
                 referenceEntries: referenceEntries,
                 inputID: inputID,
                 through: connection
             )
         } catch {
-            let (runtimeError, emitsFailure) = Self.mapTurnError(error)
+            let end = TurnEnd(error)
             let at = Date()
-            if emitsFailure {
-                // Emit the failure so it survives reloads; the turn bracket
-                // is closed by the caller (`turnCompleted`), so no re-run
-                // triggers. Cancellation bypasses this: an abandoned turn is
-                // not a failure and must not replay as one.
-                do {
-                    try await emit(.turnFailed(error: runtimeError, at: at))
-                } catch {
-                    let persistenceError = AgentRuntimeError.persistenceFailure(
-                        "Could not record turn failure: \(error). Original failure: \(runtimeError)"
-                    )
-                    await broadcast(.runFailed(error: persistenceError, at: at), to: connection)
-                    throw .failureNotEmitted(persistenceError)
-                }
+            // The turn closes either way. Only a crash leaves a turn open, to be finished after it.
+            do {
+                try await emit(.history(end.event(at: at)))
+            } catch {
+                let persistenceError = AgentRuntimeError.persistenceFailure(
+                    "Could not record how the turn ended: \(error). It ended with: \(end.error)"
+                )
+                await broadcast(.runFailed(error: persistenceError, at: at), to: connection)
+                throw .failureNotEmitted(persistenceError)
             }
-            await broadcast(.runFailed(error: runtimeError, at: at), to: connection)
-            throw .failed(runtimeError)
+            await broadcast(.runFailed(error: end.error, at: at), to: connection)
+            throw .failed(end.error)
         }
-    }
-
-    /// Normalizes the existential `catch` boundary around the typed turn.
-    /// Swift exposes a caught value as `any Error` even when every current
-    /// dependency throws `AgentRuntimeError`; keeping this conversion in one
-    /// place prevents a future untyped dependency from leaking out.
-    /// It also decides whether the error is emitted as
-    /// ``AgentEvent/turnFailed(error:at:)``.
-    /// Cancellation — a raw `CancellationError` from a consumer abort, or an
-    /// endpoint reporting `.cancelled` — is the caller abandoning the turn,
-    /// not a failure: emitting it would replay as a failed turn after
-    /// re-activation, so it bypasses the event stream.
-    static func mapTurnError(_ error: any Error) -> (mapped: AgentRuntimeError, emitsFailure: Bool) {
-        if error is CancellationError {
-            return (.cancelled, false)
-        }
-        if let runtimeError = error as? AgentRuntimeError {
-            return (runtimeError, runtimeError != .cancelled)
-        }
-        return (.infrastructureFailure(String(describing: error)), true)
     }
 
     private static func checkCancellation() throws(AgentRuntimeError) {
@@ -712,7 +560,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// report starts the `.contextLengthExceeded` recovery pass, whose
     /// failures still propagate because there the request is known not to
     /// fit. A successful compaction is journaled as one atomic
-    /// `conversationCompacted` event and the event-sourced part of this turn
+    /// `.history(.compacted)` event and the event-sourced part of this turn
     /// is rebuilt so it already sees the trimmed window. External context
     /// inputs remain those captured for the turn. Internal (not private) for
     /// direct testing.
@@ -744,10 +592,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         // recovery candidate after an explicit provider overflow. A
         // supported counter that fails is an operation failure, not absence
         // of the capability, and therefore propagates.
-        let request = turnContext.preparedRequest.appending(
-            suffix: additionalEntries,
-            tools: tools
-        )
+        let request = turnContext.preparedRequest.adding(context: additionalEntries, tools: tools)
         guard let contextWindow = endpoint.effectiveContextWindow else {
             throw AgentRuntimeError.configurationError(
                 "No context window is configured for model \(endpoint.model); "
@@ -755,8 +600,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
         }
         let budget = try CompactionBudget(contextWindow: contextWindow)
-        let measurement: RequestMeasurement?
-        let measure: RequestMeasurer?
+        let measuring: RequestMeasuring
         switch endpoint.tokenCounting {
         case .unavailable:
             // A missing preflight counter is not evidence that the threshold
@@ -764,8 +608,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             // Hail's serialized transcript and tool schemas, while Ollama
             // counts its own rendered chat template; using that estimate here
             // can compact a request that is nowhere near the provider limit.
-            // Provider-reported occupancy is different in kind: within a
-            // conversation the next request strictly grows on the previous
+            // Provider-reported occupancy is different in kind: as a
+            // history goes on, the next request strictly grows on the previous
             // one, so the last report is a guaranteed floor, never a stale
             // guess. When a floor exists it is offered as the trigger
             // measurement and the compactor's own threshold still decides;
@@ -774,39 +618,34 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             // A provider-reported overflow remains an explicit recovery
             // trigger either way.
             if trigger == .contextLengthExceeded {
-                measurement = nil
-                measure = nil
+                measuring = .estimated
             } else if let floor = Self.reportedFloorMeasurement(
                 usage: turnContext.latestContextUsage,
                 window: contextWindow
             ) {
-                measurement = floor
-                measure = nil
+                measuring = .reportedFloor(floor)
             } else {
                 return turnContext
             }
         case .available(let count):
-            measurement = RequestMeasurement(
-                tokenCount: try await count(request.entries, request.tools),
-                source: .reported
-            )
-            measure = {
-                (candidate: PreparedRequest) async throws(AgentRuntimeError) -> RequestMeasurement in
-                do {
-                    return RequestMeasurement(
-                        tokenCount: try await count(candidate.entries, candidate.tools),
-                        source: .reported
-                    )
-                } catch is CancellationError {
-                    throw AgentRuntimeError.cancelled
-                } catch let error as AgentRuntimeError {
-                    throw error
-                } catch {
-                    throw AgentRuntimeError.infrastructureFailure(
-                        "Token counting failed: \(error)"
-                    )
-                }
-            }
+            measuring = .counted(
+                RequestMeasurement(tokenCount: try await count(request.entries, request.tools), source: .reported),
+                by: { (candidate: PreparedRequest) async throws(AgentRuntimeError) -> RequestMeasurement in
+                    do {
+                        return RequestMeasurement(
+                            tokenCount: try await count(candidate.entries, candidate.tools),
+                            source: .reported
+                        )
+                    } catch is CancellationError {
+                        throw AgentRuntimeError.cancelled
+                    } catch let error as AgentRuntimeError {
+                        throw error
+                    } catch {
+                        throw AgentRuntimeError.infrastructureFailure(
+                            "Token counting failed: \(error)"
+                        )
+                    }
+                })
         }
         let operation = compactionOperation
         let summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> GeneratedContent = {
@@ -838,8 +677,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 context: turnContext.promptContext,
                 request: request,
                 budget: budget,
-                measurement: measurement,
-                measure: measure,
+                measuring: measuring,
                 assemble: assemblePrompt,
                 summarize: summarize,
                 contextProjection: contextProjection,
@@ -873,12 +711,11 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
         )
         try await emit(
-            .conversationCompacted(
-                archivedCount: result.archivedCount,
-                content: result.context,
-                output: result.output.generatedContent
-            )
-        )
+            .history(
+                .compacted(
+                    AgentHistory.Summary(context: result.context, report: result.output.generatedContent),
+                    through: result.through,
+                    kept: result.kept)))
         var rebuilt = try await rebuildContext(turnContext)
         // The floor described the pre-compaction occupancy; keeping it would
         // re-trigger compaction on the next check.
@@ -895,24 +732,13 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         maxOutputTokens: Int,
         endpoint: any ModelEndpoint
     ) async throws(AgentRuntimeError) -> GeneratedContent {
-        var generated: GeneratedContent?
         let runner = ModelRequestRunner(
             turnID: turnID,
             emit: emit,
             recordActivity: recordActivity,
             clock: clock
         )
-        let handle: (ModelEvent<GeneratedContent>) async throws(AgentRuntimeError) -> Void = { event in
-            switch event {
-            case .generated(let value):
-                generated = value
-            case .failed(let error):
-                throw Self.map(modelError: error)
-            default:
-                break
-            }
-        }
-        _ = try await runner.run(
+        let generation = try await Self.value(of: try await runner.run(
             model: endpoint.model,
             kind: .compaction,
             contentHashes: RequestContentHash.chain(tools: [], messages: entries),
@@ -929,12 +755,13 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 generating: GeneratedContent.self,
                 purpose: .compaction(maxOutputTokens: maxOutputTokens)
             ),
-            handle: handle
-        )
-        guard let generated else {
+            from: Generation<GeneratedContent>.pending,
+            reduce: Self.generating
+        ))
+        guard case .generated(let summary) = generation else {
             throw AgentRuntimeError.modelMisbehavior("Compaction produced an empty summary")
         }
-        return generated
+        return summary
     }
 
     private func summarize(
@@ -942,34 +769,51 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         endpoint: any ModelEndpoint,
         operation: CompactionOperation
     ) async throws(AgentRuntimeError) -> GeneratedContent {
-        var generated: GeneratedContent?
         let runner = ModelRequestRunner(
             turnID: turnID,
             emit: emit,
             recordActivity: recordActivity,
             clock: clock
         )
-        let handle: (ModelEvent<GeneratedContent>) async throws(AgentRuntimeError) -> Void = { event in
-            switch event {
-            case .generated(let value):
-                generated = value
-            case .failed(let error):
-                throw Self.map(modelError: error)
-            default:
-                break
-            }
-        }
-        _ = try await runner.run(
+        let generation = try await Self.value(of: try await runner.run(
             model: endpoint.model,
             kind: .compaction,
             contentHashes: RequestContentHash.chain(tools: [], messages: request.entries),
             stream: operation.stream(endpoint, request, authority),
-            handle: handle
-        )
-        guard let generated else {
+            from: Generation<GeneratedContent>.pending,
+            reduce: Self.generating
+        ))
+        guard case .generated(let report) = generation else {
             throw AgentRuntimeError.modelMisbehavior("Compaction produced an empty report")
         }
-        return generated
+        return report
+    }
+
+    /// A page, as request-time context: where something is now, never part of the history.
+    private static func entry(_ page: Page) -> Transcript.Entry {
+        .prompt(.init(segments: [.text(.init(content: page.output.textRepresentation))]))
+    }
+
+    /// A request's value, or its failure's error.
+    private static func value<State>(
+        of request: @autoclosure () async throws(RequestFailure<State>) -> State
+    ) async throws(AgentRuntimeError) -> State {
+        do {
+            return try await request()
+        } catch {
+            throw error.error
+        }
+    }
+
+    /// A tool-less request's events, as its value: the generated one, or the failure.
+    private static func generating(
+        _ generation: Generation<GeneratedContent>, _ event: ModelEvent<GeneratedContent>
+    ) throws(AgentRuntimeError) -> Generation<GeneratedContent> {
+        switch event {
+        case .generated(let value): .generated(value)
+        case .failed(let error): throw map(modelError: error)
+        default: generation
+        }
     }
 
     // MARK: - Turn execution
@@ -979,13 +823,15 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// final generated value (if any) through the connection.
     private func runStreamingTurn<Input: Codable & Sendable, Output>(
         input: Input,
-        message: ChatMessage,
+        opening: TurnOpening,
         referenceEntries: [Transcript.Entry],
         inputID: String?,
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) {
-        try await emit(.messageReceived(message))
-        await broadcast(.messageHandled(message: message, at: Date()), to: connection)
+        if case .received(let received) = opening {
+            try await emit(.history(.received(received, turn: turnID)))
+        }
+        await broadcast(.received(opening.input, at: Date()), to: connection)
         await broadcast(.runStarted(agentID: agentID, at: Date()), to: connection)
 
         // The input timestamp remains part of the journaled message. It is
@@ -1016,105 +862,61 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         // the reusable prefix on every turn. The context is placed immediately
         // before the current input instead, so it cannot be mistaken for the
         // user's latest request.
-        var turnContextEntries = referenceEntries
-
-        let inputEntries = modelEntries(from: message, context: turnContext.promptContext)
-        guard let inputEntry = inputEntries.last else {
-            throw AgentRuntimeError.modelMisbehavior(
-                "The turn message has no model-facing transcript entry."
-            )
-        }
-        // The turn runs in the agent's scope, where the last turn left off: each call still open
-        // shows where it is, or finishes, before the model does anything. When the turn ends, the scope goes
-        // back to the agent with what's still open; only a cancelled turn ends it.
-        var registry = try await tools(
+        // The turn runs in the agent's session, where the last turn left off: each call still open
+        // shows where it is, or finishes, before the model does anything. The session goes back to
+        // the agent when the turn ends, however it ends.
+        let outcome: Output = try await withSession(
             AgentTurnContext(
                 agentID: agentID,
                 turnID: turnID,
-                message: message,
+                input: opening.input,
                 inputID: inputID
             )
-        )
-        for page in await registry.begin(turnID) {
-            turnContextEntries.append(
-                .prompt(.init(segments: [.text(.init(content: page.output.textRepresentation))])))
-        }
-        let modelTools = registry.allTools()
-        // Budget the request that will actually be sent, not a second
-        // approximation assembled from AgentState fields. This includes the
-        // per-turn delta and tool schemas as well as assembled prompt output.
-        let schemas = registry.schemas()
-        var promptMetadata: [String: Logger.MetadataValue] = [
-            "agentID": .string(agentID.rawValue),
-            "historyEntries": .string("\(turnContext.preparedRequest.entries.count)"),
-            "referenceEntries": .string("\(turnContextEntries.count)"),
-            "toolCount": .string("\(schemas.count)"),
-            "contextWindow": .string("\(endpoint.effectiveContextWindow ?? 0)"),
-        ]
-        if case .available(let count) = endpoint.tokenCounting {
-            promptMetadata["historyTokens"] = .string(
-                "\(try await count(turnContext.preparedRequest.entries, []))"
+        ) { (session: inout AgentSession) async throws(AgentRuntimeError) -> Output in
+            let turnContextEntries = referenceEntries + (await session.begin(turnID)).map(Self.entry)
+            let modelTools = session.allTools()
+            // Budget the request that will actually be sent, not a second
+            // approximation assembled from AgentState fields. This includes the
+            // per-turn delta and tool schemas as well as assembled prompt output.
+            let schemas = session.schemas()
+            var promptMetadata: [String: Logger.MetadataValue] = [
+                "agentID": .string(agentID.rawValue),
+                "historyEntries": .string("\(turnContext.preparedRequest.entries.count)"),
+                "referenceEntries": .string("\(turnContextEntries.count)"),
+                "toolCount": .string("\(schemas.count)"),
+                "contextWindow": .string("\(endpoint.effectiveContextWindow ?? 0)"),
+            ]
+            if case .available(let count) = endpoint.tokenCounting {
+                promptMetadata["historyTokens"] = .string(
+                    "\(try await count(turnContext.preparedRequest.entries, []))"
+                )
+                promptMetadata["referenceTokens"] = .string(
+                    "\(try await count(turnContextEntries, []))"
+                )
+                promptMetadata["toolSchemaTokens"] = .string("\(try await count([], schemas))")
+            } else {
+                promptMetadata["tokenCounts"] = .string("unavailable")
+            }
+            logger.info("Prompt composition", metadata: promptMetadata)
+            let turn = TurnRequest(value: input, request: turnContext.preparedRequest.adding(context: turnContextEntries, tools: schemas))
+            let delta = TurnDelta(
+                currentEntries: turn.request.context + turn.request.openTurn,
+                sessionIdentity: turnContext.sessionIdentity
             )
-            promptMetadata["referenceTokens"] = .string(
-                "\(try await count(turnContextEntries, []))"
-            )
-            promptMetadata["toolSchemaTokens"] = .string("\(try await count([], schemas))")
-        } else {
-            promptMetadata["tokenCounts"] = .string("unavailable")
-        }
-        logger.info("Prompt composition", metadata: promptMetadata)
-        turnContext = try await compactIfNeeded(
-            turnContext: turnContext,
-            endpoint: endpoint,
-            additionalEntries: turnContextEntries,
-            tools: schemas
-        )
-        let currentSourceIndex = turnContext.promptContext.conversationThread.indices.last
-        let currentIndex = currentSourceIndex.flatMap {
-            turnContext.preparedRequest.messageIndex(forSourceIndex: $0)
-        }
-        let currentEntry =
-            currentIndex.flatMap { index in
-                turnContext.preparedRequest.entries.indices.contains(index)
-                    ? turnContext.preparedRequest.entries[index]
-                    : nil
-            } ?? inputEntry
-        let prompt = TurnPrompt(
-            input: input,
-            reference: turnContextEntries,
-            currentEntry: currentEntry,
-            currentSourceIndex: currentSourceIndex,
-            currentIndex: currentIndex,
-            reasoningRounds: reasoningRounds(
-                in: turnContext.promptContext.conversationThread
-            ),
-            in: turnContext.entries
-        )
 
-        let delta = TurnDelta(
-            currentEntries: prompt.current.entries,
-            sessionIdentity: turnContext.sessionIdentity
-        )
-
-        let outcome: Output
-        do {
-            outcome = try await runTurn(
-                input: prompt,
+            return try await runTurn(
+                input: turn,
                 delta: delta,
                 turnContextEntries: turnContextEntries,
                 schemas: schemas,
                 modelTools: modelTools,
                 turnSnapshot: turnContext,
-                registry: &registry,
+                session: &session,
                 endpoint: endpoint,
+                calls: TurnCalls(limit: maxToolRounds, count: opening.callsMade),
                 through: connection
             )
-        } catch {
-            // Scopes outlive turns: a turn ending, however it ends, leaves them as they are.
-            await keepScopes(registry)
-            throw error
         }
-        await keepScopes(registry)
 
         // Persist the harness session id (and its identity fingerprint) so a
         // restart can resume the CLI session instead of bootstrapping from
@@ -1129,54 +931,67 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         }
 
         let timestamp = Date()
-        try await emit(
-            .responseReceived(
-                sender: agentID.rawValue,
-                content: outcome.generatedContent,
-                at: timestamp
-            )
-        )
+        try await emit(.history(.replied(AgentHistory.Reply(content: outcome.generatedContent, at: timestamp))))
         await broadcast(.responseRecorded(content: outcome, at: timestamp), to: connection)
         await broadcast(.runCompleted(at: Date()), to: connection)
     }
 
-    /// Advances the turn through a bounded sequence of model/tool transitions.
-    /// Messages are passed as values between rounds, so the control flow does
-    /// not rely on a mutable `while true` loop or an optional success sentinel.
+    /// Runs `body` in the agent's session: taken for the turn, and given back when the turn ends,
+    /// however it ends.
+    private func withSession<Result>(
+        _ turn: AgentTurnContext,
+        _ body: (inout AgentSession) async throws(AgentRuntimeError) -> Result
+    ) async throws(AgentRuntimeError) -> Result {
+        var session = try await self.session(turn)
+        let result: Result
+        do {
+            result = try await body(&session)
+        } catch {
+            await keepSession(session)
+            throw error
+        }
+        await keepSession(session)
+        return result
+    }
 
+    /// The turn: one request, run in the agent's session, which runs each tool call the model
+    /// makes and answers it. A request that overflows the model's context is asked again,
+    /// compacted, a bounded number of times.
     private func runTurn<Input: Sendable, Output>(
-        input: TurnPrompt<Input>,
+        input: TurnRequest<Input>,
         delta: TurnDelta,
         turnContextEntries: [Transcript.Entry],
         schemas: [ToolDefinition],
         modelTools: [AnyTool],
         turnSnapshot: TurnContext,
-        registry: inout AgentScope,
+        session: inout AgentSession,
         endpoint: ModelEndpoint,
-        completedToolRounds: Int = 0,
-        lastToolRound: ToolRoundOutcome? = nil,
+        calls: TurnCalls,
         contextRecoveryAttempts: Int = 0,
-        toolFailureTracker: ToolFailureTracker = .init(),
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) -> Output
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         try Self.checkCancellation()
-        let round: ModelRoundOutcome<Output>
-        do {
-            round = try await requestModelRound(
-                input: input,
-                delta: delta,
-                schemas: schemas,
-                modelTools: modelTools,
-                endpoint: endpoint,
-                lastToolRound: lastToolRound,
-                through: connection
-            )
-        } catch AgentRuntimeError.contextLengthExceeded {
+        switch try await requestTurn(
+            input: input,
+            delta: delta,
+            schemas: schemas,
+            modelTools: modelTools,
+            session: &session,
+            endpoint: endpoint,
+            calls: calls,
+            through: connection
+        ) {
+        case .generated(let output):
+            return output
+        case .overflowed(let calls):
             guard contextRecoveryAttempts < 3 else {
                 throw AgentRuntimeError.contextLengthExceeded
             }
-
+            // The turn's work so far is folded into the summary; its open tabs offer what they
+            // offer now.
+            let schemas = session.schemas()
+            let modelTools = session.allTools()
             let compactedInput = try await recoverFromContextOverflow(
                 input: input,
                 turnContextEntries: turnContextEntries,
@@ -1191,62 +1006,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 schemas: schemas,
                 modelTools: modelTools,
                 turnSnapshot: turnSnapshot,
-                registry: &registry,
+                session: &session,
                 endpoint: endpoint,
-                completedToolRounds: completedToolRounds,
-                lastToolRound: lastToolRound,
+                calls: calls,
                 contextRecoveryAttempts: contextRecoveryAttempts + 1,
-                toolFailureTracker: toolFailureTracker,
-                through: connection
-            )
-        }
-
-        switch round {
-        case .completed(let output):
-            return output
-
-        case .requiresTools(let round):
-            // Reject excess work before journaling or executing its effects.
-            guard completedToolRounds < maxToolRounds else {
-                throw AgentRuntimeError.modelMisbehavior(
-                    "Model exceeded the maximum of \(maxToolRounds) tool rounds in a single turn."
-                )
-            }
-            let next = try await executeToolRound(
-                round: round,
-                schemas: schemas,
-                input: input,
-                turnContextEntries: turnContextEntries,
-                turnSnapshot: turnSnapshot,
-                registry: &registry,
-                endpoint: endpoint,
-                through: connection
-            )
-            let failureTracking = toolFailureTracker.recording(results: next.results)
-            if failureTracking.repeated {
-                let failure = next.results.first { result in
-                    result.failureKind == .invalidArguments
-                        || result.failureKind == .rejected
-                }
-                throw AgentRuntimeError.toolFailed(
-                    name: failure?.name ?? round.calls.first?.name ?? "unknown",
-                    reason:
-                        "The model repeated the same failed tool call twice. \(failure?.output.textRepresentation ?? "Tool execution failed.")"
-                )
-            }
-            return try await runTurn(
-                input: next.input,
-                delta: delta,
-                turnContextEntries: turnContextEntries,
-                schemas: registry.schemas(),
-                modelTools: registry.allTools(),
-                turnSnapshot: turnSnapshot,
-                registry: &registry,
-                endpoint: endpoint,
-                completedToolRounds: completedToolRounds + 1,
-                lastToolRound: next.results.contains(where: \.isError) ? .failed : .succeeded,
-                contextRecoveryAttempts: contextRecoveryAttempts,
-                toolFailureTracker: failureTracking.tracker,
                 through: connection
             )
         }
@@ -1257,12 +1020,12 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// the cost of a binary artifact, so a provider-reported overflow gets a
     /// bounded recovery pass with an explicit trigger.
     private func recoverFromContextOverflow<Input: Sendable>(
-        input: TurnPrompt<Input>,
+        input: TurnRequest<Input>,
         turnContextEntries: [Transcript.Entry],
         schemas: [ToolDefinition],
         turnSnapshot: TurnContext,
         endpoint: ModelEndpoint
-    ) async throws(AgentRuntimeError) -> TurnPrompt<Input> {
+    ) async throws(AgentRuntimeError) -> TurnRequest<Input> {
         guard endpoint.contextOwnership == .runtime, compactor != nil else {
             throw AgentRuntimeError.contextLengthExceeded
         }
@@ -1275,41 +1038,40 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             tools: schemas,
             trigger: .contextLengthExceeded
         )
-        let wasCompacted =
-            prepared.promptContext.contextSummary != rebuilt.promptContext.contextSummary
-            || prepared.promptContext.conversationThread.count
-                != rebuilt.promptContext.conversationThread.count
-        guard wasCompacted else {
+        guard prepared.promptContext.history != rebuilt.promptContext.history else {
             throw AgentRuntimeError.contextLengthExceeded
         }
-        return input.rebased(on: prepared.preparedRequest)
+        // Compaction folded the open turn's work so far into the summary; the turn's input stays,
+        // so the request still answers it.
+        return TurnRequest(
+            value: input.value,
+            request: prepared.preparedRequest.adding(context: turnContextEntries, tools: schemas))
     }
 
-    /// Executes one provider request and closes its raw stream into a valid
-    /// domain outcome. This is the imperative shell around the pure outcome
-    /// distinction above.
-    private func requestModelRound<Input: Sendable, Output>(
-        input: TurnPrompt<Input>,
+    /// The turn's request, in the agent's session: streamed once, start to end. Each tool call the
+    /// model makes is run by the session as it comes, and answered, and the model goes on in the
+    /// same request; the generated value ends it.
+    private func requestTurn<Input: Sendable, Output>(
+        input: TurnRequest<Input>,
         delta: TurnDelta,
         schemas: [ToolDefinition],
         modelTools: [AnyTool],
+        session: inout AgentSession,
         endpoint: ModelEndpoint,
-        lastToolRound: ToolRoundOutcome?,
+        calls: TurnCalls,
         through connection: AgentConnection<Output>
-    ) async throws(AgentRuntimeError) -> ModelRoundOutcome<Output>
+    ) async throws(AgentRuntimeError) -> TurnRequestOutcome<Output>
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         let stream: AsyncStream<ModelEvent<Output>>
         let request = ModelRequest(
-            input: input.current.value,
-            entries: input.entries,
-            reasoningRounds: input.reasoningRounds,
+            input: input.value,
+            entries: input.request.entries,
             reasoning: modelReasoningPolicy(
                 ModelReasoningContext(
                     model: endpoint.model,
                     purpose: .generation,
                     hasTools: !modelTools.isEmpty,
-                    completedToolRounds: input.reasoningRounds.count,
-                    lastToolRound: lastToolRound
+                    completedToolRounds: calls.count
                 )
             )
         )
@@ -1332,140 +1094,90 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
         }
 
-        var accumulator = ModelRoundAccumulator<Output>()
         let runner = ModelRequestRunner(
             turnID: turnID,
             emit: emit,
             recordActivity: recordActivity,
             clock: clock
         )
-        let handle: (ModelEvent<Output>) async throws(AgentRuntimeError) -> Void = { event in
-            let updates = TurnReducer.reduce(
-                event: event,
-                at: Date()
-            )
-            for update in updates {
-                await broadcast(update, to: connection)
-            }
-
-            switch event {
-            case .activity(.narrationDelta(let fragment)):
-                await recordActivity(.turn(.progress(.narration(fragment)), at: Date()))
-            case .activity(.reasoningDelta(let fragment)):
-                await recordActivity(.turn(.progress(.reasoning(fragment)), at: Date()))
-            case .activity(.status(let message)):
-                await recordActivity(.turn(.progress(.status(message)), at: Date()))
-            case .toolsRequested(let round):
-                accumulator = accumulator.applying(event)
-                for call in round.calls {
-                    await recordActivity(.turn(.progress(.toolCalled(call)), at: Date()))
+        let progress: TurnProgress<Output>
+        do {
+            progress = try await runner.run(
+                model: endpoint.model,
+                kind: .generation,
+                contentHashes: RequestContentHash.chain(
+                    tools: schemas,
+                    messages: input.request.entries
+                ),
+                stream: stream,
+                from: TurnProgress(calls: calls, generation: .pending)
+            ) { (progress: TurnProgress<Output>, event: ModelEvent<Output>) async throws(AgentRuntimeError) in
+                for update in TurnReducer.reduce(event: event, at: Date()) {
+                    await broadcast(update, to: connection)
                 }
-            case .generated:
-                accumulator = accumulator.applying(event)
-            case .partialUpdated, .usage, .contextUsage:
-                break
-            case .failed(let modelError):
-                throw Self.map(modelError: modelError)
+                switch event {
+                case .activity(.narrationDelta(let fragment)):
+                    await recordActivity(.turn(.progress(.narration(fragment)), at: Date()))
+                case .activity(.reasoningDelta(let fragment)):
+                    await recordActivity(.turn(.progress(.reasoning(fragment)), at: Date()))
+                case .activity(.status(let message)):
+                    await recordActivity(.turn(.progress(.status(message)), at: Date()))
+                case .toolCall(let toolCall):
+                    await recordActivity(.turn(.progress(.toolCalled(toolCall.call)), at: Date()))
+                    let ran = try await runToolCall(toolCall.call, calls: progress.calls, in: &session, through: connection)
+                    toolCall.reply.give(ran.answer)
+                    return TurnProgress(calls: ran.calls, generation: progress.generation)
+                case .generated(let value):
+                    return TurnProgress(calls: progress.calls, generation: .generated(value))
+                case .partialUpdated, .usage, .contextUsage:
+                    break
+                case .failed(let modelError):
+                    throw Self.map(modelError: modelError)
+                }
+                return progress
             }
+        } catch {
+            // The calls made before an overflow still count against the turn.
+            guard error.error == .contextLengthExceeded else { throw error.error }
+            return .overflowed(error.state.calls)
         }
-        _ = try await runner.run(
-            model: endpoint.model,
-            kind: .generation,
-            contentHashes: RequestContentHash.chain(
-                tools: schemas,
-                messages: input.entries
-            ),
-            stream: stream,
-            handle: handle
-        )
 
-        if let outcome = accumulator.outcome {
-            return outcome
+        guard case .generated(let generated) = progress.generation else {
+            throw AgentRuntimeError.modelMisbehavior("Model request ended without a generated output")
         }
-        throw AgentRuntimeError.modelMisbehavior(
-            "Model request ended without a generated output or tool calls"
-        )
+        return .generated(generated)
     }
 
-    /// Applies one tool transition and returns the value passed to the next
-    /// model round. Journaling precedes execution so replay observes the same
-    /// semantic interaction.
-    private func executeToolRound<Input: Sendable, Output>(
-        round: ModelToolRound,
-        schemas: [ToolDefinition],
-        input: TurnPrompt<Input>,
-        turnContextEntries: [Transcript.Entry],
-        turnSnapshot: TurnContext,
-        registry: inout AgentScope,
-        endpoint: ModelEndpoint,
+    /// Runs one tool call the model made, in the session: journaled before it runs, so replay
+    /// observes the same interaction, then its result. Gives the answer, with the tools the
+    /// session offers now, and the turn's calls after it.
+    private func runToolCall<Output>(
+        _ call: ToolCall,
+        calls: TurnCalls,
+        in session: inout AgentSession,
         through connection: AgentConnection<Output>
-    ) async throws(AgentRuntimeError) -> ToolRoundResult<Input>
+    ) async throws(AgentRuntimeError) -> (answer: ToolAnswer, calls: TurnCalls)
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
-        let plan = ReasoningLoopPlanning.toolRound(input: input, round: round)
-        var nextInput = plan.input
-
-        try await emit(
-            .assistantToolRound(
-                round: round,
-                at: Date()
-            )
-        )
+        let calling = try calls.calling()
+        try await emit(.history(.called(call, at: Date())))
 
         let startedAt = clock.now
-        let executions = try await registry.executeWithOutputs(plan.calls)
+        let execution = try await session.execute(call)
         try Self.checkCancellation()
         logger.info(
-            "Tool round finished",
+            "Tool call finished",
             metadata: [
                 "agentID": .string(agentID.rawValue),
-                "tools": .string(round.calls.map(\.name).joined(separator: ",")),
+                "tool": .string(call.name),
                 "durationMs": .string("\(Self.durationMilliseconds(since: startedAt, now: clock.now))"),
             ]
         )
-        for execution in executions {
-            let result = execution.result
-            nextInput = nextInput.appendingToolOutput(
-                callID: result.toolCallID,
-                name: result.name,
-                output: result.output,
-                superseding: execution.superseded
-            )
-            try await emit(.toolResult(result, at: Date()))
-            await recordActivity(.turn(.progress(.toolFinished(result)), at: Date()))
-            await broadcast(
-                .toolCompleted(result: result, at: Date()),
-                to: connection
-            )
-        }
+        let result = execution.result
+        try await emit(.history(.resulted(result, at: Date())))
+        await recordActivity(.turn(.progress(.toolFinished(result)), at: Date()))
+        await broadcast(.toolCompleted(result: result, at: Date()), to: connection)
 
-        guard endpoint.contextOwnership == .runtime, compactor != nil else {
-            return ToolRoundResult(
-                input: nextInput,
-                results: executions.map(\.result)
-            )
-        }
-
-        let rebuilt = try await rebuildContext(turnSnapshot)
-        let prepared = try await compactIfNeeded(
-            turnContext: rebuilt,
-            endpoint: endpoint,
-            additionalEntries: turnContextEntries,
-            tools: schemas
-        )
-        let wasCompacted =
-            prepared.promptContext.contextSummary != rebuilt.promptContext.contextSummary
-            || prepared.promptContext.conversationThread.count
-                != rebuilt.promptContext.conversationThread.count
-        guard wasCompacted else {
-            return ToolRoundResult(
-                input: nextInput,
-                results: executions.map(\.result)
-            )
-        }
-        return ToolRoundResult(
-            input: nextInput.rebased(on: prepared.preparedRequest),
-            results: executions.map(\.result)
-        )
+        return (ToolAnswer(result: result, page: execution.page, tools: session.allTools()), try calling.resulted(result))
     }
 
     // MARK: - Updates

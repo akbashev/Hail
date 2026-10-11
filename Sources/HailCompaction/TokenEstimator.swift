@@ -64,14 +64,6 @@ public struct TokenEstimator: Sendable {
         )
     }
 
-    public func estimate(_ message: ChatMessage) -> Int {
-        perMessageOverhead + estimate(characters(of: message))
-    }
-
-    public func estimate(_ messages: [ChatMessage]) -> Int {
-        messages.reduce(0) { $0 + estimate($1) }
-    }
-
     /// Estimates the actual request payload presented to the model. Tool
     /// schemas are included because providers place them in the prompt even
     /// though they are not ordinary chat messages.
@@ -109,31 +101,6 @@ public struct TokenEstimator: Sendable {
             return try JSONEncoder().encode(value).count
         } catch {
             throw .infrastructureFailure("Could not encode the model request for token estimation.")
-        }
-    }
-
-    private func characters(of message: ChatMessage) -> Int {
-        switch message {
-        case .text(_, let content, _):
-            return content.count
-        case .response(_, let payload, _):
-            return payload.jsonString.count
-        case .toolCall(let calls, _):
-            return calls.reduce(0) { $0 + $1.name.count + $1.arguments.jsonString.count }
-        case .assistantToolCall(let round, _):
-            let narration = round.narration.map { characters(of: $0.segments) } ?? 0
-            let reasoning = characters(of: round.reasoning)
-            return narration
-                + reasoning
-                + round.calls.reduce(0) { $0 + $1.name.count + $1.arguments.jsonString.count }
-        case .toolResult(_, let name, let output, _, _):
-            return name.count + characters(of: output.transcriptSegments)
-        case .failure(let error, _):
-            return String(describing: error).count
-        case .decisionRequest(_, let question, let options, _):
-            return options.reduce(question.count) { $0 + $1.label.count }
-        case .decisionResolved(_, let question, let resolution, let comment, _):
-            return question.count + resolution.count + (comment?.count ?? 0)
         }
     }
 

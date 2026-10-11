@@ -1,3 +1,4 @@
+import AnyLanguageModel
 import Foundation
 import HailCore
 import Testing
@@ -7,7 +8,7 @@ struct UsageAccountingTests {
     private let agentID = AgentID(role: Role("scout"), contextID: AgentContextID("usage"))
 
     @Test("usage events fold into durable totals without touching the transcript")
-    func usageFoldsIntoState() {
+    func usageFoldsIntoState() throws {
         var state = AgentState(agentID: agentID)
         let usage = ModelUsage(
             inputTokens: 10,
@@ -16,12 +17,12 @@ struct UsageAccountingTests {
             totalTokens: 14,
             source: .reported
         )
-        state.apply(.modelUsage(usage, at: Date()))
-        state.apply(
+        try state.apply(.modelUsage(usage, at: Date()))
+        try state.apply(
             .contextUsage(ContextUsage(usedTokens: 12, limitTokens: 100, source: .reported), at: Date())
         )
 
-        #expect(state.conversationThread.isEmpty)
+        #expect(state.history.closed.isEmpty)
         #expect(state.usageSummary.requestCount == 1)
         #expect(state.usageSummary.inputTokens == 10)
         #expect(state.usageSummary.outputTokens == 4)
@@ -31,7 +32,7 @@ struct UsageAccountingTests {
     }
 
     @Test("request lifecycle is replayable and queryable")
-    func requestLifecycleProjection() {
+    func requestLifecycleProjection() throws {
         let turnID = TurnID("turn-1")
         let requestID = ModelRequestID("request-1")
         let startedAt = Date(timeIntervalSince1970: 1)
@@ -44,8 +45,8 @@ struct UsageAccountingTests {
         )
         let usage = ModelUsage(inputTokens: 8, outputTokens: 3, totalTokens: 11, source: .reported)
         let events: [AgentEvent] = [
-            .turnStarted(at: startedAt),
-            .turnIdentified(id: turnID),
+            .history(
+                .received(.init(from: .user(id: "u"), content: GeneratedContent("go"), at: startedAt), turn: turnID)),
             .modelRequestStarted(record),
             .modelUsage(usage, at: completedAt),
             .modelRequestCompleted(
@@ -57,23 +58,23 @@ struct UsageAccountingTests {
         ]
 
         var state = AgentState(agentID: agentID)
-        for event in events { state.apply(event) }
+        for event in events { try state.apply(event) }
 
-        #expect(state.activeTurn?.id == turnID)
-        #expect(state.phase == .generating)
+        #expect(state.history.open?.id == turnID)
+        #expect(state.runtimeState == .generating)
         #expect(state.modelRequests.count == 1)
         #expect(state.modelRequests.first?.outcome == .completed)
         #expect(state.modelRequests.first?.durationMilliseconds == 1_000)
 
-        let history = AgentHistoryReader(events: events)
-        #expect(history.modelRequests == state.modelRequests)
+        let journal = AgentJournalReader(events: events)
+        #expect(journal.modelRequests == state.modelRequests)
     }
 
     @Test("the actor-local request projection stays bounded")
-    func recentRequestProjectionIsBounded() {
+    func recentRequestProjectionIsBounded() throws {
         var state = AgentState(agentID: agentID)
         for index in 0..<105 {
-            state.apply(
+            try state.apply(
                 .modelRequestStarted(
                     ModelRequestRecord(
                         id: ModelRequestID("request-\(index)"),

@@ -125,90 +125,72 @@ public struct RequestMeasurement: Sendable, Equatable {
     }
 }
 
-/// Measures a candidate request. Compaction uses this for candidate cuts and
-/// summary chunks; the initial request measurement is passed separately so it
-/// is not recomputed or hidden inside the agent context.
+/// Measures a candidate request with the provider's own counter.
 public typealias RequestMeasurer =
     @Sendable (
         PreparedRequest
     ) async throws(AgentRuntimeError) -> RequestMeasurement
 
-/// The exact sections of one stateless model request. Keeping these sections
-/// explicit lets a compactor replace only the conversation suffix without
-/// reverse-engineering a prompt policy's output by position.
+/// How compaction knows a request's size.
+public enum RequestMeasuring: Sendable {
+    /// The provider counts: `current` is the request's exact size, and `by` counts candidates.
+    case counted(RequestMeasurement, by: RequestMeasurer)
+    /// The provider's last report, a floor for the request's size, since a history only grows;
+    /// candidates are estimated.
+    case reportedFloor(RequestMeasurement)
+    /// Only Hail's estimate, for the request and its candidates.
+    case estimated
+}
+
+/// The sections of one stateless model request, in the order the model reads them: the prefix
+/// (instructions and the summary), the history before the open turn, the request-time context,
+/// and the open turn. A compactor replaces the history and the open turn's work, never the
+/// prefix's instructions or the context.
 public struct PreparedRequest: Sendable {
-    public struct ConversationEntry: Sendable {
-        /// Index of the source ``ChatMessage`` in ``PromptContext``.
-        public let sourceIndex: Int
-        public let entry: Transcript.Entry
-
-        public init(sourceIndex: Int, entry: Transcript.Entry) {
-            self.sourceIndex = sourceIndex
-            self.entry = entry
-        }
-    }
-
     public let prefix: [Transcript.Entry]
-    public let conversation: [ConversationEntry]
-    public let suffix: [Transcript.Entry]
+    public let history: [Transcript.Entry]
+    /// Request-time context, such as the date or the open scopes' pages: shown before the open
+    /// turn, never part of the history.
+    public let context: [Transcript.Entry]
+    /// What the open turn answers, then its work so far.
+    public let openTurn: [Transcript.Entry]
     public let tools: [ToolDefinition]
+
     public init(
         prefix: [Transcript.Entry],
-        conversation: [ConversationEntry],
-        suffix: [Transcript.Entry] = [],
+        history: [Transcript.Entry],
+        context: [Transcript.Entry] = [],
+        openTurn: [Transcript.Entry],
         tools: [ToolDefinition] = []
     ) {
         self.prefix = prefix
-        self.conversation = conversation
-        self.suffix = suffix
+        self.history = history
+        self.context = context
+        self.openTurn = openTurn
         self.tools = tools
     }
 
     /// The full request in provider order.
     public var entries: [Transcript.Entry] {
-        prefix + conversation.map(\.entry) + suffix
+        prefix + history + context + openTurn
     }
 
-    /// Finds the provider-message position corresponding to one durable
-    /// conversation source entry. The source index is stable across prompt
-    /// rebuilds even when compaction changes the number of retained messages.
-    func messageIndex(forSourceIndex sourceIndex: Int) -> Int? {
-        guard
-            let conversationIndex = conversation.lastIndex(where: {
-                $0.sourceIndex == sourceIndex
-            })
-        else {
-            return nil
-        }
-        return prefix.count + conversationIndex
-    }
-
-    /// Adds request-local messages and tool schemas without changing the
-    /// policy-owned prefix or conversation mapping.
-    public func appending(
-        suffix additionalMessages: [Transcript.Entry],
-        tools additionalTools: [ToolDefinition]
-    ) -> PreparedRequest {
-        PreparedRequest(
-            prefix: prefix,
-            conversation: conversation,
-            suffix: suffix + additionalMessages,
-            tools: tools + additionalTools
-        )
+    /// The request with its request-time context and tool schemas.
+    public func adding(context: [Transcript.Entry], tools: [ToolDefinition]) -> PreparedRequest {
+        PreparedRequest(prefix: prefix, history: history, context: self.context + context, openTurn: openTurn, tools: self.tools + tools)
     }
 }
 
-/// Decides — before each request, for non-session-owning endpoints — whether
-/// the assembled context needs compacting, and produces the rolling summary.
+/// Decides — after each turn, and when a request overflows, for non-session-owning endpoints —
+/// whether the context needs compacting, and produces the rolling summary.
 ///
 /// Session-owning harnesses (kimi/claude/codex) manage context in their own
 /// sessions and are never offered compaction. Stateless chat endpoints
 /// (Ollama, hosted chat APIs) have no server-side memory management, so the
 /// agent runtime owns it here.
 ///
-/// The result is journaled as a single
-/// ``AgentEvent/conversationCompacted(archivedCount:summary:)`` event: the
-/// summary is a non-deterministic fold of the archived prefix, so it must be
+/// The result is journaled as a single ``AgentHistory/Event/compacted(_:through:kept:)``
+/// event: the summary is a non-deterministic fold of the archived work, so it must be
 /// recorded — replay never re-runs the summarizer. Snapshotting checkpoints
 /// the resulting state; the journal stays the source of truth.
 ///
@@ -217,10 +199,8 @@ public struct PreparedRequest: Sendable {
 /// this protocol themselves or wrap the injected closure.
 public protocol ContextCompactor: Sendable {
     /// Gives the compactor an opportunity to recover from a provider-reported
-    /// overflow. `request` is the exact request shape that would be sent, with
-    /// the conversation section carrying source indices back to
-    /// `PromptContext.conversationThread`. A compactor must preserve the
-    /// prefix and suffix while replacing only that conversation section.
+    /// overflow. `request` is the exact request shape that would be sent. A compactor decides which
+    /// turns' work goes into the summary, and which archived inputs stay word for word.
     ///
     /// The summarizer's task text is derived from the report type itself
     /// (see ``CompactionTask``); hosts document their ``Generable`` report.
@@ -228,8 +208,7 @@ public protocol ContextCompactor: Sendable {
         context: PromptContext,
         request: PreparedRequest,
         budget: CompactionBudget,
-        measurement: RequestMeasurement?,
-        measure: RequestMeasurer?,
+        measuring: RequestMeasuring,
         assemble: PromptAssembler,
         summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> Output,
         contextProjection: @Sendable (Output, ContextProjectionBudget) throws(AgentRuntimeError) -> GeneratedContent,
@@ -252,8 +231,7 @@ extension ContextCompactor {
             context: context,
             request: request,
             budget: budget,
-            measurement: nil,
-            measure: nil,
+            measuring: .estimated,
             assemble: assembleStandardPrompt,
             summarize: summarize,
             contextProjection: { value, _ in value.generatedContent },

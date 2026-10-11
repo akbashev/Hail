@@ -497,80 +497,33 @@ struct ProtocolViolatingHarnessTests {
     }
 }
 
-// MARK: - Repeated crash dedup (AgentState fold)
+// MARK: - Repeated crash (AgentState fold)
 
-/// Phase 2 pinned a single interrupted re-run. This pins the compounding
-/// case: the re-run crashes *again* after tool events, so the same opening is
-/// re-journaled a third time — the fold must still keep exactly one copy.
-@Suite("AgentState repeated crash dedup")
-struct RepeatedCrashDedupTests {
-    private func makeToolResult(id: String, output: String) throws -> ToolResult {
-        ToolResult(toolCallID: id, name: "read_file", output: .text(output))
-    }
-
-    @Test("two consecutive interrupted re-runs keep a single opening")
-    func repeatedCrashKeepsSingleOpening() throws {
-        let message = ChatMessage.text(
-            sender: "user",
-            content: "hello",
-            timestamp: Date(timeIntervalSince1970: 2_000)
-        )
+/// A crashed turn stays open and the agent finishes it: what the resumed run does lands in the
+/// same turn, however often it crashes, and its input is never journaled again.
+@Suite("AgentState repeated crash")
+struct RepeatedCrashTests {
+    @Test("a turn resumed after two crashes is still one turn with all its work")
+    func repeatedCrashKeepsOneTurn() throws {
+        let call = { (id: String) in ToolCall(id: id, name: "read_file", arguments: GeneratedContent(properties: [:])) }
+        let result = { (id: String) in ToolResult(toolCallID: id, name: "read_file", output: .text("ok")) }
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
+        let input = AgentHistory.Input(
+            from: .user(id: "u"), content: GeneratedContent("hello"), at: Date(timeIntervalSince1970: 2_000))
 
-        // Original turn: crash after tool events.
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 1_999)))
-        state.apply(.messageReceived(message))
-        state.apply(
-            .assistantToolRound(
-                round: ModelToolRound(
-                    calls: [ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:]))]
-                ),
-                at: Date(timeIntervalSince1970: 2_001)
-            )
-        )
-        state.apply(
-            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: Date(timeIntervalSince1970: 2_002))
-        )
-        state.normalizeAfterReplay()
-        #expect(state.pendingTurnRerun == message)
+        try state.apply(.history(.received(input, turn: TurnID("t1"))))
+        for (round, id) in ["call-1", "call-2"].enumerated() {
+            let at = Date(timeIntervalSince1970: 2_001 + TimeInterval(round))
+            try state.apply(.history(.called(call(id), at: at)))
+            try state.apply(.history(.resulted(result(id), at: at)))
+            state.normalizeAfterReplay()
+            #expect(state.history.open?.id == TurnID("t1"))
+        }
+        try state.apply(.history(.replied(.init(content: GeneratedContent("done"), at: Date(timeIntervalSince1970: 4_100)))))
 
-        // First re-run: the opening collapses, then the process crashes
-        // again after tool events — the marker is armed a second time.
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 3_000)))
-        state.apply(.messageReceived(message))
-        state.apply(
-            .assistantToolRound(
-                round: ModelToolRound(
-                    calls: [ToolCall(id: "call-2", name: "read_file", arguments: GeneratedContent(properties: [:]))]
-                ),
-                at: Date(timeIntervalSince1970: 3_001)
-            )
-        )
-        state.apply(
-            .toolResult(try makeToolResult(id: "call-2", output: "ok again"), at: Date(timeIntervalSince1970: 3_002))
-        )
-        state.normalizeAfterReplay()
-        #expect(state.pendingTurnRerun == message)
-
-        // Second re-run: collapses again — no compounding duplication.
-        state.apply(.turnStarted(at: Date(timeIntervalSince1970: 4_000)))
-        state.apply(.messageReceived(message))
-
-        #expect(state.conversationThread.filter { $0 == message }.count == 1)
-        #expect(state.activeTurn?.opening == message)
-        #expect(state.pendingTurnRerun == nil)
-
-        // The recovered turn then completes cleanly.
-        state.apply(
-            .responseReceived(
-                sender: "coder",
-                content: GeneratedContent("done"),
-                at: Date(timeIntervalSince1970: 4_100)
-            ),
-        )
-        state.apply(.turnCompleted(at: Date(timeIntervalSince1970: 4_100)))
-        #expect(state.activeTurn == nil)
-        #expect(state.conversationThread.filter { $0 == message }.count == 1)
+        #expect(state.history.closed.count == 1)
+        #expect(state.history.closed[0].steps.count == 4)
+        #expect(state.history.open == nil)
     }
 }
 
@@ -598,36 +551,29 @@ struct CorruptedJournalTests {
 
     @Test("a torn tail event throws and never partially applies")
     func tornTailThrowsAndKeepsState() throws {
-        let message = ChatMessage.text(
-            sender: "user",
-            content: "hello",
-            timestamp: Date(timeIntervalSince1970: 2_000)
-        )
+        let input = AgentHistory.Input(
+            from: .user(id: "u"), content: GeneratedContent("hello"), at: Date(timeIntervalSince1970: 2_000))
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
 
         let validLines = [
-            try encode(.turnStarted(at: Date(timeIntervalSince1970: 1_999))),
-            try encode(.messageReceived(message)),
+            try encode(.history(.received(input, turn: TurnID("t1")))),
             try encode(
-                .assistantToolRound(
-                    round: ModelToolRound(
-                        calls: [ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:]))]
-                    ),
-                    at: Date(timeIntervalSince1970: 2_001)
-                )
-            ),
+                .history(
+                    .called(
+                        ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:])),
+                        at: Date(timeIntervalSince1970: 2_001)))),
         ]
         for line in validLines {
             let event = try JSONDecoder().decode(AgentEvent.self, from: Data(line.utf8))
-            state.apply(event)
+            try state.apply(event)
         }
-        #expect(state.conversationThread.count == 2)
-        #expect(state.activeTurn != nil)
+        let beforeTail = state.history
+        #expect(beforeTail.open?.steps.count == 1)
 
         // A crash mid-write leaves a torn final line: a valid prefix of a
         // real event, cut before the JSON closes.
         let tailEvent = try encode(
-            .toolResult(try makeToolResult(id: "call-1", output: "ok"), at: Date(timeIntervalSince1970: 2_002))
+            .history(.resulted(try makeToolResult(id: "call-1", output: "ok"), at: Date(timeIntervalSince1970: 2_002)))
         )
         let torn = String(tailEvent.prefix(tailEvent.count / 2))
         #expect {
@@ -644,11 +590,10 @@ struct CorruptedJournalTests {
         }
 
         // The failed decodes never touched the state: replay through the
-        // last valid event recovers the exact pre-crash state, including the
-        // re-run marker for the interrupted turn.
-        #expect(state.conversationThread.count == 2)
+        // last valid event recovers the exact pre-crash state, with the
+        // interrupted turn still open for the agent to finish.
         state.normalizeAfterReplay()
-        #expect(state.pendingTurnRerun == message)
+        #expect(state.history == beforeTail)
     }
 
     @Test("resume identity survives a corrupted tail decode failure")
@@ -657,11 +602,15 @@ struct CorruptedJournalTests {
 
         let validLines = [
             try encode(.modelSessionIdentified(id: SessionID("session-1"), identity: SessionIdentity("fp-A"))),
-            try encode(.turnStarted(at: Date(timeIntervalSince1970: 1_999))),
+            try encode(
+                .history(
+                    .received(
+                        .init(from: .user(id: "u"), content: GeneratedContent("hi"), at: Date(timeIntervalSince1970: 1_999)),
+                        turn: TurnID("t1")))),
         ]
         for line in validLines {
             let event = try JSONDecoder().decode(AgentEvent.self, from: Data(line.utf8))
-            state.apply(event)
+            try state.apply(event)
         }
         #expect(state.modelSession?.id == SessionID("session-1"))
 
@@ -679,43 +628,5 @@ struct CorruptedJournalTests {
         // The journaled session identity the resume path reads is intact.
         #expect(state.modelSession?.id == SessionID("session-1"))
         #expect(state.modelSession?.identity == SessionIdentity("fp-A"))
-    }
-
-    @Test("conversationCompacted written before typed reports still replays")
-    func legacyCompactionEventWithoutOutputReplays() throws {
-        let agentID = AgentID(role: Role("coder"), contextID: AgentContextID("T-2"))
-        var state = AgentState(agentID: agentID)
-        state.apply(
-            .messageReceived(
-                .text(sender: "user", content: "hello", timestamp: Date(timeIntervalSince1970: 2))
-            ))
-        state.apply(
-            .messageReceived(
-                .text(sender: "user", content: "world", timestamp: Date(timeIntervalSince1970: 3))
-            ))
-
-        let line = try encode(
-            .conversationCompacted(
-                archivedCount: 1,
-                content: GeneratedContent("the rolling summary"),
-                output: GeneratedContent("the typed report")
-            )
-        )
-
-        // A journal written before typed compaction reports has no `output`
-        // key in the payload; replay must tolerate its absence.
-        var envelope = try #require(
-            JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-        )
-        var payload = try #require(envelope["conversationCompacted"] as? [String: Any])
-        payload["output"] = nil
-        envelope["conversationCompacted"] = payload
-        let legacy = try JSONSerialization.data(withJSONObject: envelope)
-
-        let decoded = try JSONDecoder().decode(AgentEvent.self, from: legacy)
-        state.apply(decoded)
-
-        #expect(state.contextSummary == GeneratedContent("the rolling summary"))
-        #expect(state.conversationThread.count == 1)
     }
 }

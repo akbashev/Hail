@@ -15,35 +15,25 @@ import Testing
 struct TokenEstimatorTests {
     private let estimator = TokenEstimator()
 
-    private func text(_ content: String) -> ChatMessage {
-        .text(sender: "user", content: content, timestamp: Date(timeIntervalSince1970: 0))
-    }
-
     private func prompt(_ content: String) -> Transcript.Entry {
         .prompt(.init(segments: [.text(.init(content: content))]))
     }
 
-    @Test("a text message costs its characters plus framing overhead")
+    @Test("text costs its characters at four per token")
     func textEstimate() {
-        // 40 characters at 4 chars/token = 10 tokens + 4 overhead.
-        #expect(estimator.estimate(text(String(repeating: "a", count: 40))) == 14)
+        #expect(estimator.estimate(String(repeating: "a", count: 40)) == 10)
     }
 
-    @Test("an empty thread estimates to zero")
-    func emptyThread() {
-        #expect(estimator.estimate([]) == 0)
+    @Test("an empty request estimates to zero")
+    func emptyRequest() async throws {
+        #expect(try await estimator.estimate(messages: [], tools: []) == 0)
     }
 
-    @Test("tool calls count name and arguments")
-    func toolCallEstimate() {
-        let call = ToolCall(
-            id: "1",
-            name: "read_file",
-            arguments: GeneratedContent(properties: ["path": "/tmp/x"])
-        )
-        let message = ChatMessage.toolCall(calls: [call], timestamp: Date(timeIntervalSince1970: 0))
-        let expected = 4 + Int((Double(9 + "{\"path\":\"/tmp/x\"}".count) / 4.0).rounded(.up))
-        #expect(estimator.estimate(message) == expected)
+    @Test("a longer message costs more")
+    func longerCostsMore() async throws {
+        let short = try await estimator.estimate(messages: [prompt("hi")], tools: [])
+        let long = try await estimator.estimate(messages: [prompt(String(repeating: "hello ", count: 50))], tools: [])
+        #expect(long > short)
     }
 
     @Test("request estimation includes serialized tool schemas")

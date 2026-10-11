@@ -41,7 +41,7 @@ struct ToolRegistryTests {
 
     @Test("schemas are sorted independently of registration order")
     func schemasHaveStableOrder() async {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(NowTool())
         registry.register(FileTool(projectRoot: URL(fileURLWithPath: "/tmp")))
 
@@ -63,7 +63,7 @@ struct ToolRegistryTests {
             ClockEffect()
         }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             .text(input.message)
         }
     }
@@ -82,7 +82,7 @@ struct ToolRegistryTests {
 
     @Test("a call to a tool that doesn't exist lists the tools, with what each does")
     func unknownToolListsTheTools() async throws {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(tools: ParameterlessCommands().tools)
         let results = try await registry.execute([
             ToolCall(id: "1", name: "test", arguments: GeneratedContent(properties: [:]))
@@ -103,7 +103,7 @@ struct ToolRegistryTests {
             generatedContent: GeneratedContent(properties: [:]),
             authority: FullAuthority()
         )
-        #expect(!output.output.textRepresentation.isEmpty)
+        #expect(!output.result.textRepresentation.isEmpty)
     }
 
     /// A tool that links to the generated-input tool, as a page links to the next one.
@@ -114,21 +114,21 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             .text("Started.", links: [GeneratedInputTool()])
         }
     }
 
     @Test("a result's links are offered in its call's scope, first; calling another tool leaves it open, like a tab")
     func linksAreOffered() async throws {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(tools: [LinkingTool(), NowTool()])
         #expect(registry.schemas().map(\.name) == ["now", "start"])
 
         let results = try await registry.execute([
             ToolCall(id: "1", name: "start", arguments: GeneratedContent(properties: [:]))
         ])
-        #expect(results[0].output.textRepresentation == "Started.\n\nNow you can use: generated_input")
+        #expect(results[0].output.textRepresentation == "Started.")
         #expect(registry.schemas().map(\.name) == ["generated_input", "now", "start"])
 
         let echoed = try await registry.execute([
@@ -156,7 +156,7 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             var names: [String] = []
             await scope.show(.text("Started."), offering: Self.options)
             while let event = await scope.next() {
@@ -182,41 +182,39 @@ struct ToolRegistryTests {
         }
     }
 
-    private func call(_ registry: inout AgentScope, _ id: String, _ name: String, adding added: String? = nil) async throws -> ToolExecution {
+    private func call(_ registry: inout AgentSession, _ id: String, _ name: String, adding added: String? = nil) async throws -> ToolExecution {
         let arguments = added.map { GeneratedContent(properties: ["name": $0]) } ?? GeneratedContent(properties: [:])
         return try await registry.executeWithOutputs([ToolCall(id: id, name: name, arguments: arguments)])[0]
     }
 
     @Test("a call works with the model in its scope, until its result; the scope then collapses to it")
     func callsWorkInTheirScope() async throws {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(tools: [ListTool()])
         let started = try await call(&registry, "1", "start")
-        #expect(started.result.output.textRepresentation == "Started.\n\nNow you can use: add, make")
+        #expect(started.result.output.textRepresentation == "Started.")
         #expect(registry.schemas().map(\.name) == ["add", "make", "start"])
 
-        // Each page replaces the scope's earlier ones.
-        #expect(try await call(&registry, "2", "add", adding: "Ann").superseded == ["1"])
+        _ = try await call(&registry, "2", "add", adding: "Ann")
         // A call that fails fails alone: the scope goes on as it was.
         #expect(try await call(&registry, "3", "add", adding: "Ann").result.isError)
-        #expect(try await call(&registry, "4", "add", adding: "Bob").superseded == ["1", "2"])
+        _ = try await call(&registry, "4", "add", adding: "Bob")
 
         let made = try await call(&registry, "5", "make")
         #expect(made.result.output.textRepresentation == "Made: Ann, Bob")
-        #expect(made.superseded == ["1", "2", "4"])
         #expect(registry.schemas().map(\.name) == ["start"])
     }
 
     @Test("answering ends no scope: the next turn begins inside the ones left open")
     func scopesOutliveTurns() async throws {
-        var scope = AgentScope()
-        scope.offer([ListTool()])
+        var scope = AgentSession()
+        scope.offer(TurnTools(tools: [ListTool()]))
         _ = try await call(&scope, "1", "start")
         _ = try await call(&scope, "2", "add", adding: "Ann")
 
         // The next turn begins inside the open scope, which says where things are.
         let pages = await scope.begin(TurnID())
-        #expect(pages.map(\.output.textRepresentation) == ["Still a list of Ann; nothing made yet.\n\nNow you can use: add, make"])
+        #expect(pages.map(\.output.textRepresentation) == ["Still a list of Ann; nothing made yet."])
         #expect(scope.schemas().map(\.name) == ["add", "make", "start"])
         _ = try await call(&scope, "3", "add", adding: "Bob")
         #expect(try await call(&scope, "4", "make").result.output.textRepresentation == "Made: Ann, Bob")
@@ -224,7 +222,7 @@ struct ToolRegistryTests {
 
     @Test("a call still working stays open beside other calls, until ending the agent's scope cancels it")
     func workingCallsStayOpen() async throws {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(tools: [ListTool(), NowTool()])
         _ = try await call(&registry, "1", "start")
         _ = try await call(&registry, "2", "now")
@@ -237,7 +235,7 @@ struct ToolRegistryTests {
 
     @Test("two calls can work side by side, each answering its own")
     func callsSideBySide() async throws {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(tools: [ListTool(), SecondListTool()])
         _ = try await call(&registry, "1", "start")
         _ = try await call(&registry, "2", "start_second")
@@ -260,7 +258,7 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             var names: [String] = []
             await scope.show(.text("Started."), offering: Self.options)
             while let event = await scope.next() {
@@ -290,7 +288,7 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<ListTool.Call>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: Input, in scope: borrowing ToolScope<ListTool.Call>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             await scope.show(.text("Listening."), offering: ListTool.options)
             while let event = await scope.next() { _ = consume event }
             throw CancellationError()
@@ -299,7 +297,7 @@ struct ToolRegistryTests {
 
     @Test("a call the scope doesn't answer fails, instead of waiting forever")
     func unansweredCallsFail() async throws {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(tools: [SilentTool()])
         _ = try await call(&registry, "1", "silent")
         let unanswered = try await call(&registry, "2", "add", adding: "Ann")
@@ -315,25 +313,25 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> Page {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
             throw PageError(.text("It already exists.", links: [GeneratedInputTool()]))
         }
     }
 
     @Test("a failure is a page too: its links are offered, like a result's")
     func failuresLink() async throws {
-        var registry = AgentScope()
+        var registry = AgentSession()
         registry.register(tools: [ExistsTool()])
         let failed = try await call(&registry, "1", "make")
         #expect(failed.result.isError)
-        #expect(failed.result.output.textRepresentation == "It already exists.\n\nNow you can use: generated_input")
+        #expect(failed.result.output.textRepresentation == "It already exists.")
         #expect(registry.schemas().map(\.name) == ["generated_input", "make"])
     }
 
     @Test("called with no model, a call's result is the first page its scope shows")
     func noModel() async throws {
         let page = try await AnyTool(ListTool()).runOutput(generatedContent: GeneratedContent(properties: [:]), authority: FullAuthority())
-        #expect(page.output.textRepresentation == "Started.")
+        #expect(page.result.textRepresentation == "Started.")
     }
 
     @Test("generated arguments are decoded without a JSONDecoder round trip")
@@ -345,7 +343,7 @@ struct ToolRegistryTests {
             authority: FullAuthority()
         )
 
-        #expect(output.output == .text("hello"))
+        #expect(output.result == .text("hello"))
     }
 }
 

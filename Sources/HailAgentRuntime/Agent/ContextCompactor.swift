@@ -143,15 +143,13 @@ public enum RequestMeasuring: Sendable {
 }
 
 /// The sections of one stateless model request, in the order the model reads them: the prefix
-/// (instructions and the summary), the history before the open turn, the request-time context,
-/// and the open turn. A compactor replaces the history and the open turn's work, never the
-/// prefix's instructions or the context.
+/// (instructions and the summary), the history before the open turn, and the open turn. Every
+/// entry is something that happened: what was said, what the model said, and its calls with
+/// their results. A compactor replaces the history and the open turn's work, never the prefix's
+/// instructions.
 public struct PreparedRequest: Sendable {
     public let prefix: [Transcript.Entry]
     public let history: [Transcript.Entry]
-    /// Request-time context, such as the date or the open scopes' pages: shown before the open
-    /// turn, never part of the history.
-    public let context: [Transcript.Entry]
     /// What the open turn answers, then its work so far.
     public let openTurn: [Transcript.Entry]
     public let tools: [ToolDefinition]
@@ -159,25 +157,35 @@ public struct PreparedRequest: Sendable {
     public init(
         prefix: [Transcript.Entry],
         history: [Transcript.Entry],
-        context: [Transcript.Entry] = [],
         openTurn: [Transcript.Entry],
         tools: [ToolDefinition] = []
     ) {
         self.prefix = prefix
         self.history = history
-        self.context = context
         self.openTurn = openTurn
         self.tools = tools
     }
 
     /// The full request in provider order.
     public var entries: [Transcript.Entry] {
-        prefix + history + context + openTurn
+        prefix + history + openTurn
     }
 
-    /// The request with its request-time context and tool schemas.
-    public func adding(context: [Transcript.Entry], tools: [ToolDefinition]) -> PreparedRequest {
-        PreparedRequest(prefix: prefix, history: history, context: self.context + context, openTurn: openTurn, tools: self.tools + tools)
+    /// The request with the tools its turn offers.
+    public func offering(_ tools: [ToolDefinition]) -> PreparedRequest {
+        PreparedRequest(prefix: prefix, history: history, openTurn: openTurn, tools: self.tools + tools)
+    }
+
+    /// The request with what arrived since the last turn: calls that finished meanwhile, which
+    /// arrive with what the turn answers, in the same message.
+    public func receiving(_ arrivals: [Arrival]) -> PreparedRequest {
+        guard !arrivals.isEmpty, case .prompt(let input)? = openTurn.first else { return self }
+        let arrived = arrivals.map { arrival in
+            Transcript.Segment.text(.init(content: "\(arrival.call.name) finished meanwhile: \(arrival.output.textRepresentation)"))
+        }
+        return PreparedRequest(
+            prefix: prefix, history: history, openTurn: [.prompt(.init(segments: input.segments + arrived))] + openTurn.dropFirst(),
+            tools: tools)
     }
 }
 

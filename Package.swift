@@ -139,3 +139,10 @@ let package = Package(
         ),
     ]
 )
+
+// Every async function runs on its caller's executor unless it says otherwise, as Swift 6.2's
+// approachable concurrency has it: what an actor owns, such as a borrowed effect token, stays on
+// that actor.
+for target in package.targets where target.type != .binary {
+    target.swiftSettings = (target.swiftSettings ?? []) + [.enableUpcomingFeature("NonisolatedNonsendingByDefault")]
+}

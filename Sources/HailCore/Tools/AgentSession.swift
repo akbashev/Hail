@@ -1,15 +1,25 @@
 import AnyLanguageModel
 import ScopedEffect
-
 public struct ToolExecution: Sendable {
     /// What the call did, as the history keeps it.
     public let result: ToolResult
     /// The page it landed on, as it is now: the model reads it after the result, in this request.
-    public let page: Page?
+    public let page: ToolPage?
 
-    public init(result: ToolResult, page: Page? = nil) {
+    public init(result: ToolResult, page: ToolPage? = nil) {
         self.result = result
         self.page = page
+    }
+}
+
+/// A call that finished while no turn was running: the call, and what it came to.
+public struct Arrival: Sendable, Equatable {
+    public let call: ToolCall
+    public let output: ToolOutput
+
+    public init(call: ToolCall, output: ToolOutput) {
+        self.call = call
+        self.output = output
     }
 }
 
@@ -17,17 +27,17 @@ public struct ToolExecution: Sendable {
 public struct TurnTools: Sendable {
     /// What the turn starts from: tools that stand alone, and links to pages, such as a group's.
     public var tools: [any Tool]
-    public var pages: any Pages
+    public var pages: any ToolPages
 
-    public init(tools: [any Tool] = [], pages: any Pages = NoPages()) {
+    public init(tools: [any Tool] = [], pages: any ToolPages = NoToolPages()) {
         self.tools = tools
         self.pages = pages
     }
 
     /// Starting from `tools`, and from a link to each of `groups`, whose pages open with `pages`.
-    public init(tools: [any Tool] = [], groups: [ToolGroup], pages: any Pages = NoPages()) {
+    public init(tools: [any Tool] = [], groups: [ToolGroup], pages: any ToolPages = NoToolPages()) {
         self.tools = tools + groups.map(\.link)
-        self.pages = CombinedPages(groups + [pages])
+        self.pages = CombinedToolPages(groups + [pages])
     }
 }
 
@@ -43,7 +53,7 @@ public struct TurnTools: Sendable {
 public struct AgentSession: ~Copyable, Sendable {
     private var tools: [String: AnyTool] = [:]
     /// What the addresses calls land on open to: the host's, for this turn.
-    private var pages: any Pages = NoPages()
+    private var pages: any ToolPages = NoToolPages()
     /// The scopes opened from the root, oldest first.
     private var children: [InnerScope] = []
     /// The turn the model is in: the turn each call it makes is opened in.
@@ -67,14 +77,14 @@ public struct AgentSession: ~Copyable, Sendable {
     }
 
     /// Begins a turn where the last one left off. Open page tabs are refreshed from their
-    /// addresses and shown with their current links; completed results without a page are closed.
-    /// Each call still working hears the turn and shows its page, or finishes into its result.
-    public mutating func begin(_ turn: TurnID) async -> [Page] {
+    /// addresses, to offer their links as they are now; completed results without a page are
+    /// closed. Each call still working hears the turn, and offers what it offers now, or finishes:
+    /// what it came to is returned, as what arrived since the last turn.
+    public mutating func begin(_ turn: TurnID) async -> [Arrival] {
         self.turn = turn
-        var pages: [Page] = []
         // A page is a tab: a new conversational turn does not close it. Refresh it through its
-        // address so both what it says and what it offers reflect the resource's state now.
-        // Link-only result scopes are temporary and end with their turn.
+        // address so what it offers reflects the resource's state now. Link-only result scopes
+        // are temporary and end with their turn.
         for entry in entries where entry.scope.read({ $0.running == nil }) == true {
             guard let address = entry.scope.read({ $0.address }) ?? nil else {
                 await remove(entry.scope, from: entry.parent)
@@ -84,14 +94,13 @@ public struct AgentSession: ~Copyable, Sendable {
                 let page = try await self.pages.open(address)
                 let links = page.links.map { AnyTool($0) }
                 entry.scope.modify { (token: inout Scope) in token.links = links }
-                pages.append(page)
             } catch {
                 // The resource behind the tab is gone or unreachable, so the tab can no longer
                 // offer its links.
                 await remove(entry.scope, from: entry.parent)
             }
         }
-        // `pages` here is what opens the turn; the host's pages are `self.pages`.
+        var arrivals: [Arrival] = []
         for entry in entries {
             guard let running = entry.scope.read({ $0.running }) ?? nil else { continue }
             switch await running.channel.enter(turn) {
@@ -101,21 +110,20 @@ public struct AgentSession: ~Copyable, Sendable {
                     token.offered = offered
                     token.links = links
                 }
-                pages.append(page)
             case .finished(let returned):
-                // Its result opens the turn, and what comes next is offered where the call was.
+                // What it came to arrives with the turn, and what comes next is offered where
+                // the call was.
                 guard let origin = entry.scope.read({ $0.origin }) ?? nil else { continue }
                 await remove(entry.scope, from: entry.parent)
-                let landed = await land(returned, from: origin, under: entry.parent)
-                pages.append(Page(returned.result))
-                if let page = landed.page { pages.append(page) }
+                _ = await land(returned, from: origin, under: entry.parent)
+                arrivals.append(Arrival(call: origin.call, output: returned.result))
             case .ended:
                 await remove(entry.scope, from: entry.parent)
             case .failed:
                 continue
             }
         }
-        return pages
+        return arrivals
     }
 
     /// Registers every tool through the same authority-aware erased witness.
@@ -313,7 +321,7 @@ public struct AgentSession: ~Copyable, Sendable {
     /// opened now, in its tab: the one already open at that address, or a new one.
     private mutating func land(
         _ returned: CallReturn, from origin: Origin, under parent: Parent
-    ) async -> (address: PageAddress?, page: Page?) {
+    ) async -> (address: ToolPageAddress?, page: ToolPage?) {
         switch returned.next {
         case .links(let links):
             if !links.isEmpty {
@@ -321,7 +329,7 @@ public struct AgentSession: ~Copyable, Sendable {
             }
             return (nil, nil)
         case .page(let address):
-            let page: Page?
+            let page: ToolPage?
             do {
                 page = try await pages.open(address)
             } catch {
@@ -349,7 +357,7 @@ public struct AgentSession: ~Copyable, Sendable {
     }
 
     private func result(
-        _ call: ToolCall, _ output: ToolOutput, landed: PageAddress? = nil, failed kind: ToolFailureKind? = nil
+        _ call: ToolCall, _ output: ToolOutput, landed: ToolPageAddress? = nil, failed kind: ToolFailureKind? = nil
     ) -> ToolResult {
         ToolResult(toolCallID: call.id, name: call.name, output: output, landed: landed, failureKind: kind)
     }
@@ -361,7 +369,7 @@ public enum ToolOutcome: Sendable {
     /// What the call did, and what comes next.
     case succeeded(CallReturn)
     /// A failed call: still a page, whose links say how to recover. The kind says why it failed.
-    case failed(Page, ToolFailureKind)
+    case failed(ToolPage, ToolFailureKind)
 
     /// What the model reads.
     public var output: ToolOutput {
@@ -369,18 +377,6 @@ public enum ToolOutcome: Sendable {
         case .succeeded(let returned): returned.result
         case .failed(let page, _): page.output
         }
-    }
-}
-
-/// A tool's failure with a page of its own: what went wrong, and the tools to recover with, such
-/// as the object that already exists.
-public struct PageError: Error, Sendable {
-    public let page: Page
-    public let kind: ToolFailureKind
-
-    public init(_ page: Page, kind: ToolFailureKind = .failed) {
-        self.page = page
-        self.kind = kind
     }
 }
 
@@ -401,9 +397,9 @@ extension AnyTool {
     }
 
     /// A tool's error as the model reads it. Only cancellation escapes.
-    static func failure(_ error: any Error, toolName name: String) throws(AgentRuntimeError) -> (page: Page, kind: ToolFailureKind) {
+    static func failure(_ error: any Error, toolName name: String) throws(AgentRuntimeError) -> (page: ToolPage, kind: ToolFailureKind) {
         switch error {
-        case let error as PageError:
+        case let error as ToolPageError:
             return (error.page, error.kind)
         case let denial as EffectDenied:
             return (.text("Error: \(denial)"), .rejected)

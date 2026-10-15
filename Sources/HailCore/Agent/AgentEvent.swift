@@ -72,7 +72,7 @@ public struct ToolResult: Codable, Sendable, Equatable {
     /// What the call did.
     public let output: ToolOutput
     /// The page the call landed on: only its address is kept, never what it showed.
-    public let landed: PageAddress?
+    public let landed: ToolPageAddress?
     public let failureKind: ToolFailureKind?
 
     public var isError: Bool { failureKind != nil }
@@ -81,7 +81,7 @@ public struct ToolResult: Codable, Sendable, Equatable {
         toolCallID: String,
         name: String,
         output: ToolOutput,
-        landed: PageAddress? = nil,
+        landed: ToolPageAddress? = nil,
         failureKind: ToolFailureKind? = nil
     ) {
         self.toolCallID = toolCallID

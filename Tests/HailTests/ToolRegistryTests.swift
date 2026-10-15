@@ -212,9 +212,10 @@ struct ToolRegistryTests {
         _ = try await call(&scope, "1", "start")
         _ = try await call(&scope, "2", "add", adding: "Ann")
 
-        // The next turn begins inside the open scope, which says where things are.
-        let pages = await scope.begin(TurnID())
-        #expect(pages.map(\.output.textRepresentation) == ["Still a list of Ann; nothing made yet."])
+        // The next turn begins inside the open scope: it offers what it offers, and nothing
+        // arrived, since no call was still working.
+        let arrivals = await scope.begin(TurnID())
+        #expect(arrivals.isEmpty)
         #expect(scope.schemas().map(\.name) == ["add", "make", "start"])
         _ = try await call(&scope, "3", "add", adding: "Bob")
         #expect(try await call(&scope, "4", "make").result.output.textRepresentation == "Made: Ann, Bob")
@@ -314,7 +315,7 @@ struct ToolRegistryTests {
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
         func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
-            throw PageError(.text("It already exists.", links: [GeneratedInputTool()]))
+            throw ToolPageError(.text("It already exists.", links: [GeneratedInputTool()]))
         }
     }
 

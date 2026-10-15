@@ -65,14 +65,13 @@ extension AgentStream {
     public func send<Input: Codable & Sendable>(
         _ input: Input,
         received: AgentHistory.Input,
-        referenceEntries: [Transcript.Entry] = [],
         inputID: String? = nil,
         to agent: Agent
     ) async throws {
         try await agent.stream(
             input,
             received: received,
-            referenceEntries: referenceEntries,
+           
             inputID: inputID,
             through: connection
         )

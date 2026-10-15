@@ -23,12 +23,12 @@ struct PageTabTests {
         }
     }
 
-    struct PlacePages: Pages {
+    struct PlacePages: ToolPages {
         let place: Place
 
-        func open(_ address: PageAddress) async throws(PageUnavailable) -> Page {
+        func open(_ address: ToolPageAddress) async throws(ToolPageUnavailable) -> ToolPage {
             guard let current = place.current else { throw .gone }
-            return Page(.text(current.text), links: current.tools.map { OfferedTool(name: $0) })
+            return ToolPage(.text(current.text), links: current.tools.map { OfferedTool(name: $0) })
         }
     }
 
@@ -42,7 +42,7 @@ struct PageTabTests {
         func run(_ input: EmptyToolInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws
             -> CallReturn
         {
-            .text("did \(name)", landing: PageAddress(rawValue: "counter"))
+            .text("did \(name)", landing: ToolPageAddress(rawValue: "counter"))
         }
     }
 
@@ -70,7 +70,7 @@ struct PageTabTests {
         #expect(session.schemas().map(\.name).sorted() == ["alone", "counter"])
         #expect(session.tool(named: "counter")?.description == "Counts cups.")
         let opened = try await call(&session, "1", "counter")
-        #expect(opened.result.landed == PageAddress(rawValue: "counter"))
+        #expect(opened.result.landed == ToolPageAddress(rawValue: "counter"))
         let reading = opened.page.map { ToolAnswer(result: opened.result, page: $0, tools: []).reading }
         #expect(reading?.contains("Counts cups. Add one for each cup.") == true)
         #expect(reading?.contains("Now you can use:\n- `counter_add`: counter_add on the counter") == true)
@@ -84,7 +84,7 @@ struct PageTabTests {
         let opened = try await call(&session, "1", "open")
 
         #expect(opened.result.output == .text("did open"))
-        #expect(opened.result.landed == PageAddress(rawValue: "counter"))
+        #expect(opened.result.landed == ToolPageAddress(rawValue: "counter"))
         #expect(opened.page?.output == .text("counter: 0"))
         #expect(session.schemas().map(\.name) == ["add", "open"])
     }
@@ -101,7 +101,7 @@ struct PageTabTests {
         #expect(session.schemas().map(\.name) == ["add", "reset", "open"])
     }
 
-    @Test("a page stays open across turns and refreshes its contents and tools")
+    @Test("a page stays open across turns and refreshes the tools it offers, adding nothing to the request")
     func pagesStayOpenAcrossTurns() async throws {
         let place = Place()
         var session = session(place)
@@ -109,9 +109,9 @@ struct PageTabTests {
         #expect(session.schemas().map(\.name) == ["add", "open"])
 
         place.current = ("counter: 1", ["reset"])
-        let pages = await session.begin(TurnID())
+        let arrivals = await session.begin(TurnID())
 
-        #expect(pages.map(\.output) == [.text("counter: 1")])
+        #expect(arrivals.isEmpty)
         #expect(session.schemas().map(\.name) == ["reset", "open"])
         #expect(try await call(&session, "2", "reset").result.output == .text("did reset"))
     }
@@ -123,9 +123,9 @@ struct PageTabTests {
         _ = try await call(&session, "1", "open")
 
         place.current = nil
-        let pages = await session.begin(TurnID())
+        let arrivals = await session.begin(TurnID())
 
-        #expect(pages.isEmpty)
+        #expect(arrivals.isEmpty)
         #expect(session.schemas().map(\.name) == ["open"])
     }
 }

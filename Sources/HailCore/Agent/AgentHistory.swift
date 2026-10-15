@@ -179,7 +179,7 @@ extension AgentHistory {
         case resulted(ToolResult, at: Date)
 
         /// The page a result landed on.
-        public var landed: PageAddress? {
+        public var landed: ToolPageAddress? {
             if case .resulted(let result, _) = self { result.landed } else { nil }
         }
     }

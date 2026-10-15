@@ -174,7 +174,6 @@ public distributed actor Agent: AsyncSequence {
                             try await agent.run(
                                 turn.input.content,
                                 opening: .resumed(turn),
-                                referenceEntries: [],
                                 inputID: nil,
                                 through: stream.connection,
                                 authority: nil
@@ -337,14 +336,13 @@ public distributed actor Agent: AsyncSequence {
     public distributed func stream<Input: Codable & Sendable, Output>(
         _ input: Input,
         received: AgentHistory.Input,
-        referenceEntries: [Transcript.Entry] = [],
         inputID: String? = nil,
         through connection: AgentConnection<Output>,
         authority lane: TurnAuthorityLane? = nil
     ) async throws
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         try await run(
-            input, opening: .received(received), referenceEntries: referenceEntries, inputID: inputID,
+            input, opening: .received(received), inputID: inputID,
             through: connection, authority: lane)
     }
 
@@ -353,7 +351,6 @@ public distributed actor Agent: AsyncSequence {
     private func run<Input: Codable & Sendable, Output>(
         _ input: Input,
         opening: TurnOpening,
-        referenceEntries: [Transcript.Entry],
         inputID: String?,
         through connection: AgentConnection<Output>,
         authority lane: TurnAuthorityLane?
@@ -374,7 +371,7 @@ public distributed actor Agent: AsyncSequence {
                 try await loop.run(
                     input,
                     opening: opening,
-                    referenceEntries: referenceEntries,
+                   
                     inputID: inputID,
                     through: connection
                 )
@@ -393,7 +390,13 @@ public distributed actor Agent: AsyncSequence {
             _ = try? await workTask.value
             await self.reasoningLoop(lane: lane).compactAfterTurn()
         }
-        try await workTask.value
+        // The turn runs in a task of its own, so the next waits for it; its caller's cancellation
+        // reaches it all the same, as it reaches any call the caller awaits.
+        try await withTaskCancellationHandler {
+            try await workTask.value
+        } onCancel: {
+            workTask.cancel()
+        }
     }
 
     /// Runs a structured turn and returns the final typed value.
@@ -404,7 +407,6 @@ public distributed actor Agent: AsyncSequence {
     public distributed func respond<Input: Codable & Sendable, Output>(
         _ input: Input,
         received: AgentHistory.Input,
-        referenceEntries: [Transcript.Entry] = [],
         inputID: String? = nil,
         authority lane: TurnAuthorityLane? = nil
     ) async throws -> Output
@@ -425,7 +427,7 @@ public distributed actor Agent: AsyncSequence {
         try await self.stream(
             input,
             received: received,
-            referenceEntries: referenceEntries,
+           
             inputID: inputID,
             through: stream.connection,
             authority: lane

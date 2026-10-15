@@ -493,7 +493,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     func run<Input: Codable & Sendable, Output>(
         _ input: Input,
         opening: TurnOpening,
-        referenceEntries: [Transcript.Entry],
         inputID: String?,
         through connection: AgentConnection<Output>
     ) async throws(ReasoningLoopError) {
@@ -506,7 +505,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             try await runStreamingTurn(
                 input: input,
                 opening: opening,
-                referenceEntries: referenceEntries,
                 inputID: inputID,
                 through: connection
             )
@@ -567,7 +565,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     func compactIfNeeded(
         turnContext: TurnContext,
         endpoint: any ModelEndpoint,
-        additionalEntries: [Transcript.Entry] = [],
+        arrivals: [Arrival] = [],
         tools: [ToolDefinition] = [],
         trigger: ContextCompactionTrigger = .threshold
     ) async throws(AgentRuntimeError) -> TurnContext {
@@ -592,7 +590,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         // recovery candidate after an explicit provider overflow. A
         // supported counter that fails is an operation failure, not absence
         // of the capability, and therefore propagates.
-        let request = turnContext.preparedRequest.adding(context: additionalEntries, tools: tools)
+        let request = turnContext.preparedRequest.receiving(arrivals).offering(tools)
         guard let contextWindow = endpoint.effectiveContextWindow else {
             throw AgentRuntimeError.configurationError(
                 "No context window is configured for model \(endpoint.model); "
@@ -789,11 +787,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         return report
     }
 
-    /// A page, as request-time context: where something is now, never part of the history.
-    private static func entry(_ page: Page) -> Transcript.Entry {
-        .prompt(.init(segments: [.text(.init(content: page.output.textRepresentation))]))
-    }
-
     /// A request's value, or its failure's error.
     private static func value<State>(
         of request: @autoclosure () async throws(RequestFailure<State>) -> State
@@ -824,7 +817,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     private func runStreamingTurn<Input: Codable & Sendable, Output>(
         input: Input,
         opening: TurnOpening,
-        referenceEntries: [Transcript.Entry],
         inputID: String?,
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) {
@@ -856,12 +848,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let endpoint = try await self.endpoint(turnContext)
 
         // The input was journaled before `context()` ran, so the assembled
-        // prompt already contains it. Request-local context is deliberately
-        // kept out of the system role. Ollama collates all system messages at
-        // the front of its request; putting changing data there invalidates
-        // the reusable prefix on every turn. The context is placed immediately
-        // before the current input instead, so it cannot be mistaken for the
-        // user's latest request.
+        // prompt already contains it. The request holds only what happened:
+        // where things are now is reached through the tools the session
+        // offers, never written in as a message nobody sent.
         // The turn runs in the agent's session, where the last turn left off: each call still open
         // shows where it is, or finishes, before the model does anything. The session goes back to
         // the agent when the turn ends, however it ends.
@@ -873,7 +862,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 inputID: inputID
             )
         ) { (session: inout AgentSession) async throws(AgentRuntimeError) -> Output in
-            let turnContextEntries = referenceEntries + (await session.begin(turnID)).map(Self.entry)
+            // What arrived since the last turn: calls that finished meanwhile.
+            let arrivals = await session.begin(turnID)
             let modelTools = session.allTools()
             // Budget the request that will actually be sent, not a second
             // approximation assembled from AgentState fields. This includes the
@@ -882,7 +872,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             var promptMetadata: [String: Logger.MetadataValue] = [
                 "agentID": .string(agentID.rawValue),
                 "historyEntries": .string("\(turnContext.preparedRequest.entries.count)"),
-                "referenceEntries": .string("\(turnContextEntries.count)"),
+                "arrivals": .string("\(arrivals.count)"),
                 "toolCount": .string("\(schemas.count)"),
                 "contextWindow": .string("\(endpoint.effectiveContextWindow ?? 0)"),
             ]
@@ -890,24 +880,21 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 promptMetadata["historyTokens"] = .string(
                     "\(try await count(turnContext.preparedRequest.entries, []))"
                 )
-                promptMetadata["referenceTokens"] = .string(
-                    "\(try await count(turnContextEntries, []))"
-                )
                 promptMetadata["toolSchemaTokens"] = .string("\(try await count([], schemas))")
             } else {
                 promptMetadata["tokenCounts"] = .string("unavailable")
             }
             logger.info("Prompt composition", metadata: promptMetadata)
-            let turn = TurnRequest(value: input, request: turnContext.preparedRequest.adding(context: turnContextEntries, tools: schemas))
+            let turn = TurnRequest(value: input, request: turnContext.preparedRequest.receiving(arrivals).offering(schemas))
             let delta = TurnDelta(
-                currentEntries: turn.request.context + turn.request.openTurn,
+                currentEntries: turn.request.openTurn,
                 sessionIdentity: turnContext.sessionIdentity
             )
 
             return try await runTurn(
                 input: turn,
                 delta: delta,
-                turnContextEntries: turnContextEntries,
+                arrivals: arrivals,
                 schemas: schemas,
                 modelTools: modelTools,
                 turnSnapshot: turnContext,
@@ -960,7 +947,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     private func runTurn<Input: Sendable, Output>(
         input: TurnRequest<Input>,
         delta: TurnDelta,
-        turnContextEntries: [Transcript.Entry],
+        arrivals: [Arrival],
         schemas: [ToolDefinition],
         modelTools: [AnyTool],
         turnSnapshot: TurnContext,
@@ -994,7 +981,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             let modelTools = session.allTools()
             let compactedInput = try await recoverFromContextOverflow(
                 input: input,
-                turnContextEntries: turnContextEntries,
+                arrivals: arrivals,
                 schemas: schemas,
                 turnSnapshot: turnSnapshot,
                 endpoint: endpoint
@@ -1002,7 +989,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             return try await runTurn(
                 input: compactedInput,
                 delta: delta,
-                turnContextEntries: turnContextEntries,
+                arrivals: arrivals,
                 schemas: schemas,
                 modelTools: modelTools,
                 turnSnapshot: turnSnapshot,
@@ -1021,7 +1008,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// bounded recovery pass with an explicit trigger.
     private func recoverFromContextOverflow<Input: Sendable>(
         input: TurnRequest<Input>,
-        turnContextEntries: [Transcript.Entry],
+        arrivals: [Arrival],
         schemas: [ToolDefinition],
         turnSnapshot: TurnContext,
         endpoint: ModelEndpoint
@@ -1034,7 +1021,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let prepared = try await compactIfNeeded(
             turnContext: rebuilt,
             endpoint: endpoint,
-            additionalEntries: turnContextEntries,
+            arrivals: arrivals,
             tools: schemas,
             trigger: .contextLengthExceeded
         )
@@ -1045,7 +1032,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         // so the request still answers it.
         return TurnRequest(
             value: input.value,
-            request: prepared.preparedRequest.adding(context: turnContextEntries, tools: schemas))
+            request: prepared.preparedRequest.receiving(arrivals).offering(schemas))
     }
 
     /// The turn's request, in the agent's session: streamed once, start to end. Each tool call the

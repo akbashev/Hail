@@ -163,7 +163,7 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                     stringLiteral: """
                         public func run(_ input: Input, in scope: borrowing HailCore.ToolScope<Never>, token: borrowing EffectToken<Effect>) async throws -> HailCore.CallReturn {
                             let output: Effect.Output = try await Effect.run(in: token)
-                            return HailCore.CallReturn(HailCore.Page(render(output)))
+                            return HailCore.CallReturn(HailCore.ToolPage(render(output)))
                         }
                         """),
             ])
@@ -209,7 +209,7 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
                             public func effect(for input: Input) throws -> Effect { \(invocation) }
                             public func run(_ input: Input, in scope: borrowing HailCore.ToolScope<Never>, token: borrowing EffectToken<Effect>) async throws -> HailCore.CallReturn {
                                 let output: Effect.Output = try await Effect.run(in: token)
-                                return HailCore.CallReturn(HailCore.Page(owner.render(output)))
+                                return HailCore.CallReturn(HailCore.ToolPage(owner.render(output)))
                             }
                         }
                         """))

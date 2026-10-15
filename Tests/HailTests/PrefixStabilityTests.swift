@@ -28,12 +28,18 @@ struct PrefixStabilityTests {
         )
     }
 
-    @Test("request-time context sits between history and the open turn")
-    func contextPrecedesOpenTurn() {
+    @Test("a call that finished meanwhile arrives in the open turn's input, never as a message of its own")
+    func arrivalsJoinTheInput() {
+        let call = ToolCall(id: "c1", name: "timer", arguments: GeneratedContent(properties: [:]))
         let request = PreparedRequest(prefix: [prompt("sys")], history: [response("previous")], openTurn: [prompt("current")])
-            .adding(context: [prompt("reference")], tools: [])
+            .receiving([Arrival(call: call, output: .text("rang"))])
 
-        #expect(request.entries == [prompt("sys"), response("previous"), prompt("reference"), prompt("current")])
+        #expect(request.entries.count == 3)
+        guard case .prompt(let input)? = request.entries.last else {
+            Issue.record("Expected the request to end with the open turn's input")
+            return
+        }
+        #expect(input.segments.map(\.description) == ["current", "timer finished meanwhile: rang"])
     }
 
     @Test("a fold changes the prefix and history, and the open turn's input stays last")

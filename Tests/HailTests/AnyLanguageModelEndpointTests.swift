@@ -138,8 +138,9 @@ struct AnyLanguageModelEndpointTests {
         #expect(generated == "the answer; now offered: effect_test, other_tool")
     }
 
-    @Test("a repeated tool round continues in the same session from its completed result")
-    func repeatedToolRoundContinuesFromCompletedResult() async {
+    /// The endpoint adds no prompt of its own: a model repeating a tool round fails its request.
+    @Test("a repeated tool round fails the request, with no prompt sent in its place")
+    func repeatedToolRoundFailsTheRequest() async {
         let modelState = RepeatedRoundRecoveryState()
         let endpoint = AnyLanguageModelEndpoint(
             languageModel: RepeatedRoundLanguageModel(state: modelState),
@@ -151,6 +152,7 @@ struct AnyLanguageModelEndpointTests {
         ]
         var calls: [ModelToolCall] = []
         var generated: String?
+        var failure: ModelEndpointError?
         for await event in endpoint.stream(
             request: ModelRequest(input: "do the thing", entries: entries),
             tools: [AnyTool(EffectTool())],
@@ -163,16 +165,15 @@ struct AnyLanguageModelEndpointTests {
                 calls.append(call)
                 Self.answer(call, with: "action completed", offering: [AnyTool(EffectTool())])
             case .generated(let value): generated = value
+            case .failed(let error): failure = error
             default: break
             }
         }
 
-        let recovery = await modelState.recovery
         #expect(calls.map(\.call.name) == ["effect_test"])
-        #expect(generated == "continued from the result")
-        #expect(recovery?.prompt.contains("previous set of tool calls") == true)
-        #expect(recovery?.prompt.contains("previous results") == true)
-        #expect(recovery?.transcriptContainsToolOutput == true)
+        #expect(generated == nil)
+        #expect(failure == .decodingError("Repeated test tool round"))
+        #expect(await modelState.recovery == nil)
     }
 
     /// A request must answer a prompt: tool outputs are never followed by a new request.

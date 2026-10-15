@@ -156,15 +156,11 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                             return .stop
                         }
                         offered.replace(answer.tools)
-                        // TEMP DUMP: what the model reads back, and the tools it's offered next.
-                        tempDump("TEMP DUMP call \(call.toolName) \(call.arguments.jsonString)\nTEMP DUMP reads:\n\(answer.reading)\nTEMP DUMP offered:\n\(tempTools(answer.tools))")
                         return .provideOutput([.text(.init(content: answer.reading))])
                     }
                     do {
                         try Task.checkCancellation()
                         let mapped = try TranscriptMapping.request(from: request.entries)
-                        // TEMP DUMP: the request as it starts.
-                        tempDump("TEMP DUMP request\ninstructions: \(String(describing: mapped.instructions))\nhistory: \(mapped.history)\nprompt: \(String(describing: mapped.prompt))\nTEMP DUMP tools:\n\(tempTools(offered.current))")
 
                         continuation.yield(.activity(.status(GeneratedContent("Generating"))))
 
@@ -175,70 +171,42 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                         )
 
                         session.toolExecutionDelegate = delegate
-                        // On a typed repeated-round failure, continue from the completed tool
-                        // exchanges in the same session transcript.
-                        session.transcriptErrorHandlingPolicy = .preserveTranscript
 
-                        var lastComplete: Output?
+                        // The response is the last snapshot, once the stream ends: a snapshot
+                        // that reads as complete JSON can still be partway, as FM's always do.
+                        var last: (content: Output.PartiallyGenerated, raw: GeneratedContent)?
                         var latestUsage: LanguageModelSession.Usage?
                         // How full the context is: the latest request's input, not the usage of
                         // every request a response with tools made, added up.
                         var latestContext: LanguageModelSession.Usage.Input?
                         var accumulatedText = ""
                         let isPlainText = Output.self == String.self
-                        var repeatedRoundRecoveryUsed = false
-                        while true {
-                            let prompt = repeatedRoundRecoveryUsed
-                                ? Prompt("The previous set of tool calls with the same names and arguments completed. This repeated set was not run. Continue from the previous results or choose a different next step.")
-                                : mapped.prompt
-                            do {
-                                let stream = session.streamResponse(
-                                    to: prompt,
-                                    generating: outputType,
-                                    options: options(for: purpose, thinking: request.reasoning)
+                        let stream = session.streamResponse(
+                            to: mapped.prompt,
+                            generating: outputType,
+                            options: options(for: purpose, thinking: request.reasoning)
+                        )
+                        for try await snapshot in stream {
+                            await delegate.underWay()
+                            latestUsage = snapshot.usage
+                            latestContext = snapshot.context
+                            if isPlainText,
+                                case .string(let snapshotText) = snapshot.rawContent.kind
+                            {
+                                let delta = Self.textDelta(
+                                    from: snapshotText,
+                                    after: &accumulatedText
                                 )
-                                for try await snapshot in stream {
-                                    await delegate.underWay()
-                                    latestUsage = snapshot.usage
-                                    latestContext = snapshot.context
-                                    if isPlainText,
-                                        case .string(let snapshotText) = snapshot.rawContent.kind
-                                    {
-                                        let delta = Self.textDelta(
-                                            from: snapshotText,
-                                            after: &accumulatedText
-                                        )
-                                        if !delta.isEmpty {
-                                            continuation.yield(.activity(.narrationDelta(GeneratedContent(delta))))
-                                        }
-                                        continuation.yield(.partialUpdated(snapshot.content))
-                                    } else if !snapshot.rawContent.isComplete {
-                                        continuation.yield(.partialUpdated(snapshot.content))
-                                    }
-                                    if snapshot.rawContent.isComplete {
-                                        if let typed = snapshot.content as? Output {
-                                            lastComplete = typed
-                                        } else {
-                                            lastComplete = try Output(snapshot.rawContent)
-                                        }
-                                    }
+                                if !delta.isEmpty {
+                                    continuation.yield(.activity(.narrationDelta(GeneratedContent(delta))))
                                 }
-                                break
-                            } catch {
-                                guard !repeatedRoundRecoveryUsed, Self.isRepeatedToolRoundFailure(error) else {
-                                    throw error
-                                }
-                                repeatedRoundRecoveryUsed = true
-                                lastComplete = nil
-                                latestUsage = nil
-                                latestContext = nil
-                                accumulatedText = ""
-                                continuation.yield(.activity(.status(GeneratedContent("Continuing after repeated tool calls"))))
                             }
+                            continuation.yield(.partialUpdated(snapshot.content))
+                            last = (snapshot.content, snapshot.rawContent)
                         }
 
-                        if let outcome = lastComplete {
-                            continuation.yield(.generated(outcome))
+                        if let last {
+                            continuation.yield(.generated(try last.content as? Output ?? Output(last.raw)))
                         } else {
                             continuation.yield(
                                 .failed(ModelEndpointError.invalidResponse("No complete generated response")))
@@ -274,13 +242,6 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
-    }
-
-    private static func isRepeatedToolRoundFailure(_ error: any Error) -> Bool {
-        guard let error = error as? LanguageModelSession.GenerationError,
-            case .repeatedToolCallRound = error
-        else { return false }
-        return true
     }
 
     private static func isTransientTransportFailure(_ error: any Error) -> Bool {
@@ -323,10 +284,17 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         return .requestFailed(message)
     }
 
+    /// The most rounds of tool calls one request takes. The session answers each call inside the
+    /// request, so an agent's whole turn is one request: making, checking and putting things back
+    /// takes more rounds than a single answer does, and a turn calling tools without end still stops.
+    static let maximumToolRounds = 32
+
     private func options(for purpose: ModelRequestPurpose, thinking: ModelReasoningOverride) -> GenerationOptions {
         var options = generationOptions
-        if case .compaction(let maxOutputTokens) = purpose {
-            options.maximumResponseTokens = maxOutputTokens
+        options.maximumToolRounds = Self.maximumToolRounds
+        switch purpose {
+        case .generation: break
+        case .compaction(let maxOutputTokens), .writing(let maxOutputTokens): options.maximumResponseTokens = maxOutputTokens
         }
         if thinking != .providerDefault { reasoningSwitch?.apply(thinking, &options) }
         return options
@@ -478,18 +446,4 @@ private actor SessionToolsDelegate: ToolExecutionDelegate {
     func didFailToolCall(
         _ toolCall: Transcript.ToolCall, error: any Error, in session: LanguageModelSession
     ) async {}
-}
-
-// TEMP DUMP: helpers, removed with the dump.
-private func tempDump(_ text: String) {
-    FileHandle.standardError.write(Data((text + "\n").utf8))
-}
-
-private func tempTools(_ tools: [AnyTool]) -> String {
-    var lines: [String] = []
-    for tool in tools {
-        let schema = (try? JSONEncoder().encode(tool.schema.parameters)).map { String(decoding: $0, as: UTF8.self) } ?? ""
-        lines.append("  " + tool.name + ": " + tool.description + "\n    " + schema)
-    }
-    return lines.joined(separator: "\n")
 }

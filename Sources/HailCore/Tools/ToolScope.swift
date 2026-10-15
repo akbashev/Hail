@@ -31,7 +31,7 @@ public struct ToolScope<Call: Sendable>: ~Escapable, ~Copyable {
 
     /// Shows the model where the call is, offering what it can call inside it. This answers the
     /// call that opened the scope.
-    public func show(_ page: Page, offering options: [ScopeOption<Call>]) async {
+    public func show(_ page: ToolPage, offering options: [ScopeOption<Call>]) async {
         await channel.answer(.shown(page, options.map(\.schema)), options: options)
     }
 
@@ -78,7 +78,7 @@ public struct TurnToken<Call: Sendable>: ~Copyable {
     let channel: ScopeChannel<Call>
 
     /// Shows the model the scope as it is now, at the start of the turn.
-    public consuming func show(_ page: Page, offering options: [ScopeOption<Call>]) async {
+    public consuming func show(_ page: ToolPage, offering options: [ScopeOption<Call>]) async {
         await channel.answer(.shown(page, options.map(\.schema)), options: options)
     }
 }
@@ -93,7 +93,7 @@ public struct CallToken<Call: Sendable>: ~Copyable {
     let channel: ScopeChannel<Call>
 
     /// Answers this call with the scope's page now, and what it offers from now on.
-    public consuming func reply(_ page: Page, offering options: [ScopeOption<Call>]) async {
+    public consuming func reply(_ page: ToolPage, offering options: [ScopeOption<Call>]) async {
         await channel.answer(.shown(page, options.map(\.schema)), options: options)
     }
 
@@ -155,7 +155,7 @@ struct Scope: ~Copyable, Sendable {
     /// The call that opened it, and its turn: none for a tab restored from the agent's history.
     let origin: Origin?
     /// The page it shows, for a call that landed on one: its tab, opened again whenever it's shown.
-    var address: PageAddress?
+    var address: ToolPageAddress?
     /// The call still working in it; nil once the call has its result.
     let running: RunningCall?
     /// The tools the working call offers.
@@ -285,7 +285,7 @@ func call<T: Tool>(_ tool: T, _ input: T.Input, authority: any Authority, origin
 /// turn.
 enum ScopeAnswer: Sendable {
     /// A page: the scope is open, offering these tools.
-    case shown(Page, [ToolDefinition])
+    case shown(ToolPage, [ToolDefinition])
     /// The call it answered failed; the scope is open as it was.
     case failed(any Error)
     /// The call's result: the scope has ended.

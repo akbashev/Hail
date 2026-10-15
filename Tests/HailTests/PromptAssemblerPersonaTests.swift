@@ -95,7 +95,7 @@ struct PromptAssemblyPersonaTests {
 
     @Test("an earlier turn keeps the call that last landed on each page, with its address")
     func earlierTurnKeepsItsLastLandings() throws {
-        let address = PageAddress(rawValue: "weather")
+        let address = ToolPageAddress(rawValue: "weather")
         let landing = { (id: String, did: String) -> [AgentHistory.Event] in
             [
                 .called(ToolCall(id: id, name: "getWeather", arguments: GeneratedContent(properties: [:])), at: Date()),

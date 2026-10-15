@@ -81,7 +81,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
             let fold = try Self.fold(history, through: through, kept: kept)
             let cost = try await candidateSize(
                 of: assemble(context.with(history: fold.summarized(by: .unwritten)))
-                    .adding(context: request.context, tools: request.tools),
+                    .offering(request.tools),
                 measuring: measuring)
             selection = selection.considering(
                 Candidate(through: through, kept: kept, fold: fold, cost: cost),
@@ -106,7 +106,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
         let compacted = candidate.fold.summarized(
             by: AgentHistory.Summary(context: contextValue, report: output.generatedContent))
         let compactedSize = try await candidateSize(
-            of: assemble(context.with(history: compacted)).adding(context: request.context, tools: request.tools),
+            of: assemble(context.with(history: compacted)).offering(request.tools),
             measuring: measuring)
         guard compactedSize <= retained else {
             // The rebuilt request still doesn't fit. A threshold decision may stay with the

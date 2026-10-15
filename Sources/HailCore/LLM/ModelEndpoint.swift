@@ -77,10 +77,10 @@ public struct ToolAnswer: Sendable {
     /// What the call did, as the history keeps it.
     public let result: ToolResult
     /// The page it landed on, as it is now: read after the result, in this request only.
-    public let page: Page?
+    public let page: ToolPage?
     public let tools: [AnyTool]
 
-    public init(result: ToolResult, page: Page? = nil, tools: [AnyTool]) {
+    public init(result: ToolResult, page: ToolPage? = nil, tools: [AnyTool]) {
         self.result = result
         self.page = page
         self.tools = tools
@@ -157,6 +157,9 @@ public enum ModelContextOwnership: Sendable, Equatable {
 public enum ModelRequestPurpose: Sendable, Equatable {
     case generation
     case compaction(maxOutputTokens: Int)
+    /// One bounded answer, such as the code a tool asks a model to write: thinking and answer
+    /// together end at `maxOutputTokens`, so an answer that never ends still does.
+    case writing(maxOutputTokens: Int)
 }
 
 /// An optional per-request override for a model's reasoning behavior.

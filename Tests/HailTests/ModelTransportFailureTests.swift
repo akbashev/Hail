@@ -2,6 +2,7 @@ import AnyLanguageModel
 import Foundation
 import HailCore
 import HailModelRuntime
+import HTTPTypes
 import Testing
 
 @Suite("Model transport failures")
@@ -90,12 +91,73 @@ struct ModelTransportFailureTests {
         }
     }
 
+    @Test("a busy provider is asked again after the wait it asks for")
+    func busyProviderIsWaitedFor() async {
+        let recorder = RequestRecorder()
+        let busy = HTTPResponse(status: 429, headerFields: [.retryAfter: "0"])
+        let events = await collect(FailingLanguageModel(recorder: recorder, failure: .http(busy, body: "slow down", times: 2)))
+        #expect(await recorder.requests.count == 3)
+        guard case .generated("done") = events.last else {
+            Issue.record("Expected the generated value after waiting")
+            return
+        }
+    }
+
+    @Test("a provider that stays busy is waited for a few times")
+    func busyProviderStopsBeingWaitedFor() async {
+        let recorder = RequestRecorder()
+        let overloaded = HTTPResponse(status: 529, headerFields: [.retryAfter: "0"])
+        let events = await collect(FailingLanguageModel(recorder: recorder, failure: .http(overloaded, body: "overloaded", times: .max)))
+        #expect(await recorder.requests.count == 4)
+        #expect(events.last.map(isFailure(.unavailable)) == true)
+    }
+
+    @Test("a provider asking for a longer wait than is waited for fails at once", arguments: ["3600", "Fri, 01 Jan 2100 00:00:00 GMT"])
+    func longWaitFails(retryAfter: String) async {
+        let recorder = RequestRecorder()
+        let busy = HTTPResponse(status: 429, headerFields: [.retryAfter: retryAfter])
+        let events = await collect(FailingLanguageModel(recorder: recorder, failure: .http(busy, body: "", times: .max)))
+        #expect(await recorder.requests.count == 1)
+        #expect(events.last.map(isFailure(.rateLimit)) == true)
+    }
+
+    @Test("a request longer than the context is told by the provider's own words")
+    func contextExceededIsReadInTheProvidersWords() async {
+        let response = HTTPResponse(status: .badRequest)
+        let body = #"{"error":{"code":400,"type":"exceed_context_size_error","n_prompt_tokens":3011,"n_ctx":256}}"#
+        let ollama = await collect(
+            FailingLanguageModel(recorder: RequestRecorder(), failure: .http(response, body: body, times: .max)),
+            failures: .ollama)
+        #expect(ollama.last.map(isFailure(.contextLengthExceeded)) == true)
+        let anthropic = await collect(
+            FailingLanguageModel(recorder: RequestRecorder(), failure: .http(response, body: body, times: .max)),
+            failures: .anthropic)
+        #expect(anthropic.last.map(isFailure(.requestFailed("HTTP 400: \(body)"))) == true)
+    }
+
+    @Test("a request the provider refuses to authorize is not asked again")
+    func unauthorizedIsNotRetried() async {
+        let recorder = RequestRecorder()
+        let events = await collect(
+            FailingLanguageModel(recorder: recorder, failure: .http(HTTPResponse(status: .unauthorized), body: "", times: .max)))
+        #expect(await recorder.requests.count == 1)
+        #expect(events.last.map(isFailure(.authentication)) == true)
+    }
+
+    private func isFailure(_ expected: ModelEndpointError) -> (ModelEvent<String>) -> Bool {
+        { event in
+            guard case .failed(let error) = event else { return false }
+            return error == expected
+        }
+    }
+
     private func collect(
         _ model: FailingLanguageModel,
-        entries: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: "hello"))]))]
+        entries: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: "hello"))]))],
+        failures: ProviderFailures = .swiftErrors
     ) async -> [ModelEvent<String>] {
         let endpoint = AnyLanguageModelEndpoint(
-            languageModel: model, modelIdentifier: "test", temperature: 0)
+            languageModel: model, modelIdentifier: "test", temperature: 0, failures: failures)
         var events: [ModelEvent<String>] = []
         for await event in endpoint.stream(
             request: ModelRequest(input: "input", entries: entries),
@@ -116,6 +178,8 @@ struct ModelTransportFailureTests {
 
 private enum Failure: Sendable {
     case timeoutOnce, timeoutAlways, afterPartial, cancelled, decoding, afterToolCall
+    /// The provider answers with this error the first `times` requests.
+    case http(HTTPResponse, body: String, times: Int)
 }
 
 private actor RequestRecorder {
@@ -148,6 +212,13 @@ private struct FailingLanguageModel: LanguageModel {
                 do {
                     let attempt = await recorder.record(Array(session.transcript))
                     switch failure {
+                    case .http(let response, let body, let times):
+                        guard attempt > times else { throw HTTPTransportError.httpError(response: response, body: body) }
+                        let raw = GeneratedContent("done")
+                        continuation.yield(
+                            .init(content: try Content(raw).asPartiallyGenerated(), rawContent: raw))
+                        continuation.finish()
+                        return
                     case .timeoutOnce where attempt > 1:
                         let raw = GeneratedContent("done")
                         continuation.yield(

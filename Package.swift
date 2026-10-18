@@ -28,6 +28,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-system.git", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.21.0"),
+        .package(url: "https://github.com/apple/swift-http-types", from: "1.0.0"),
     ],
     targets: [
         .macro(
@@ -67,6 +68,7 @@ let package = Package(
                 .product(name: "Subprocess", package: "swift-subprocess"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
             ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")
@@ -109,7 +111,10 @@ let package = Package(
         ),
         .testTarget(
             name: "HailTests",
-            dependencies: ["Hail", "HailCore", "HailModelRuntime", "HailAgentRuntime", "ScopedEffect"],
+            dependencies: [
+                "Hail", "HailCore", "HailModelRuntime", "HailAgentRuntime", "ScopedEffect",
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+            ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")
             ]

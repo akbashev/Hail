@@ -46,6 +46,29 @@ struct FoundationModelsProbeTests {
         }
     }
 
+    @Test("the on-device model counts a request's tokens, its tools included")
+    func countsTokens() async throws {
+        guard case .available = await AnyLanguageModel.SystemLanguageModel.default.availability else { return }
+        let endpoint = AnyLanguageModelEndpoint.system(model: "on-device", temperature: 0.2, contextWindow: 4096)
+        guard case .available(let count) = endpoint.tokenCounting else {
+            Issue.record("Expected the on-device model to count tokens")
+            return
+        }
+        let entries: [AnyLanguageModel.Transcript.Entry] = [
+            .instructions(.init(segments: [.text(.init(content: "You set reminders."))], toolDefinitions: [])),
+            .prompt(.init(segments: [.text(.init(content: "Remind me at 11:00 to call home."))])),
+        ]
+        let tool = ToolDefinition(
+            name: "probe_reminder", description: "Sets a reminder at an exact clock time.",
+            parameters: ProbeInput.generationSchema)
+        let withoutTools = try await count(entries, [])
+        let withTools = try await count(entries, [tool])
+        let toolsAlone = try await count([], [tool])
+        #expect(withoutTools > 0)
+        #expect(withTools > withoutTools)
+        #expect(toolsAlone > 0)
+    }
+
     @Test("live probe of enum tool argument through the on-device model")
     func probe() async throws {
         let availability = await AnyLanguageModel.SystemLanguageModel.default.availability
@@ -60,7 +83,8 @@ struct FoundationModelsProbeTests {
         let endpoint = AnyLanguageModelEndpoint(
             languageModel: SystemLanguageModel.default,
             modelIdentifier: "on-device",
-            temperature: 0.2
+            temperature: 0.2,
+            failures: .swiftErrors
         )
         let entries: [AnyLanguageModel.Transcript.Entry] = [
             .prompt(

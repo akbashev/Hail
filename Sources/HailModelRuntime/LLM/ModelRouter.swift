@@ -181,7 +181,8 @@ public actor ModelRouter {
                     model: modelName,
                     temperature: configuration.temperature,
                     reasoning: reasoning
-                )
+                ),
+                failures: .openAICompatible
             )
 
         case .openAI:
@@ -199,7 +200,8 @@ public actor ModelRouter {
                     model: modelName,
                     temperature: configuration.temperature,
                     reasoning: reasoning
-                )
+                ),
+                failures: .openAI
             )
 
         case .anthropic:
@@ -217,7 +219,8 @@ public actor ModelRouter {
                     model: modelName,
                     temperature: configuration.temperature,
                     reasoning: reasoning
-                )
+                ),
+                failures: .anthropic
             )
 
         case .gemini:
@@ -234,7 +237,8 @@ public actor ModelRouter {
                     model: modelName,
                     temperature: configuration.temperature,
                     reasoning: reasoning
-                )
+                ),
+                failures: .gemini
             )
 
         case .ollama:
@@ -284,11 +288,10 @@ public actor ModelRouter {
                     provider: provider,
                     model: modelName
                 )
-                return AnyLanguageModelEndpoint(
-                    languageModel: SystemLanguageModel.default,
-                    modelIdentifier: modelName,
+                return AnyLanguageModelEndpoint.system(
+                    model: modelName,
                     temperature: configuration.temperature,
-                    effectiveContextWindow: await configuration.contextWindow(for: model, agentID: agentID)
+                    contextWindow: await configuration.contextWindow(for: model, agentID: agentID)
                 )
             #else
                 throw ModelRouterError.unsupportedProvider(provider.rawValue)

@@ -213,7 +213,7 @@ struct ReasoningLoopCancellationTests {
     @Test("a turn's tool calls stop at its limit")
     func toolCallsAreLimited() throws {
         let one = try TurnCalls(limit: 1).calling()
-        #expect(throws: AgentRuntimeError.modelMisbehavior("Model exceeded the maximum of 1 tool calls in a single turn.")) {
+        #expect(throws: AgentRuntimeError.toolCallsRanOut(limit: 1)) {
             try one.calling()
         }
     }

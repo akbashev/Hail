@@ -8,6 +8,10 @@ import AnyLanguageModel
 
 public enum AgentRuntimeError: Error, Sendable, Equatable, Codable {
     case modelMisbehavior(String)
+    /// The model thought for the whole length of an answer without answering.
+    case modelThoughtPastAnswer
+    /// The turn made all `limit` tool calls a turn may make, and went on calling.
+    case toolCallsRanOut(limit: Int)
     case modelRequestFailed(String)
     case modelUnavailable
     case rateLimit

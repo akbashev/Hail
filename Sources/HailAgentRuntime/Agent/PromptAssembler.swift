@@ -148,6 +148,8 @@ func turnEntries(input: AgentHistory.Input, steps: [AgentHistory.Step], _ shown:
                 .toolCalls(.init([transcriptToolCall(call)]))
             case .resulted(let result, _):
                 .toolOutput(.init(id: result.toolCallID, toolName: result.name, segments: resultSegments(result)))
+            case .noticed(let notice, _):
+                .prompt(.init(segments: [.text(.init(content: notice.words))]))
             }
         }
 }

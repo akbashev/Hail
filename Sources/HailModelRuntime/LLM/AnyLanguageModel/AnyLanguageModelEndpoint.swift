@@ -3,8 +3,6 @@ import HailCore
 import Logging
 import Synchronization
 
-import struct AsyncHTTPClient.HTTPClientError
-import struct Foundation.URLError
 
 #if canImport(FoundationEssentials)
     import FoundationEssentials
@@ -23,6 +21,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     private let languageModel: any LanguageModel
     private let generationOptions: GenerationOptions
     private let reasoningSwitch: ReasoningSwitch?
+    private let failures: ProviderFailures
 
     /// How a provider whose reasoning is on or off takes a request's
     /// ``ModelReasoningOverride``, such as Ollama's `think`. It's only given an actual
@@ -46,9 +45,11 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             @Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int
         )? = nil,
         generationOptions: GenerationOptions? = nil,
-        reasoningSwitch: ReasoningSwitch? = nil
+        reasoningSwitch: ReasoningSwitch? = nil,
+        failures: ProviderFailures
     ) {
         self.languageModel = languageModel
+        self.failures = failures
         self.model = modelIdentifier
         self.generationOptions = generationOptions ?? GenerationOptions(temperature: temperature)
         self.reasoningSwitch = reasoningSwitch
@@ -62,10 +63,14 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         temperature: Double,
         contextWindow: Int? = nil,
         keepAlive: String? = nil,
-        think: Bool? = nil
+        think: Bool? = nil,
+        session: any HTTPTransport = makeDefaultSession()
     ) -> Self {
         var options = GenerationOptions(temperature: temperature)
-        var ollamaOptions: OllamaLanguageModel.CustomGenerationOptions = [:]
+        // Ollama cuts a prompt longer than its context unless told not to, and the model then
+        // answers without the prompt's beginning: such a request fails instead, which the
+        // endpoint reads as the context being exceeded.
+        var ollamaOptions: OllamaLanguageModel.CustomGenerationOptions = ["truncate": .bool(false)]
         if let contextWindow {
             ollamaOptions["num_ctx"] = .int(contextWindow)
         }
@@ -87,13 +92,64 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                 options[custom: OllamaLanguageModel.self] = ollamaOptions
             }
         return Self(
-            languageModel: OllamaLanguageModel(baseURL: baseURL, model: model),
+            languageModel: OllamaLanguageModel(baseURL: baseURL, model: model, session: session),
             modelIdentifier: model,
             temperature: temperature,
             effectiveContextWindow: contextWindow,
             generationOptions: options,
-            reasoningSwitch: reasoningSwitch
+            reasoningSwitch: reasoningSwitch,
+            failures: .ollama
         )
+    }
+
+    #if canImport(FoundationModels)
+        /// Apple's on-device model, which counts a request's tokens exactly, where the system
+        /// can, so the history is compacted before it's longer than the context.
+        public static func system(
+            model: String,
+            temperature: Double,
+            contextWindow: Int?
+        ) -> Self {
+            let languageModel = SystemLanguageModel.default
+            var countTokens: (@Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int)?
+            #if compiler(>=6.3)
+                if #available(macOS 26.4, iOS 26.4, visionOS 26.4, *) {
+                    countTokens = { entries, tools throws(AgentRuntimeError) in
+                        do {
+                            return try await languageModel.tokenCount(for: Self.offering(tools, in: entries))
+                        } catch is CancellationError {
+                            throw .cancelled
+                        } catch {
+                            throw .infrastructureFailure("Counting the request's tokens failed: \(error)")
+                        }
+                    }
+                }
+            #endif
+            return Self(
+                languageModel: languageModel,
+                modelIdentifier: model,
+                temperature: temperature,
+                effectiveContextWindow: contextWindow,
+                countTokens: countTokens,
+                failures: .swiftErrors
+            )
+        }
+    #endif
+
+    /// `entries` with `tools` in their instructions, as a request gives them to the model.
+    static func offering(_ tools: [ToolDefinition], in entries: [Transcript.Entry]) -> [Transcript.Entry] {
+        guard !tools.isEmpty else { return entries }
+        let definitions = tools.map {
+            Transcript.ToolDefinition(name: $0.name, description: $0.description, parameters: $0.parameters)
+        }
+        if case .instructions(let instructions) = entries.first {
+            return [
+                .instructions(
+                    Transcript.Instructions(
+                        segments: instructions.segments, toolDefinitions: instructions.toolDefinitions + definitions))
+            ] + entries.dropFirst()
+        }
+        return [.instructions(Transcript.Instructions(segments: [], toolDefinitions: definitions))] + entries
     }
 
     public static func llamaCPP(
@@ -116,7 +172,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             modelIdentifier: model,
             temperature: temperature,
             effectiveContextWindow: contextWindow,
-            generationOptions: options
+            generationOptions: options,
+            failures: .swiftErrors
         )
     }
 
@@ -133,9 +190,9 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     {
         AsyncStream(ModelEvent<Output>.self) { continuation in
             let task = Task {
-                // Retry only a request that failed before it produced anything or asked for a
-                // tool call: one that did is under way in the agent's session.
-                for attempt in 0...1 {
+                var attempts = RequestAttempts(
+                    thinking: request.reasoning, thinkingCanBeTurnedOff: reasoningSwitch != nil)
+                while true {
                     // The tools the agent's session offers this request: what it starts with,
                     // then what each answered call leaves it offering.
                     let offered = OfferedTools(tools)
@@ -158,6 +215,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                         offered.replace(answer.tools)
                         return .provideOutput([.text(.init(content: answer.reading))])
                     }
+                    let ending: RequestAttempts.Ending
                     do {
                         try Task.checkCancellation()
                         let mapped = try TranscriptMapping.request(from: request.entries)
@@ -169,74 +227,57 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                             dynamicInstructions: OfferedInstructions(instructions: mapped.instructions, tools: offered),
                             history: mapped.history
                         )
-
                         session.toolExecutionDelegate = delegate
 
-                        // The response is the last snapshot, once the stream ends: a snapshot
-                        // that reads as complete JSON can still be partway, as FM's always do.
-                        var last: (content: Output.PartiallyGenerated, raw: GeneratedContent)?
-                        var latestUsage: LanguageModelSession.Usage?
-                        // How full the context is: the latest request's input, not the usage of
-                        // every request a response with tools made, added up.
-                        var latestContext: LanguageModelSession.Usage.Input?
-                        var accumulatedText = ""
-                        let isPlainText = Output.self == String.self
+                        var response = ResponseSoFar<Output>()
                         let stream = session.streamResponse(
                             to: mapped.prompt,
                             generating: outputType,
-                            options: options(for: purpose, thinking: request.reasoning)
+                            options: options(for: purpose, thinking: attempts.thinking, toolCallsLeft: request.toolCallsLeft)
                         )
                         for try await snapshot in stream {
                             await delegate.underWay()
-                            latestUsage = snapshot.usage
-                            latestContext = snapshot.context
-                            if isPlainText,
-                                case .string(let snapshotText) = snapshot.rawContent.kind
-                            {
-                                let delta = Self.textDelta(
-                                    from: snapshotText,
-                                    after: &accumulatedText
-                                )
-                                if !delta.isEmpty {
-                                    continuation.yield(.activity(.narrationDelta(GeneratedContent(delta))))
-                                }
+                            let narration = response.receive(snapshot)
+                            if !narration.isEmpty {
+                                continuation.yield(.activity(.narrationDelta(GeneratedContent(narration))))
                             }
                             continuation.yield(.partialUpdated(snapshot.content))
-                            last = (snapshot.content, snapshot.rawContent)
                         }
+                        for event in usageEvents(of: response, in: session) { continuation.yield(event) }
 
-                        if let last {
-                            continuation.yield(.generated(try last.content as? Output ?? Output(last.raw)))
-                        } else {
-                            continuation.yield(
-                                .failed(ModelEndpointError.invalidResponse("No complete generated response")))
+                        switch try response.ending() {
+                        case .answered(let output):
+                            continuation.yield(.generated(output))
+                            continuation.finish()
+                            return
+                        case .wroteNothing:
+                            ending = .wroteNothing
                         }
-
-                        continuation.finish()
-                        return
                     } catch {
-                        if attempt == 0, await delegate.progress == .notStarted,
-                            !Task.isCancelled, Self.isTransientTransportFailure(error)
-                        {
-                            Logger(label: "HailModelRuntime").warning(
-                                "Retrying model request before output",
-                                metadata: [
-                                    "model": .string(model),
-                                    "error": .string(String(describing: error)),
-                                ]
-                            )
-                            do {
-                                try await Task.sleep(for: .seconds(1))
-                            } catch {
-                                continuation.yield(.failed(.cancelled))
-                                continuation.finish()
-                                return
-                            }
-                            continue
-                        }
-                        continuation.yield(.failed(Self.endpointError(error)))
+                        ending = .failed(failures.read(error))
+                    }
+                    switch attempts.next(after: ending, progress: await delegate.progress) {
+                    case .fail(let error):
+                        continuation.yield(.failed(error))
                         continuation.finish()
                         return
+                    case .askAgain(let wait):
+                        Logger(label: "HailModelRuntime").warning(
+                            "Asking the model again",
+                            metadata: [
+                                "model": .string(model),
+                                "because": .string(String(describing: ending)),
+                                "after": .string(wait.description),
+                                "thinking": .string(String(describing: attempts.thinking)),
+                            ]
+                        )
+                        do {
+                            try await Task.sleep(for: wait)
+                        } catch {
+                            continuation.yield(.failed(.cancelled))
+                            continuation.finish()
+                            return
+                        }
                     }
                 }
             }
@@ -244,90 +285,60 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         }
     }
 
-    private static func isTransientTransportFailure(_ error: any Error) -> Bool {
-        if let error = error as? HTTPClientError {
-            return error == .deadlineExceeded || error == .readTimeout
-                || error == .writeTimeout || error == .connectTimeout
-                || error == .remoteConnectionClosed
-        }
-        if let error = error as? URLError {
-            switch error.code {
-            case .timedOut, .networkConnectionLost, .cannotConnectToHost,
-                .cannotFindHost, .dnsLookupFailed, .notConnectedToInternet:
-                return true
-            default:
-                return false
-            }
-        }
-        return false
-    }
-
-    private static func endpointError(_ error: any Error) -> ModelEndpointError {
-        if Task.isCancelled || error is CancellationError
-            || (error as? HTTPClientError) == .cancelled
-            || (error as? URLError)?.code == .cancelled
-        {
-            return .cancelled
-        }
-        if let error = error as? ModelEndpointError { return error }
-        if let error = error as? LanguageModelSession.GenerationError {
-            switch error {
-            case .exceededContextWindowSize: return .contextLengthExceeded
-            case .rateLimited: return .rateLimit
-            case .decodingFailure(let context), .repeatedToolCallRound(let context):
-                return .decodingError(context.debugDescription)
-            default: break
-            }
-        }
-        let message = String(describing: error)
-        if isContextLengthError(message) { return .contextLengthExceeded }
-        return .requestFailed(message)
-    }
-
-    /// The most rounds of tool calls one request takes. The session answers each call inside the
-    /// request, so an agent's whole turn is one request: making, checking and putting things back
-    /// takes more rounds than a single answer does, and a turn calling tools without end still stops.
+    /// The most rounds of tool calls one request takes, when its caller doesn't count its calls.
+    /// The session answers each call inside the request, so an agent's whole turn is one request:
+    /// making, checking and putting things back takes more rounds than a single answer does, and a
+    /// turn calling tools without end still stops.
     static let maximumToolRounds = 32
 
-    private func options(for purpose: ModelRequestPurpose, thinking: ModelReasoningOverride) -> GenerationOptions {
+    /// The most one answer takes, thinking included, whoever asks for it: room for a long answer,
+    /// and an end to one that never ends.
+    static let maximumAnswerTokens = 16384
+
+    /// A caller that counts its calls stops the request itself: each round makes at least one
+    /// call, so the round past its last call is one more than the calls it has left.
+    private func options(
+        for purpose: ModelRequestPurpose, thinking: ModelReasoningOverride, toolCallsLeft: Int?
+    ) -> GenerationOptions {
         var options = generationOptions
-        options.maximumToolRounds = Self.maximumToolRounds
+        options.maximumToolRounds = toolCallsLeft.map { $0 + 1 } ?? Self.maximumToolRounds
         switch purpose {
-        case .generation: break
-        case .compaction(let maxOutputTokens), .writing(let maxOutputTokens): options.maximumResponseTokens = maxOutputTokens
+        case .generation: options.maximumResponseTokens = options.maximumResponseTokens ?? Self.maximumAnswerTokens
+        case .compaction(let maxOutputTokens): options.maximumResponseTokens = maxOutputTokens
         }
         if thinking != .providerDefault { reasoningSwitch?.apply(thinking, &options) }
         return options
     }
 
-    /// AnyLanguageModel response streams expose the content generated so far,
-    /// rather than a token delta. Hail's model-event contract uses deltas, so
-    /// calculate the suffix before forwarding the fragment.
-    private static func textDelta(
-        from snapshot: String,
-        after accumulated: inout String
-    ) -> String {
-        guard !snapshot.isEmpty else { return "" }
-        if snapshot.hasPrefix(accumulated) {
-            let start = snapshot.index(snapshot.startIndex, offsetBy: accumulated.count)
-            let delta = String(snapshot[start...])
-            accumulated = snapshot
-            return delta
+    /// What a response used, as the provider reported it: the usage of every request it made,
+    /// which its session counts, as the session is made for this request alone; and how full the
+    /// context was for its final request, against this endpoint's window.
+    private func usageEvents<Output>(
+        of response: ResponseSoFar<Output>,
+        in session: LanguageModelSession
+    ) -> [ModelEvent<Output>] {
+        let usage = session.usage
+        guard usage.input.totalTokenCount > 0 || usage.output.totalTokenCount > 0 else {
+            return []
         }
-
-        // A provider that replaces its partial snapshot is still represented
-        // faithfully: reset the accumulator and publish the replacement.
-        accumulated = snapshot
-        return snapshot
-    }
-
-    private static func isContextLengthError(_ message: String) -> Bool {
-        let normalized = message.lowercased()
-        return normalized.contains("context length")
-            || normalized.contains("context window")
-            || normalized.contains("prompt is too long")
-            || normalized.contains("input is too long")
-            || normalized.contains("maximum context")
+        var events: [ModelEvent<Output>] = [
+            .usage(
+                ModelUsage(
+                    inputTokens: Self.reportedCount(usage.input.totalTokenCount),
+                    outputTokens: Self.reportedCount(usage.output.totalTokenCount),
+                    reasoningTokens: Self.reportedCount(usage.output.reasoningTokenCount),
+                    cachedReadTokens: Self.reportedCount(usage.input.cachedTokenCount),
+                    totalTokens: usage.totalTokenCount,
+                    source: .reported
+                ))
+        ]
+        if let effectiveContextWindow, let final = response.usage,
+            let used = Self.reportedCount(final.input.totalTokenCount)
+        {
+            events.append(
+                .contextUsage(ContextUsage(usedTokens: used, limitTokens: effectiveContextWindow, source: .reported)))
+        }
+        return events
     }
 
     private static func reportedCount(_ count: Int) -> Int? {
@@ -374,7 +385,8 @@ public actor LlamaCPPEndpointCache {
             modelIdentifier: model,
             temperature: temperature,
             effectiveContextWindow: contextWindow,
-            generationOptions: options
+            generationOptions: options,
+            failures: .swiftErrors
         )
     }
 }
@@ -409,21 +421,15 @@ private struct OfferedInstructions: DynamicInstructions {
     }
 }
 
-/// How far a request got: one under way has produced output or a tool call, which may already
-/// have run in the agent's session, so it's never retried.
-private enum RequestProgress {
-    case notStarted
-    case underWay
-}
-
 /// Sends each tool call the model makes to the agent's session, through `ask`, and gives the
 /// model the session's answer.
 private actor SessionToolsDelegate: ToolExecutionDelegate {
     private let ask: @Sendable (Transcript.ToolCall) async -> ToolExecutionDecision
     private(set) var progress = RequestProgress.notStarted
 
+    /// The model is answering; once it called tools, that's what the request did.
     func underWay() {
-        progress = .underWay
+        if progress == .notStarted { progress = .answering }
     }
 
     init(ask: @escaping @Sendable (Transcript.ToolCall) async -> ToolExecutionDecision) {
@@ -435,7 +441,7 @@ private actor SessionToolsDelegate: ToolExecutionDelegate {
     func toolCallDecision(for toolCall: Transcript.ToolCall, in session: LanguageModelSession) async
         -> ToolExecutionDecision
     {
-        progress = .underWay
+        progress = .calledTools
         return await ask(toolCall)
     }
 

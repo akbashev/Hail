@@ -157,9 +157,6 @@ public enum ModelContextOwnership: Sendable, Equatable {
 public enum ModelRequestPurpose: Sendable, Equatable {
     case generation
     case compaction(maxOutputTokens: Int)
-    /// One bounded answer, such as the code a tool asks a model to write: thinking and answer
-    /// together end at `maxOutputTokens`, so an answer that never ends still does.
-    case writing(maxOutputTokens: Int)
 }
 
 /// An optional per-request override for a model's reasoning behavior.
@@ -232,15 +229,20 @@ public struct ModelRequest<Input: Sendable>: Sendable {
     public let input: Input
     public let entries: [Transcript.Entry]
     public let reasoning: ModelReasoningOverride
+    /// The most tool calls the request may still make, when its caller counts them: the caller's
+    /// count is what stops it, so a provider's own limit on rounds is set past it.
+    public let toolCallsLeft: Int?
 
     public init(
         input: Input,
         entries: [Transcript.Entry],
-        reasoning: ModelReasoningOverride = .providerDefault
+        reasoning: ModelReasoningOverride = .providerDefault,
+        toolCallsLeft: Int? = nil
     ) {
         self.input = input
         self.entries = entries
         self.reasoning = reasoning
+        self.toolCallsLeft = toolCallsLeft
     }
 }
 
@@ -291,6 +293,8 @@ public enum ModelEndpointError: Error, Sendable, Equatable {
     case requestFailed(String)
     case invalidResponse(String)
     case decodingError(String)
+    /// The model thought its whole length without answering, asked again without thinking too.
+    case thoughtPastAnswer
     case cancelled
 }
 
@@ -310,6 +314,10 @@ public enum HailErrorFormatter {
         switch error {
         case .modelMisbehavior(let reason):
             "Model error: \(sanitizedModelOutput(reason))"
+        case .modelThoughtPastAnswer:
+            "The model thought for the whole length of an answer without answering."
+        case .toolCallsRanOut(let limit):
+            "The model made all \(limit) tool calls a turn may make, and went on calling."
         case .modelRequestFailed:
             "The model request failed. Please try again."
         case .modelUnavailable:
@@ -355,6 +363,8 @@ public enum HailErrorFormatter {
             return "Invalid model response: \(reason)"
         case .decodingError(let underlying):
             return "Failed to decode model response: \(underlying)"
+        case .thoughtPastAnswer:
+            return "The model thought past the length of an answer without answering."
         case .cancelled:
             return "Model request was cancelled."
         }

@@ -19,6 +19,12 @@ import ScopedEffect
 private enum TurnRequestOutcome<Output> {
     case generated(Output)
     case overflowed(TurnCalls)
+    /// The model's answer ran out while it was thinking, after the tools it called answered: the
+    /// turn goes on from their results, told so.
+    case ranOut(TurnCalls)
+    /// The turn made all the tool calls it may make: the model is told so, and answers without
+    /// tools.
+    case outOfCalls(TurnCalls)
 }
 
 /// A model request's value, before and after the model generates it.
@@ -47,11 +53,9 @@ struct TurnCalls: Sendable, Equatable {
         self.failures = failures
     }
 
-    /// The model calls a tool; excess work is rejected before it's journaled or run.
+    /// The model calls a tool; a call past the limit is refused before it's journaled or run.
     func calling() throws(AgentRuntimeError) -> TurnCalls {
-        guard count < limit else {
-            throw .modelMisbehavior("Model exceeded the maximum of \(limit) tool calls in a single turn.")
-        }
+        guard count < limit else { throw .toolCallsRanOut(limit: limit) }
         return TurnCalls(limit: limit, count: count + 1, failures: failures)
     }
 
@@ -955,6 +959,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         endpoint: ModelEndpoint,
         calls: TurnCalls,
         contextRecoveryAttempts: Int = 0,
+        noticesGiven: Int = 0,
+        thinking: ModelReasoningOverride? = nil,
+        callsRanOut: Bool = false,
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) -> Output
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
@@ -967,18 +974,64 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             session: &session,
             endpoint: endpoint,
             calls: calls,
+            thinking: thinking,
             through: connection
         ) {
         case .generated(let output):
             return output
+        case .ranOut(let calls):
+            // Told so, journaled, and asked again from the journal, without thinking: the tools
+            // it called have answered, and aren't run again. A few times, then it's said why.
+            guard noticesGiven < Self.mostNoticesOfAnAnswerRunningOut else { throw AgentRuntimeError.modelThoughtPastAnswer }
+            try await emit(.history(.noticed(.answerRanOut, at: Date())))
+            let rebuilt = try await rebuildContext(turnSnapshot)
+            let schemas = session.schemas()
+            return try await runTurn(
+                input: TurnRequest(value: input.value, request: rebuilt.preparedRequest.receiving(arrivals).offering(schemas)),
+                delta: delta,
+                arrivals: arrivals,
+                schemas: schemas,
+                modelTools: session.allTools(),
+                turnSnapshot: turnSnapshot,
+                session: &session,
+                endpoint: endpoint,
+                calls: calls,
+                contextRecoveryAttempts: contextRecoveryAttempts,
+                noticesGiven: noticesGiven + 1,
+                thinking: .disabled,
+                callsRanOut: callsRanOut,
+                through: connection
+            )
+        case .outOfCalls(let calls):
+            // Told so, journaled, and asked once more from the journal, offered no tools: the
+            // calls it made have answered, and it says where the work stands.
+            guard !callsRanOut else { throw AgentRuntimeError.toolCallsRanOut(limit: calls.limit) }
+            try await emit(.history(.noticed(.toolCallsRanOut(limit: calls.limit), at: Date())))
+            let rebuilt = try await rebuildContext(turnSnapshot)
+            return try await runTurn(
+                input: TurnRequest(value: input.value, request: rebuilt.preparedRequest.receiving(arrivals).offering([])),
+                delta: delta,
+                arrivals: arrivals,
+                schemas: [],
+                modelTools: [],
+                turnSnapshot: turnSnapshot,
+                session: &session,
+                endpoint: endpoint,
+                calls: calls,
+                contextRecoveryAttempts: contextRecoveryAttempts,
+                noticesGiven: noticesGiven,
+                thinking: thinking,
+                callsRanOut: true,
+                through: connection
+            )
         case .overflowed(let calls):
             guard contextRecoveryAttempts < 3 else {
                 throw AgentRuntimeError.contextLengthExceeded
             }
             // The turn's work so far is folded into the summary; its open tabs offer what they
-            // offer now.
-            let schemas = session.schemas()
-            let modelTools = session.allTools()
+            // offer now, unless the turn has made all its calls.
+            let schemas = callsRanOut ? [] : session.schemas()
+            let modelTools = callsRanOut ? [] : session.allTools()
             let compactedInput = try await recoverFromContextOverflow(
                 input: input,
                 arrivals: arrivals,
@@ -997,10 +1050,16 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 endpoint: endpoint,
                 calls: calls,
                 contextRecoveryAttempts: contextRecoveryAttempts + 1,
+                noticesGiven: noticesGiven,
+                thinking: thinking,
+                callsRanOut: callsRanOut,
                 through: connection
             )
         }
     }
+
+    /// How many times a turn's model is told its answer ran out, and asked again.
+    static var mostNoticesOfAnAnswerRunningOut: Int { 2 }
 
     /// A provider is the authority on whether a request actually fits. The
     /// normal compaction pass is intentionally conservative and may not know
@@ -1046,6 +1105,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         session: inout AgentSession,
         endpoint: ModelEndpoint,
         calls: TurnCalls,
+        thinking: ModelReasoningOverride? = nil,
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) -> TurnRequestOutcome<Output>
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
@@ -1053,14 +1113,15 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let request = ModelRequest(
             input: input.value,
             entries: input.request.entries,
-            reasoning: modelReasoningPolicy(
+            reasoning: thinking ?? modelReasoningPolicy(
                 ModelReasoningContext(
                     model: endpoint.model,
                     purpose: .generation,
                     hasTools: !modelTools.isEmpty,
                     completedToolRounds: calls.count
                 )
-            )
+            ),
+            toolCallsLeft: calls.limit - calls.count
         )
         if let sessionEndpoint = endpoint as? SessionOwningEndpoint {
             stream = sessionEndpoint.stream(
@@ -1124,7 +1185,11 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 return progress
             }
         } catch {
-            // The calls made before an overflow still count against the turn.
+            // The calls made before an overflow, or before an answer ran out, still count.
+            if error.error == .modelThoughtPastAnswer, error.state.calls.count > calls.count {
+                return .ranOut(error.state.calls)
+            }
+            if case .toolCallsRanOut = error.error { return .outOfCalls(error.state.calls) }
             guard error.error == .contextLengthExceeded else { throw error.error }
             return .overflowed(error.state.calls)
         }
@@ -1235,6 +1300,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             return .modelMisbehavior("invalid response: \(reason)")
         case .decodingError(let underlying):
             return .modelMisbehavior("decoding error: \(underlying)")
+        case .thoughtPastAnswer:
+            return .modelThoughtPastAnswer
         case .cancelled:
             return .cancelled
         }

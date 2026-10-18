@@ -167,6 +167,7 @@ public struct SlidingWindowCompactor: ContextCompactor {
         switch step {
         case .called(let call, _): estimator.estimate(call.name + call.arguments.jsonString)
         case .resulted(let result, _): estimator.estimate(result.output.textRepresentation)
+        case .noticed(let notice, _): estimator.estimate(notice.words)
         }
     }
 

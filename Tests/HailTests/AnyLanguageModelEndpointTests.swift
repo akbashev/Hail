@@ -53,7 +53,8 @@ struct AnyLanguageModelEndpointTests {
         let endpoint = AnyLanguageModelEndpoint(
             languageModel: SnapshotLanguageModel(snapshots: ["hel", "hello"]),
             modelIdentifier: "test",
-            temperature: 0
+            temperature: 0,
+            failures: .swiftErrors
         )
 
         let entries: [Transcript.Entry] = [
@@ -86,7 +87,8 @@ struct AnyLanguageModelEndpointTests {
             temperature: 0.5,
             reasoningSwitch: .init { thinking, options in
                 options.temperature = thinking == .enabled ? 1 : 0
-            }
+            },
+            failures: .swiftErrors
         )
         let entries: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: "hello"))]))]
         for reasoning in [ModelReasoningOverride.enabled, .disabled, .providerDefault] {
@@ -101,6 +103,64 @@ struct AnyLanguageModelEndpointTests {
         #expect(await recorded.temperatures == [1, 0, 0.5])
     }
 
+    /// A request whose model thinks its whole length without answering is asked again without
+    /// thinking, whoever asks it; one that still doesn't answer fails as one that thought past its
+    /// answer.
+    @Test("a request that answers nothing is asked again without thinking")
+    func aRequestThatAnswersNothingIsAskedAgainWithoutThinking() async {
+        let entries: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: "hello"))]))]
+        for (answersWithoutThinking, ending) in [(true, "generated ok"), (false, "failed thoughtPastAnswer")] {
+            let recorded = RecordedOptions()
+            let endpoint = AnyLanguageModelEndpoint(
+                languageModel: GoingRoundLanguageModel(recorded: recorded, answersWithoutThinking: answersWithoutThinking),
+                modelIdentifier: "test",
+                temperature: 0.5,
+                // Thinking on is temperature 1 to the model, off is 0.
+                reasoningSwitch: .init { thinking, options in
+                    options.temperature = thinking == .enabled ? 1 : 0
+                },
+                failures: .swiftErrors
+            )
+            var events: [String] = []
+            for await event in endpoint.stream(
+                request: ModelRequest(input: "hello", entries: entries, reasoning: .enabled),
+                tools: [],
+                authority: FullAuthority(),
+                generating: String.self,
+                purpose: .generation
+            ) {
+                events.append(describe(event))
+            }
+            #expect(events.last == ending)
+            #expect(await recorded.temperatures == [1, 0])
+        }
+    }
+
+    @Test("narration before a tool call isn't an answer: a model that writes nothing after its call fails")
+    func narrationBeforeACallIsNotAnAnswer() async {
+        let endpoint = AnyLanguageModelEndpoint(
+            languageModel: ToolCallingLanguageModel(narration: ["Let me fix it."], answersAfterCall: false),
+            modelIdentifier: "test",
+            temperature: 0,
+            failures: .swiftErrors
+        )
+        var last: ModelEvent<String>?
+        for await event in endpoint.stream(
+            request: ModelRequest(input: "fix it", entries: [.prompt(.init(segments: [.text(.init(content: "fix it"))]))]),
+            tools: [AnyTool(EffectTool())],
+            authority: FullAuthority(),
+            generating: String.self,
+            purpose: .generation
+        ) {
+            if case .toolCall(let toolCall) = event { Self.answer(toolCall, with: "saved", offering: [AnyTool(EffectTool())]) }
+            last = event
+        }
+        guard case .failed(.thoughtPastAnswer) = last else {
+            Issue.record("Expected the request to fail, not to answer with its narration: \(String(describing: last))")
+            return
+        }
+    }
+
     /// A call goes to the agent's session; the model goes on with the session's answer in the same
     /// request, and sees the tools the session offers after it.
     @Test("a tool call goes to the agent's session, and the request goes on with its answer")
@@ -108,7 +168,8 @@ struct AnyLanguageModelEndpointTests {
         let endpoint = AnyLanguageModelEndpoint(
             languageModel: ToolCallingLanguageModel(),
             modelIdentifier: "test",
-            temperature: 0
+            temperature: 0,
+            failures: .swiftErrors
         )
         let entries: [Transcript.Entry] = [
             .prompt(.init(segments: [.text(.init(content: "use the tool"))]))
@@ -138,51 +199,14 @@ struct AnyLanguageModelEndpointTests {
         #expect(generated == "the answer; now offered: effect_test, other_tool")
     }
 
-    /// The endpoint adds no prompt of its own: a model repeating a tool round fails its request.
-    @Test("a repeated tool round fails the request, with no prompt sent in its place")
-    func repeatedToolRoundFailsTheRequest() async {
-        let modelState = RepeatedRoundRecoveryState()
-        let endpoint = AnyLanguageModelEndpoint(
-            languageModel: RepeatedRoundLanguageModel(state: modelState),
-            modelIdentifier: "test",
-            temperature: 0
-        )
-        let entries: [Transcript.Entry] = [
-            .prompt(.init(segments: [.text(.init(content: "do the thing"))]))
-        ]
-        var calls: [ModelToolCall] = []
-        var generated: String?
-        var failure: ModelEndpointError?
-        for await event in endpoint.stream(
-            request: ModelRequest(input: "do the thing", entries: entries),
-            tools: [AnyTool(EffectTool())],
-            authority: FullAuthority(),
-            generating: String.self,
-            purpose: .generation
-        ) {
-            switch event {
-            case .toolCall(let call):
-                calls.append(call)
-                Self.answer(call, with: "action completed", offering: [AnyTool(EffectTool())])
-            case .generated(let value): generated = value
-            case .failed(let error): failure = error
-            default: break
-            }
-        }
-
-        #expect(calls.map(\.call.name) == ["effect_test"])
-        #expect(generated == nil)
-        #expect(failure == .decodingError("Repeated test tool round"))
-        #expect(await modelState.recovery == nil)
-    }
-
     /// A request must answer a prompt: tool outputs are never followed by a new request.
     @Test("a request that doesn't end with a prompt fails, instead of sending an empty one")
     func requestWithoutPromptFails() async {
         let endpoint = AnyLanguageModelEndpoint(
             languageModel: SnapshotLanguageModel(snapshots: ["unused"]),
             modelIdentifier: "test",
-            temperature: 0
+            temperature: 0,
+            failures: .swiftErrors
         )
         let entries: [Transcript.Entry] = [
             .prompt(.init(segments: [.text(.init(content: "use the tool"))])),
@@ -245,6 +269,8 @@ private struct SnapshotLanguageModel: LanguageModel {
 private struct ToolCallingLanguageModel: LanguageModel {
     /// Text streamed before the tool call, as cumulative snapshots.
     var narration: [String] = []
+    /// Whether it writes anything once the call is answered.
+    var answersAfterCall = true
 
     func respond<Content>(
         within session: LanguageModelSession,
@@ -291,6 +317,19 @@ private struct ToolCallingLanguageModel: LanguageModel {
                     continuation.finish()
                     return
                 }
+                guard answersAfterCall else {
+                    // The round's snapshot, as a provider gives one after its calls are answered.
+                    let text = narration.last ?? ""
+                    continuation.yield(
+                        .init(
+                            content: (text as! Content).asPartiallyGenerated(),
+                            rawContent: GeneratedContent(text),
+                            transcriptEntries: [.toolCalls(.init([call]))]
+                        )
+                    )
+                    continuation.finish()
+                    return
+                }
                 let output = segments.map(\.description).joined()
                 let offered = session.resolvedRequestContext().tools.map(\.name).sorted().joined(separator: ", ")
                 let text = "\(output); now offered: \(offered)"
@@ -299,102 +338,6 @@ private struct ToolCallingLanguageModel: LanguageModel {
                         content: (text as! Content).asPartiallyGenerated(),
                         rawContent: GeneratedContent(text),
                         transcriptEntries: [.toolCalls(.init([call]))]
-                    )
-                )
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-        return LanguageModelSession.ResponseStream(stream: stream)
-    }
-}
-
-
-private actor RepeatedRoundRecoveryState {
-    struct Recovery: Sendable {
-        let prompt: String
-        let transcriptContainsToolOutput: Bool
-    }
-
-    private var requestCount = 0
-    private(set) var recovery: Recovery?
-
-    func nextRequest(prompt: String, transcript: [Transcript.Entry]) -> Int {
-        requestCount += 1
-        if requestCount > 1 {
-            recovery = Recovery(
-                prompt: prompt,
-                transcriptContainsToolOutput: transcript.contains {
-                    if case .toolOutput = $0 { true } else { false }
-                }
-            )
-        }
-        return requestCount
-    }
-}
-
-private struct RepeatedRoundLanguageModel: LanguageModel {
-    let state: RepeatedRoundRecoveryState
-
-    func respond<Content>(
-        within session: LanguageModelSession,
-        to prompt: Prompt,
-        generating type: Content.Type,
-        includeSchemaInPrompt: Bool,
-        options: GenerationOptions
-    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
-        fatalError("The streaming test should not call respond")
-    }
-
-    func streamResponse<Content>(
-        within session: LanguageModelSession,
-        to prompt: Prompt,
-        generating type: Content.Type,
-        includeSchemaInPrompt: Bool,
-        options: GenerationOptions
-    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
-        let state = state
-        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
-            continuation in
-            let task = Task {
-                guard type == String.self else { fatalError("Unsupported test output") }
-                let request = await state.nextRequest(prompt: prompt.description, transcript: Array(session.transcript))
-                if request == 1 {
-                    let call = Transcript.ToolCall(
-                        id: "call-repeat-test",
-                        toolName: "effect_test",
-                        arguments: GeneratedContent(properties: ["message": "run once"])
-                    )
-                    await session.toolExecutionDelegate?.didGenerateToolCalls([call], in: session)
-                    guard case .provideOutput(let segments)? = await session.toolExecutionDelegate?.toolCallDecision(
-                        for: call, in: session) else {
-                        continuation.finish()
-                        return
-                    }
-                    continuation.yield(
-                        .init(
-                            content: ("action completed" as! Content).asPartiallyGenerated(),
-                            rawContent: GeneratedContent("action completed"),
-                            transcriptEntries: [
-                                .toolCalls(.init([call])),
-                                .toolOutput(.init(id: call.id, toolName: call.toolName, segments: segments)),
-                            ]
-                        )
-                    )
-                    continuation.finish(
-                        throwing: LanguageModelSession.GenerationError.repeatedToolCallRound(
-                            .init(debugDescription: "Repeated test tool round")
-                        )
-                    )
-                    return
-                }
-
-                let answer = "continued from the result"
-                continuation.yield(
-                    .init(
-                        content: (answer as! Content).asPartiallyGenerated(),
-                        rawContent: GeneratedContent(answer),
-                        transcriptEntries: []
                     )
                 )
                 continuation.finish()
@@ -466,4 +409,44 @@ private func describe(_ event: ModelEvent<String>) -> String {
 private func text(_ content: GeneratedContent) -> String {
     if case .string(let value) = content.kind { return value }
     return content.jsonString
+}
+
+/// A model that goes round its thoughts with thinking on, answering nothing, and answers with it
+/// off, when `answersWithoutThinking`.
+private struct GoingRoundLanguageModel: LanguageModel {
+    let recorded: RecordedOptions
+    let answersWithoutThinking: Bool
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        fatalError("The streaming test should not call respond")
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        let recorded = recorded
+        let answer = options.temperature == 0 && answersWithoutThinking ? "ok" : ""
+        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
+            continuation in
+            let task = Task {
+                await recorded.record(options)
+                let content = answer as! Content
+                continuation.yield(
+                    .init(content: content.asPartiallyGenerated(), rawContent: GeneratedContent(answer), transcriptEntries: []))
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+        return LanguageModelSession.ResponseStream(stream: stream)
+    }
 }

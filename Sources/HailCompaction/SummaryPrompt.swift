@@ -98,6 +98,8 @@ enum SummaryPrompt {
                 ? String(text.prefix(Self.maximumToolResultCharacters)) + " …[truncated]"
                 : text
             return "\(result.name) result: \(bounded)"
+        case .noticed(let notice, _):
+            return "runtime: \(notice.words)"
         }
     }
 

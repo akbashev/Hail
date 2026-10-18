@@ -40,6 +40,8 @@ public struct AgentHistory: Codable, Sendable, Equatable {
             return AgentHistory(earlier: earlier, closed: closed, open: try openTurn().adding(.called(call, at: at)))
         case .resulted(let result, let at):
             return AgentHistory(earlier: earlier, closed: closed, open: try openTurn().adding(.resulted(result, at: at)))
+        case .noticed(let notice, let at):
+            return AgentHistory(earlier: earlier, closed: closed, open: try openTurn().adding(.noticed(notice, at: at)))
         case .replied(let reply):
             return try closing(as: .replied(reply))
         case .failed(let failure):
@@ -177,10 +179,37 @@ extension AgentHistory {
         case called(ToolCall, at: Date)
         /// A call's result.
         case resulted(ToolResult, at: Date)
+        /// What the runtime told the model in the turn, as the model was told it.
+        case noticed(Notice, at: Date)
 
         /// The page a result landed on.
         public var landed: ToolPageAddress? {
             if case .resulted(let result, _) = self { result.landed } else { nil }
+        }
+    }
+
+    /// What the runtime tells the model in a turn, of what happened in it: each in the model's
+    /// words, as it's told.
+    public enum Notice: Codable, Sendable, Equatable {
+        /// Its answer ran out while it was thinking, after the tools it called answered.
+        case answerRanOut
+        /// The turn made all the tool calls a turn may make: no more can be made in it.
+        case toolCallsRanOut(limit: Int)
+        /// It asked for the same tool calls as in the round before, which weren't run again.
+        /// Nothing records it now, as a repeated round runs like any other; it's kept so that
+        /// journals that hold it still read.
+        case toolCallsRepeated
+
+        /// The notice as the model reads it.
+        public var words: String {
+            switch self {
+            case .answerRanOut:
+                "From the runtime: your answer ran out while you were thinking. The tools you called answered above. Go on from their results to your answer, without going over them again."
+            case .toolCallsRepeated:
+                "From the runtime: you asked for the same tool calls as in the round before, and they weren't run again. To run them again, call them again; otherwise go on from the results above."
+            case .toolCallsRanOut(let limit):
+                "From the runtime: this turn has made all \(limit) of its tool calls, so no more can be made in it. Answer now: say what you did and what's left to do, so you can go on when asked."
+            }
         }
     }
 
@@ -281,6 +310,8 @@ extension AgentHistory {
         case received(Input, turn: TurnID)
         case called(ToolCall, at: Date)
         case resulted(ToolResult, at: Date)
+        /// The runtime told the model something in the open turn.
+        case noticed(Notice, at: Date)
         case replied(Reply)
         case failed(Failure)
         case cancelled(at: Date)

@@ -1,5 +1,6 @@
 import AnyLanguageModel
 import ScopedEffect
+
 public struct ToolExecution: Sendable {
     /// What the call did, as the history keeps it.
     public let result: ToolResult
@@ -245,15 +246,18 @@ public struct AgentSession: ~Copyable, Sendable {
 
     /// Runs one call in the scope that offers its tool.
     public mutating func execute(_ call: ToolCall) async throws(AgentRuntimeError) -> ToolExecution {
-        guard let owner = entries.first(where: { $0.scope.read { $0.tools.contains { $0.name == call.name } } ?? false }) else {
+        guard
+            let owner = entries.first(where: { $0.scope.read { $0.tools.contains { $0.name == call.name } } ?? false })
+        else {
             guard let tool = tools[call.name] else {
                 return ToolExecution(result: result(call, .text("Error: " + unknown(call.name)), failed: .rejected))
             }
             return try await start(call, tool, under: .root)
         }
-        let running = owner.scope.read { token -> RunningCall? in
-            token.offered.contains { $0.name == call.name } ? token.running : nil
-        } ?? nil
+        let running =
+            owner.scope.read { token -> RunningCall? in
+                token.offered.contains { $0.name == call.name } ? token.running : nil
+            } ?? nil
         if let running {
             let event = await running.channel.call(call.name, arguments: call.arguments)
             return try await answer(call, by: event, in: owner.scope, under: owner.parent)
@@ -264,7 +268,9 @@ public struct AgentSession: ~Copyable, Sendable {
 
     /// A call of a tool, in a scope of its own under `parent`. It stays open while the call works
     /// with the model, or while the model uses what its result links to.
-    private mutating func start(_ call: ToolCall, _ tool: AnyTool, under parent: Parent) async throws(AgentRuntimeError) -> ToolExecution {
+    private mutating func start(_ call: ToolCall, _ tool: AnyTool, under parent: Parent) async throws(AgentRuntimeError)
+        -> ToolExecution
+    {
         let origin = Origin(call: call, turn: turn)
         let running: RunningCall
         do {
@@ -312,7 +318,9 @@ public struct AgentSession: ~Copyable, Sendable {
 
     /// A call's result, under `parent`: what it links to is offered in a scope of its own, or the
     /// page it landed on is opened in its tab.
-    private mutating func finished(_ call: ToolCall, _ returned: CallReturn, under parent: Parent) async -> ToolExecution {
+    private mutating func finished(_ call: ToolCall, _ returned: CallReturn, under parent: Parent) async
+        -> ToolExecution
+    {
         let landed = await land(returned, from: Origin(call: call, turn: turn), under: parent)
         return ToolExecution(result: result(call, returned.result, landed: landed.address), page: landed.page)
     }
@@ -325,7 +333,8 @@ public struct AgentSession: ~Copyable, Sendable {
         switch returned.next {
         case .links(let links):
             if !links.isEmpty {
-                await open(Scope(origin: origin, running: nil, offered: [], links: links.map { AnyTool($0) }), under: parent)
+                await open(
+                    Scope(origin: origin, running: nil, offered: [], links: links.map { AnyTool($0) }), under: parent)
             }
             return (nil, nil)
         case .page(let address):
@@ -339,7 +348,8 @@ public struct AgentSession: ~Copyable, Sendable {
             if let tab = entries.first(where: { $0.scope.read { $0.address } == address }) {
                 tab.scope.modify { (token: inout Scope) in token.links = links }
             } else {
-                await open(Scope(origin: origin, address: address, running: nil, offered: [], links: links), under: parent)
+                await open(
+                    Scope(origin: origin, address: address, running: nil, offered: [], links: links), under: parent)
             }
             return (address, page)
         }
@@ -347,11 +357,14 @@ public struct AgentSession: ~Copyable, Sendable {
 
     /// A failed call, under `parent`: its page, whose links are offered in a scope of its own,
     /// like any result's.
-    private mutating func failed(_ call: ToolCall, _ error: any Error, under parent: Parent) async throws(AgentRuntimeError) -> ToolExecution {
+    private mutating func failed(_ call: ToolCall, _ error: any Error, under parent: Parent)
+        async throws(AgentRuntimeError) -> ToolExecution
+    {
         let failure = try AnyTool.failure(error, toolName: call.name)
         let links = failure.page.links.map { AnyTool($0) }
         if !links.isEmpty {
-            await open(Scope(origin: Origin(call: call, turn: turn), running: nil, offered: [], links: links), under: parent)
+            await open(
+                Scope(origin: Origin(call: call, turn: turn), running: nil, offered: [], links: links), under: parent)
         }
         return ToolExecution(result: result(call, failure.page.output, failed: failure.kind))
     }
@@ -397,7 +410,9 @@ extension AnyTool {
     }
 
     /// A tool's error as the model reads it. Only cancellation escapes.
-    static func failure(_ error: any Error, toolName name: String) throws(AgentRuntimeError) -> (page: ToolPage, kind: ToolFailureKind) {
+    static func failure(_ error: any Error, toolName name: String) throws(AgentRuntimeError) -> (
+        page: ToolPage, kind: ToolFailureKind
+    ) {
         switch error {
         case let error as ToolPageError:
             return (error.page, error.kind)
@@ -408,7 +423,9 @@ extension AnyTool {
         case let mismatch as ArgumentMismatch:
             return (.text("Error: tool \(name) received invalid arguments: \(mismatch)"), .invalidArguments)
         case let error as DecodingError:
-            return (.text("Error: tool \(name) received invalid arguments: \(decodingMessage(error))"), .invalidArguments)
+            return (
+                .text("Error: tool \(name) received invalid arguments: \(decodingMessage(error))"), .invalidArguments
+            )
         case is CancellationError:
             throw AgentRuntimeError.cancelled
         default:

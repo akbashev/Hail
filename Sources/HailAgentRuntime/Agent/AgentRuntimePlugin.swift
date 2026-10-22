@@ -1,6 +1,6 @@
-import Foundation
 import DistributedCluster
 import EventSourcing
+import Foundation
 import HailCore
 import HailModelRuntime
 import ScopedEffect

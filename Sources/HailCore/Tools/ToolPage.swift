@@ -114,7 +114,9 @@ public struct ToolPageLink: Tool {
 
     public func effect(for input: GeneratedContent) throws -> ToolPageEffect { ToolPageEffect(address: address) }
 
-    public func run(_ input: GeneratedContent, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ToolPageEffect>) async throws
+    public func run(
+        _ input: GeneratedContent, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ToolPageEffect>
+    ) async throws
         -> CallReturn
     {
         try await ToolPageEffect.run(in: token)

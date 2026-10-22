@@ -68,7 +68,9 @@ struct PromptAssemblyPersonaTests {
     private var work: [AgentHistory.Event] {
         [
             .called(call, at: Date(timeIntervalSince1970: 0)),
-            .resulted(ToolResult(toolCallID: "call-1", name: "getWeather", output: .text("sunny")), at: Date(timeIntervalSince1970: 0)),
+            .resulted(
+                ToolResult(toolCallID: "call-1", name: "getWeather", output: .text("sunny")),
+                at: Date(timeIntervalSince1970: 0)),
         ]
     }
 
@@ -88,7 +90,8 @@ struct PromptAssemblyPersonaTests {
 
     @Test("an earlier turn shows what was said and answered, not its work")
     func earlierTurnIsSaidAndAnswered() throws {
-        let request = assembleStandardPrompt(try context([received("weather?")] + work + [replied(GeneratedContent("sunny"))]))
+        let request = assembleStandardPrompt(
+            try context([received("weather?")] + work + [replied(GeneratedContent("sunny"))]))
 
         #expect(request.history.map(text(in:)) == ["weather?", "sunny"])
     }
@@ -99,12 +102,16 @@ struct PromptAssemblyPersonaTests {
         let landing = { (id: String, did: String) -> [AgentHistory.Event] in
             [
                 .called(ToolCall(id: id, name: "getWeather", arguments: GeneratedContent(properties: [:])), at: Date()),
-                .resulted(ToolResult(toolCallID: id, name: "getWeather", output: .text(did), landed: address), at: Date()),
+                .resulted(
+                    ToolResult(toolCallID: id, name: "getWeather", output: .text(did), landed: address), at: Date()),
             ]
         }
         // The same call ID twice, as a model may reuse one: the place decides, not the ID.
         let request = assembleStandardPrompt(
-            try context([received("weather?")] + landing("1", "checked") + landing("1", "checked again") + [replied(GeneratedContent("done"))]))
+            try context(
+                [received("weather?")] + landing("1", "checked") + landing("1", "checked again") + [
+                    replied(GeneratedContent("done"))
+                ]))
 
         #expect(request.history.map(text(in:)) == ["weather?", "", "checked again\n→ weather", "done"])
     }

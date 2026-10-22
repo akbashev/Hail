@@ -181,10 +181,12 @@ public struct PreparedRequest: Sendable {
     public func receiving(_ arrivals: [Arrival]) -> PreparedRequest {
         guard !arrivals.isEmpty, case .prompt(let input)? = openTurn.first else { return self }
         let arrived = arrivals.map { arrival in
-            Transcript.Segment.text(.init(content: "\(arrival.call.name) finished meanwhile: \(arrival.output.textRepresentation)"))
+            Transcript.Segment.text(
+                .init(content: "\(arrival.call.name) finished meanwhile: \(arrival.output.textRepresentation)"))
         }
         return PreparedRequest(
-            prefix: prefix, history: history, openTurn: [.prompt(.init(segments: input.segments + arrived))] + openTurn.dropFirst(),
+            prefix: prefix, history: history,
+            openTurn: [.prompt(.init(segments: input.segments + arrived))] + openTurn.dropFirst(),
             tools: tools)
     }
 }

@@ -71,7 +71,7 @@ extension AgentStream {
         try await agent.stream(
             input,
             received: received,
-           
+
             inputID: inputID,
             through: connection
         )

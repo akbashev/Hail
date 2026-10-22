@@ -107,7 +107,11 @@ private final class RunsOutOnce: ModelEndpoint, Sendable {
                 if attempt == 1 {
                     let (reply, answer) = ToolReply.awaiting()
                     continuation.yield(
-                        .toolCall(ModelToolCall(call: ToolCall(id: "call-1", name: "weather", arguments: GeneratedContent(properties: [:])), reply: reply)))
+                        .toolCall(
+                            ModelToolCall(
+                                call: ToolCall(
+                                    id: "call-1", name: "weather", arguments: GeneratedContent(properties: [:])),
+                                reply: reply)))
                     _ = await answer.first { _ in true }
                     continuation.yield(.failed(.thoughtPastAnswer))
                 } else {

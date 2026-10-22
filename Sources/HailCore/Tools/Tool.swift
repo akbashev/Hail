@@ -184,7 +184,8 @@ public protocol Tool<Input>: Sendable {
     /// its non-escapable token. A tool that has its result at once returns it; one that needs
     /// more from the model shows it pages in `scope` and answers its calls there, then returns.
     /// What it returns is what the call did, and what comes next: links, or the page it landed on.
-    func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<Effect>) async throws -> CallReturn
+    func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<Effect>) async throws
+        -> CallReturn
 }
 
 extension Tool {
@@ -267,7 +268,9 @@ public struct AnyTool: Sendable {
         self.name = schema.name
         self.description = schema.description
         self.schema = schema
-        self._call = { _, _, _ in throw ToolError.notConfigured("\(schema.name) is answered by the scope that offers it") }
+        self._call = { _, _, _ in
+            throw ToolError.notConfigured("\(schema.name) is answered by the scope that offers it")
+        }
     }
 
     /// Calls it in a scope of its own: the running call the caller talks to it through.
@@ -281,7 +284,8 @@ public struct AnyTool: Sendable {
         authority: any Authority
     ) async throws -> CallReturn {
         let origin = Origin.direct(ToolCall(id: UUID().uuidString, name: name, arguments: generatedContent))
-        return try await call(generatedContent: generatedContent, authority: authority, origin: origin).resultWithoutModel()
+        return try await call(generatedContent: generatedContent, authority: authority, origin: origin)
+            .resultWithoutModel()
     }
 
 }

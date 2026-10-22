@@ -22,9 +22,13 @@ struct RequestPoolTests {
         let pool = RequestPool(limit: 1)
         let order = Mutex<[String]>([])
         try await pool.acquire()
-        let background = Task(priority: .background) { try await pool.withSlot { order.withLock { $0.append("background") } } }
+        let background = Task(priority: .background) {
+            try await pool.withSlot { order.withLock { $0.append("background") } }
+        }
         try await Task.sleep(for: .milliseconds(50))
-        let userInitiated = Task(priority: .userInitiated) { try await pool.withSlot { order.withLock { $0.append("userInitiated") } } }
+        let userInitiated = Task(priority: .userInitiated) {
+            try await pool.withSlot { order.withLock { $0.append("userInitiated") } }
+        }
         try await Task.sleep(for: .milliseconds(50))
         await pool.release()
         try await background.value

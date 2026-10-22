@@ -41,7 +41,9 @@ struct FoundationModelsProbeTests {
             ClockEffect()
         }
 
-        func run(_ input: ProbeInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: ProbeInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             .text("scheduled")
         }
     }
@@ -108,7 +110,8 @@ struct FoundationModelsProbeTests {
             if case .toolCall(let toolCall) = event {
                 toolCall.reply.give(
                     ToolAnswer(
-                        result: ToolResult(toolCallID: toolCall.call.id, name: toolCall.call.name, output: .text("Reminder set.")),
+                        result: ToolResult(
+                            toolCallID: toolCall.call.id, name: toolCall.call.name, output: .text("Reminder set.")),
                         tools: [AnyTool(ProbeTool())]))
             }
         }

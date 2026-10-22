@@ -3,7 +3,6 @@ import HailCore
 import Logging
 import Synchronization
 
-
 #if canImport(FoundationEssentials)
     import FoundationEssentials
 #else
@@ -30,7 +29,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         let apply: @Sendable (_ thinking: ModelReasoningOverride, _ options: inout GenerationOptions) -> Void
 
         public init(
-            _ apply: @escaping @Sendable (_ thinking: ModelReasoningOverride, _ options: inout GenerationOptions) -> Void
+            _ apply:
+                @escaping @Sendable (_ thinking: ModelReasoningOverride, _ options: inout GenerationOptions) -> Void
         ) {
             self.apply = apply
         }
@@ -64,7 +64,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         contextWindow: Int? = nil,
         keepAlive: String? = nil,
         think: Bool? = nil,
-        session: any HTTPTransport = makeDefaultSession()
+        transport: any HTTPTransport = makeDefaultTransport()
     ) -> Self {
         var options = GenerationOptions(temperature: temperature)
         // Ollama cuts a prompt longer than its context unless told not to, and the model then
@@ -92,7 +92,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                 options[custom: OllamaLanguageModel.self] = ollamaOptions
             }
         return Self(
-            languageModel: OllamaLanguageModel(baseURL: baseURL, model: model, session: session),
+            languageModel: OllamaLanguageModel(baseURL: baseURL, model: model, transport: transport),
             modelIdentifier: model,
             temperature: temperature,
             effectiveContextWindow: contextWindow,
@@ -233,7 +233,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                         let stream = session.streamResponse(
                             to: mapped.prompt,
                             generating: outputType,
-                            options: options(for: purpose, thinking: attempts.thinking, toolCallsLeft: request.toolCallsLeft)
+                            options: options(
+                                for: purpose, thinking: attempts.thinking, toolCallsLeft: request.toolCallsLeft)
                         )
                         for try await snapshot in stream {
                             await delegate.underWay()

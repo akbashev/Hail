@@ -63,7 +63,9 @@ struct ToolRegistryTests {
             ClockEffect()
         }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             .text(input.message)
         }
     }
@@ -114,7 +116,9 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             .text("Started.", links: [GeneratedInputTool()])
         }
     }
@@ -144,7 +148,10 @@ struct ToolRegistryTests {
     /// scope, and making the list is its result.
     struct ListTool: HailCore.Tool {
         typealias Input = EmptyToolInput
-        enum Call: Sendable { case add(String), make }
+        enum Call: Sendable {
+            case add(String)
+            case make
+        }
         @Generable struct Name: Sendable { let name: String }
 
         var name: String { "start" }
@@ -156,13 +163,17 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             var names: [String] = []
             await scope.show(.text("Started."), offering: Self.options)
             while let event = await scope.next() {
                 switch consume event {
                 case .turn(let turn):
-                    await turn.show(.text("Still a list of \(names.joined(separator: ", ")); nothing made yet."), offering: Self.options)
+                    await turn.show(
+                        .text("Still a list of \(names.joined(separator: ", ")); nothing made yet."),
+                        offering: Self.options)
                 case .call(let call):
                     let value = call.value
                     switch value {
@@ -182,7 +193,9 @@ struct ToolRegistryTests {
         }
     }
 
-    private func call(_ registry: inout AgentSession, _ id: String, _ name: String, adding added: String? = nil) async throws -> ToolExecution {
+    private func call(_ registry: inout AgentSession, _ id: String, _ name: String, adding added: String? = nil)
+        async throws -> ToolExecution
+    {
         let arguments = added.map { GeneratedContent(properties: ["name": $0]) } ?? GeneratedContent(properties: [:])
         return try await registry.executeWithOutputs([ToolCall(id: id, name: name, arguments: arguments)])[0]
     }
@@ -259,7 +272,9 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: Input, in scope: borrowing ToolScope<Call>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             var names: [String] = []
             await scope.show(.text("Started."), offering: Self.options)
             while let event = await scope.next() {
@@ -289,7 +304,9 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<ListTool.Call>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(
+            _ input: Input, in scope: borrowing ToolScope<ListTool.Call>, token: borrowing EffectToken<ClockEffect>
+        ) async throws -> CallReturn {
             await scope.show(.text("Listening."), offering: ListTool.options)
             while let event = await scope.next() { _ = consume event }
             throw CancellationError()
@@ -314,7 +331,9 @@ struct ToolRegistryTests {
 
         func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             throw ToolPageError(.text("It already exists.", links: [GeneratedInputTool()]))
         }
     }
@@ -331,7 +350,8 @@ struct ToolRegistryTests {
 
     @Test("called with no model, a call's result is the first page its scope shows")
     func noModel() async throws {
-        let page = try await AnyTool(ListTool()).runOutput(generatedContent: GeneratedContent(properties: [:]), authority: FullAuthority())
+        let page = try await AnyTool(ListTool()).runOutput(
+            generatedContent: GeneratedContent(properties: [:]), authority: FullAuthority())
         #expect(page.result.textRepresentation == "Started.")
     }
 
@@ -369,11 +389,14 @@ extension ToolRegistryTests {
     func argumentsAreConformed() throws {
         let plan = try Plan(
             leniently: try GeneratedContent(
-                json: #"{"name": "n", "start": "[]", "steps": "[{\"action\": \"add\", \"value\": 1}, {\"action\": \"reply\", \"value\": \"[]\"}]"}"#))
+                json:
+                    #"{"name": "n", "start": "[]", "steps": "[{\"action\": \"add\", \"value\": 1}, {\"action\": \"reply\", \"value\": \"[]\"}]"}"#
+            ))
         #expect(plan.start == "[]")
         #expect(plan.steps.map(\.value) == ["1", "[]"])
         // A list where text was asked for is read as its JSON text.
-        #expect(try Plan(leniently: try GeneratedContent(json: #"{"name": "n", "start": [], "steps": []}"#)).start == "[]")
+        #expect(
+            try Plan(leniently: try GeneratedContent(json: #"{"name": "n", "start": [], "steps": []}"#)).start == "[]")
     }
 
     /// What doesn't fit is named by its path, with what it should be.
@@ -389,12 +412,15 @@ extension ToolRegistryTests {
         }
         #expect(
             error(#"{"name": "n", "steps": [{"action": "add"}, {"reply": "x"}]}"#)
-                == "`steps[1]` needs `action`, one of add, reply; `reply` isn't one of its parts. Its parts: action, value.")
+                == "`steps[1]` needs `action`, one of add, reply; `reply` isn't one of its parts. Its parts: action, value."
+        )
         #expect(
             error(#"{"name": "n", "steps": [{"action": "filter"}]}"#)
                 == "`steps[0].action` is `filter`, but it's one of add, reply.")
         #expect(error(#"{"name": "n", "steps": "add"}"#) == #"`steps` is `"add"`, but it's a list."#)
-        #expect(error(#"{"name": "n", "steps": "[{\"action\": \"reply\", \"value\": \"a\" + b}]"}"#).hasPrefix("`steps` is JSON text that doesn't read"))
+        #expect(
+            error(#"{"name": "n", "steps": "[{\"action\": \"reply\", \"value\": \"a\" + b}]"}"#).hasPrefix(
+                "`steps` is JSON text that doesn't read"))
     }
 }
 

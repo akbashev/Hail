@@ -140,7 +140,8 @@ extension Tool where Call == Never {
     /// Runs it with its effect already authorized, and no model to work with: a tool that offers
     /// nothing in its scope has just its result.
     public func runOutput(input: Input, token: borrowing EffectToken<Effect>) async throws -> CallReturn {
-        let channel = ScopeChannel<Never>(origin: .direct(ToolCall(id: UUID().uuidString, name: name, arguments: input.generatedContent)))
+        let channel = ScopeChannel<Never>(
+            origin: .direct(ToolCall(id: UUID().uuidString, name: name, arguments: input.generatedContent)))
         await channel.end()
         let scope = ToolScope(channel)
         return try await run(input, in: scope, token: token)

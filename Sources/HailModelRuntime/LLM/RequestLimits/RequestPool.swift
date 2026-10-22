@@ -131,7 +131,7 @@ public actor ModelTransports {
     /// How a model of `account` sends its requests: through `base`, in its account's pool.
     public nonisolated func transport(
         for account: ModelAccount,
-        over base: any HTTPTransport = makeDefaultSession()
+        over base: any HTTPTransport = makeDefaultTransport()
     ) -> any HTTPTransport {
         AccountTransport(account: account, transports: self, base: base)
     }
@@ -143,18 +143,18 @@ private struct AccountTransport: HTTPTransport {
     let transports: ModelTransports
     let base: any HTTPTransport
 
-    @concurrent func perform<Return>(
+    @concurrent func send<Return>(
         request: HTTPRequest,
         body: Data?,
-        timeout: Duration,
+        timeout: Duration?,
         // As AnyLanguageModel declares it, compiled without nonisolated(nonsending) by default.
         responseHandler: @concurrent (HTTPResponse, HTTPResponseBody) async throws -> Return
     ) async throws -> Return {
         guard let pool = await transports.pool(for: account) else {
-            return try await base.perform(request: request, body: body, timeout: timeout, responseHandler: responseHandler)
+            return try await base.send(request: request, body: body, timeout: timeout, responseHandler: responseHandler)
         }
         return try await pool.withSlot {
-            try await base.perform(request: request, body: body, timeout: timeout, responseHandler: responseHandler)
+            try await base.send(request: request, body: body, timeout: timeout, responseHandler: responseHandler)
         }
     }
 }

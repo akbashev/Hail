@@ -14,7 +14,8 @@ struct AgentHistoryReplayTests {
     private let call = ToolCall(id: "call-1", name: "read_file", arguments: GeneratedContent(properties: [:]))
 
     private func input(_ text: String, at seconds: TimeInterval = 0) -> AgentHistory.Input {
-        AgentHistory.Input(from: .user(id: "u"), content: GeneratedContent(text), at: Date(timeIntervalSince1970: seconds))
+        AgentHistory.Input(
+            from: .user(id: "u"), content: GeneratedContent(text), at: Date(timeIntervalSince1970: seconds))
     }
 
     private func replay(_ events: [AgentHistory.Event]) throws -> AgentState {
@@ -69,7 +70,8 @@ struct AgentHistoryReplayTests {
         #expect(throws: AgentHistory.InvalidEvent.unknownTurn(TurnID("nope"))) {
             try replay([
                 .compacted(
-                    .init(context: GeneratedContent("s"), report: GeneratedContent("s")), through: .after(TurnID("nope")), kept: .all)
+                    .init(context: GeneratedContent("s"), report: GeneratedContent("s")),
+                    through: .after(TurnID("nope")), kept: .all)
             ])
         }
     }
@@ -83,7 +85,9 @@ struct AgentHistoryReplayTests {
         try state.apply(.history(.called(call, at: Date())))
         #expect(state.runtimeState == .executingTool)
         try state.apply(.history(.failed(.init(error: .contextLengthExceeded, at: Date()))))
-        try state.apply(.modelRequestFailed(id: ModelRequestID("r1"), error: .contextLengthExceeded, durationMilliseconds: 1, at: Date()))
+        try state.apply(
+            .modelRequestFailed(
+                id: ModelRequestID("r1"), error: .contextLengthExceeded, durationMilliseconds: 1, at: Date()))
         #expect(state.runtimeState == .failed)
         try state.apply(request("r2", kind: .compaction))
         #expect(state.runtimeState == .compacting)
@@ -122,7 +126,8 @@ struct AgentHistoryReplayTests {
             .received(input("two"), turn: TurnID("t2")), .replied(.init(content: GeneratedContent("2"), at: Date())),
             .received(input("three"), turn: TurnID("t3")),
             .compacted(
-                .init(context: GeneratedContent("so far"), report: GeneratedContent("so far")), through: .after(TurnID("t2")),
+                .init(context: GeneratedContent("so far"), report: GeneratedContent("so far")),
+                through: .after(TurnID("t2")),
                 kept: .from(TurnID("t2"))),
         ])
         #expect(state.history.earlier?.kept.map(\.turn) == [TurnID("t2")])
@@ -136,7 +141,9 @@ struct AgentHistoryReplayTests {
         let state = try replay([
             .received(input("build it"), turn: TurnID("t1")),
             .called(call, at: Date()),
-            .compacted(.init(context: GeneratedContent("s"), report: GeneratedContent("s")), through: .after(TurnID("t1")), kept: .all),
+            .compacted(
+                .init(context: GeneratedContent("s"), report: GeneratedContent("s")), through: .after(TurnID("t1")),
+                kept: .all),
         ])
         #expect(state.history.open?.input == input("build it"))
         #expect(state.history.open?.steps.isEmpty == true)

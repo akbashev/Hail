@@ -1,8 +1,8 @@
 import AnyLanguageModel
 import Foundation
+import HTTPTypes
 import HailCore
 import HailModelRuntime
-import HTTPTypes
 import Testing
 
 @Suite("Model transport failures")
@@ -95,7 +95,8 @@ struct ModelTransportFailureTests {
     func busyProviderIsWaitedFor() async {
         let recorder = RequestRecorder()
         let busy = HTTPResponse(status: 429, headerFields: [.retryAfter: "0"])
-        let events = await collect(FailingLanguageModel(recorder: recorder, failure: .http(busy, body: "slow down", times: 2)))
+        let events = await collect(
+            FailingLanguageModel(recorder: recorder, failure: .http(busy, body: "slow down", times: 2)))
         #expect(await recorder.requests.count == 3)
         guard case .generated("done") = events.last else {
             Issue.record("Expected the generated value after waiting")
@@ -107,16 +108,20 @@ struct ModelTransportFailureTests {
     func busyProviderStopsBeingWaitedFor() async {
         let recorder = RequestRecorder()
         let overloaded = HTTPResponse(status: 529, headerFields: [.retryAfter: "0"])
-        let events = await collect(FailingLanguageModel(recorder: recorder, failure: .http(overloaded, body: "overloaded", times: .max)))
+        let events = await collect(
+            FailingLanguageModel(recorder: recorder, failure: .http(overloaded, body: "overloaded", times: .max)))
         #expect(await recorder.requests.count == 4)
         #expect(events.last.map(isFailure(.unavailable)) == true)
     }
 
-    @Test("a provider asking for a longer wait than is waited for fails at once", arguments: ["3600", "Fri, 01 Jan 2100 00:00:00 GMT"])
+    @Test(
+        "a provider asking for a longer wait than is waited for fails at once",
+        arguments: ["3600", "Fri, 01 Jan 2100 00:00:00 GMT"])
     func longWaitFails(retryAfter: String) async {
         let recorder = RequestRecorder()
         let busy = HTTPResponse(status: 429, headerFields: [.retryAfter: retryAfter])
-        let events = await collect(FailingLanguageModel(recorder: recorder, failure: .http(busy, body: "", times: .max)))
+        let events = await collect(
+            FailingLanguageModel(recorder: recorder, failure: .http(busy, body: "", times: .max)))
         #expect(await recorder.requests.count == 1)
         #expect(events.last.map(isFailure(.rateLimit)) == true)
     }
@@ -139,7 +144,8 @@ struct ModelTransportFailureTests {
     func unauthorizedIsNotRetried() async {
         let recorder = RequestRecorder()
         let events = await collect(
-            FailingLanguageModel(recorder: recorder, failure: .http(HTTPResponse(status: .unauthorized), body: "", times: .max)))
+            FailingLanguageModel(
+                recorder: recorder, failure: .http(HTTPResponse(status: .unauthorized), body: "", times: .max)))
         #expect(await recorder.requests.count == 1)
         #expect(events.last.map(isFailure(.authentication)) == true)
     }
@@ -213,7 +219,9 @@ private struct FailingLanguageModel: LanguageModel {
                     let attempt = await recorder.record(Array(session.transcript))
                     switch failure {
                     case .http(let response, let body, let times):
-                        guard attempt > times else { throw HTTPTransportError.httpError(response: response, body: body) }
+                        guard attempt > times else {
+                            throw HTTPTransportError(kind: .httpError, response: response, body: Data(body.utf8))
+                        }
                         let raw = GeneratedContent("done")
                         continuation.yield(
                             .init(content: try Content(raw).asPartiallyGenerated(), rawContent: raw))

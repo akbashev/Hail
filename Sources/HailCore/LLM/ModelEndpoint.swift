@@ -139,7 +139,6 @@ where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendabl
     case failed(ModelEndpointError)
 }
 
-
 /// Identifies which layer owns the model-visible conversation window.
 ///
 /// Every endpoint must choose explicitly. Runtime-owned endpoints receive an

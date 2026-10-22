@@ -31,8 +31,10 @@ struct PrefixStabilityTests {
     @Test("a call that finished meanwhile arrives in the open turn's input, never as a message of its own")
     func arrivalsJoinTheInput() {
         let call = ToolCall(id: "c1", name: "timer", arguments: GeneratedContent(properties: [:]))
-        let request = PreparedRequest(prefix: [prompt("sys")], history: [response("previous")], openTurn: [prompt("current")])
-            .receiving([Arrival(call: call, output: .text("rang"))])
+        let request = PreparedRequest(
+            prefix: [prompt("sys")], history: [response("previous")], openTurn: [prompt("current")]
+        )
+        .receiving([Arrival(call: call, output: .text("rang"))])
 
         #expect(request.entries.count == 3)
         guard case .prompt(let input)? = request.entries.last else {
@@ -48,13 +50,18 @@ struct PrefixStabilityTests {
         var history = AgentHistory()
         for (id, text) in [(earlier, "earlier"), (TurnID(), "current")] {
             history = try history.applying(
-                .received(.init(from: .user(id: "u"), content: GeneratedContent(text), at: Date(timeIntervalSince1970: 1)), turn: id))
+                .received(
+                    .init(from: .user(id: "u"), content: GeneratedContent(text), at: Date(timeIntervalSince1970: 1)),
+                    turn: id))
             if id == earlier {
-                history = try history.applying(.replied(.init(content: GeneratedContent("done"), at: Date(timeIntervalSince1970: 1))))
+                history = try history.applying(
+                    .replied(.init(content: GeneratedContent("done"), at: Date(timeIntervalSince1970: 1))))
             }
         }
         let folded = try history.applying(
-            .compacted(.init(context: GeneratedContent("summary"), report: GeneratedContent("summary")), through: .after(earlier), kept: .none))
+            .compacted(
+                .init(context: GeneratedContent("summary"), report: GeneratedContent("summary")),
+                through: .after(earlier), kept: .none))
 
         let before = assembleStandardPrompt(try context(history))
         let after = assembleStandardPrompt(try context(folded))

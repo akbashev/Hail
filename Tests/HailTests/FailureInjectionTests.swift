@@ -519,7 +519,8 @@ struct RepeatedCrashTests {
             state.normalizeAfterReplay()
             #expect(state.history.open?.id == TurnID("t1"))
         }
-        try state.apply(.history(.replied(.init(content: GeneratedContent("done"), at: Date(timeIntervalSince1970: 4_100)))))
+        try state.apply(
+            .history(.replied(.init(content: GeneratedContent("done"), at: Date(timeIntervalSince1970: 4_100)))))
 
         #expect(state.history.closed.count == 1)
         #expect(state.history.closed[0].steps.count == 4)
@@ -605,7 +606,9 @@ struct CorruptedJournalTests {
             try encode(
                 .history(
                     .received(
-                        .init(from: .user(id: "u"), content: GeneratedContent("hi"), at: Date(timeIntervalSince1970: 1_999)),
+                        .init(
+                            from: .user(id: "u"), content: GeneratedContent("hi"),
+                            at: Date(timeIntervalSince1970: 1_999)),
                         turn: TurnID("t1")))),
         ]
         for line in validLines {

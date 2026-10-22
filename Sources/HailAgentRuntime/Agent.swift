@@ -371,7 +371,7 @@ public distributed actor Agent: AsyncSequence {
                 try await loop.run(
                     input,
                     opening: opening,
-                   
+
                     inputID: inputID,
                     through: connection
                 )
@@ -427,7 +427,7 @@ public distributed actor Agent: AsyncSequence {
         try await self.stream(
             input,
             received: received,
-           
+
             inputID: inputID,
             through: stream.connection,
             authority: lane

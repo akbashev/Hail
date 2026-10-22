@@ -20,7 +20,9 @@ struct AnyLanguageModelEndpointTests {
             ClockEffect()
         }
 
-        func run(_ input: EffectInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: EffectInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             .text(input.message)
         }
     }
@@ -33,7 +35,9 @@ struct AnyLanguageModelEndpointTests {
             ClockEffect()
         }
 
-        func run(_ input: EffectInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: EffectInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             .text(input.message)
         }
     }
@@ -112,7 +116,8 @@ struct AnyLanguageModelEndpointTests {
         for (answersWithoutThinking, ending) in [(true, "generated ok"), (false, "failed thoughtPastAnswer")] {
             let recorded = RecordedOptions()
             let endpoint = AnyLanguageModelEndpoint(
-                languageModel: GoingRoundLanguageModel(recorded: recorded, answersWithoutThinking: answersWithoutThinking),
+                languageModel: GoingRoundLanguageModel(
+                    recorded: recorded, answersWithoutThinking: answersWithoutThinking),
                 modelIdentifier: "test",
                 temperature: 0.5,
                 // Thinking on is temperature 1 to the model, off is 0.
@@ -146,13 +151,16 @@ struct AnyLanguageModelEndpointTests {
         )
         var last: ModelEvent<String>?
         for await event in endpoint.stream(
-            request: ModelRequest(input: "fix it", entries: [.prompt(.init(segments: [.text(.init(content: "fix it"))]))]),
+            request: ModelRequest(
+                input: "fix it", entries: [.prompt(.init(segments: [.text(.init(content: "fix it"))]))]),
             tools: [AnyTool(EffectTool())],
             authority: FullAuthority(),
             generating: String.self,
             purpose: .generation
         ) {
-            if case .toolCall(let toolCall) = event { Self.answer(toolCall, with: "saved", offering: [AnyTool(EffectTool())]) }
+            if case .toolCall(let toolCall) = event {
+                Self.answer(toolCall, with: "saved", offering: [AnyTool(EffectTool())])
+            }
             last = event
         }
         guard case .failed(.thoughtPastAnswer) = last else {
@@ -311,8 +319,9 @@ private struct ToolCallingLanguageModel: LanguageModel {
                 )
                 await session.toolExecutionDelegate?.didGenerateToolCalls([call], in: session)
                 // Goes on with the decided output, in the same request, with the tools resolved again.
-                guard case .provideOutput(let segments)? = await session.toolExecutionDelegate?.toolCallDecision(
-                    for: call, in: session)
+                guard
+                    case .provideOutput(let segments)? = await session.toolExecutionDelegate?.toolCallDecision(
+                        for: call, in: session)
                 else {
                     continuation.finish()
                     return
@@ -381,7 +390,9 @@ private struct OptionsRecordingLanguageModel: LanguageModel {
                 await recorded.record(options)
                 let content = "ok" as! Content
                 continuation.yield(
-                    .init(content: content.asPartiallyGenerated(), rawContent: GeneratedContent("ok"), transcriptEntries: []))
+                    .init(
+                        content: content.asPartiallyGenerated(), rawContent: GeneratedContent("ok"),
+                        transcriptEntries: []))
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -442,7 +453,9 @@ private struct GoingRoundLanguageModel: LanguageModel {
                 await recorded.record(options)
                 let content = answer as! Content
                 continuation.yield(
-                    .init(content: content.asPartiallyGenerated(), rawContent: GeneratedContent(answer), transcriptEntries: []))
+                    .init(
+                        content: content.asPartiallyGenerated(), rawContent: GeneratedContent(answer),
+                        transcriptEntries: []))
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }

@@ -39,7 +39,8 @@ public struct AgentHistory: Codable, Sendable, Equatable {
         case .called(let call, let at):
             return AgentHistory(earlier: earlier, closed: closed, open: try openTurn().adding(.called(call, at: at)))
         case .resulted(let result, let at):
-            return AgentHistory(earlier: earlier, closed: closed, open: try openTurn().adding(.resulted(result, at: at)))
+            return AgentHistory(
+                earlier: earlier, closed: closed, open: try openTurn().adding(.resulted(result, at: at)))
         case .noticed(let notice, let at):
             return AgentHistory(earlier: earlier, closed: closed, open: try openTurn().adding(.noticed(notice, at: at)))
         case .replied(let reply):
@@ -81,7 +82,8 @@ public struct AgentHistory: Codable, Sendable, Equatable {
             closed: Array(closed.dropFirst(folded.count)),
             open: open.map { OpenTurn(id: $0.id, input: $0.input, steps: Array($0.steps.dropFirst(work))) },
             folded: folded,
-            foldedWork: work > 0 ? open.map { OpenTurn(id: $0.id, input: $0.input, steps: Array($0.steps.prefix(work))) } : nil,
+            foldedWork: work > 0
+                ? open.map { OpenTurn(id: $0.id, input: $0.input, steps: Array($0.steps.prefix(work))) } : nil,
             dropped: earlierInputs.filter { !staying.contains($0.turn) }
         )
     }
@@ -94,7 +96,8 @@ public struct AgentHistory: Codable, Sendable, Equatable {
     private func closing(as outcome: Outcome) throws(InvalidEvent) -> AgentHistory {
         let turn = try openTurn()
         return AgentHistory(
-            earlier: earlier, closed: closed + [ClosedTurn(id: turn.id, input: turn.input, steps: turn.steps, outcome: outcome)],
+            earlier: earlier,
+            closed: closed + [ClosedTurn(id: turn.id, input: turn.input, steps: turn.steps, outcome: outcome)],
             open: nil)
     }
 }

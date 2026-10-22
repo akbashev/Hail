@@ -30,11 +30,17 @@ struct SlidingWindowCompactorTests {
         var history = AgentHistory()
         if let summary {
             let earlier = TurnID()
-            history = try history
-                .applying(.received(.init(from: .user(id: "u"), content: GeneratedContent("before"), at: Date()), turn: earlier))
+            history =
+                try history
+                .applying(
+                    .received(
+                        .init(from: .user(id: "u"), content: GeneratedContent("before"), at: Date()), turn: earlier)
+                )
                 .applying(.replied(.init(content: GeneratedContent("ok"), at: Date())))
                 .applying(
-                    .compacted(.init(context: GeneratedContent(summary), report: GeneratedContent(summary)), through: .after(earlier), kept: .none))
+                    .compacted(
+                        .init(context: GeneratedContent(summary), report: GeneratedContent(summary)),
+                        through: .after(earlier), kept: .none))
         }
         var ids: [TurnID] = []
         for (index, exchange) in exchanges.enumerated() {
@@ -42,9 +48,12 @@ struct SlidingWindowCompactorTests {
             ids.append(id)
             let at = Date(timeIntervalSince1970: TimeInterval(index))
             history = try history.applying(
-                .received(AgentHistory.Input(from: .user(id: "u"), content: GeneratedContent(exchange.said), at: at), turn: id))
+                .received(
+                    AgentHistory.Input(from: .user(id: "u"), content: GeneratedContent(exchange.said), at: at), turn: id
+                ))
             for (step, work) in exchange.work.enumerated() {
-                let call = ToolCall(id: "\(index)-\(step)", name: work.name, arguments: GeneratedContent(properties: [:]))
+                let call = ToolCall(
+                    id: "\(index)-\(step)", name: work.name, arguments: GeneratedContent(properties: [:]))
                 history = try history.applying(.called(call, at: at))
                 history = try history.applying(
                     .resulted(ToolResult(toolCallID: call.id, name: work.name, output: .text(work.result)), at: at))
@@ -149,7 +158,9 @@ struct SlidingWindowCompactorTests {
             ) { _ in "rolled" })
         #expect(result.through == .after(ids[2]))
         let after = try history.applying(
-            .compacted(.init(context: GeneratedContent("rolled"), report: GeneratedContent("rolled")), through: result.through, kept: result.kept))
+            .compacted(
+                .init(context: GeneratedContent("rolled"), report: GeneratedContent("rolled")), through: result.through,
+                kept: result.kept))
         #expect(after.closed.map(\.id) == Array(ids[3...]))
     }
 
@@ -189,7 +200,9 @@ struct SlidingWindowCompactorTests {
     @Test("an overflow cuts inside the open turn: its latest work stays, and its input stays first")
     func overflowFoldsTheOpenTurn() async throws {
         let (history, ids) = try history([
-            Exchange(said: "build it", work: (0..<4).map { ("step", String(repeating: "x", count: 1_000) + "\($0)") }, answer: nil)
+            Exchange(
+                said: "build it", work: (0..<4).map { ("step", String(repeating: "x", count: 1_000) + "\($0)") },
+                answer: nil)
         ])
         let ctx = try context(history)
         let captured = Box<[Transcript.Entry]>()
@@ -205,7 +218,9 @@ struct SlidingWindowCompactorTests {
         // Each result is about 250 tokens: the last call and its result fit 11% of 4,000.
         #expect(result.through == .within(ids[0], steps: 6))
         let after = try history.applying(
-            .compacted(.init(context: GeneratedContent("rolled"), report: GeneratedContent("rolled")), through: result.through, kept: result.kept))
+            .compacted(
+                .init(context: GeneratedContent("rolled"), report: GeneratedContent("rolled")), through: result.through,
+                kept: result.kept))
         #expect(after.open?.steps.count == 2)
         let request = assembleStandardPrompt(try context(after))
         #expect(request.openTurn.first.map(text(in:)) == "build it")
@@ -228,11 +243,13 @@ struct SlidingWindowCompactorTests {
     @Test("the summary so far is folded into the summary prompt")
     func priorSummaryInPrompt() async throws {
         let (history, _) = try history(
-            (0..<5).map { Exchange(said: "message \($0) " + String(repeating: "a", count: 790)) }, summary: "earlier facts")
+            (0..<5).map { Exchange(said: "message \($0) " + String(repeating: "a", count: 790)) },
+            summary: "earlier facts")
         let ctx = try context(history)
         let captured = Box<[Transcript.Entry]>()
         _ = try requireCompaction(
-            await makeCompactor().compact(context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()) { request in
+            await makeCompactor().compact(context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()) {
+                request in
                 captured.value = request.entries
                 return "rolled"
             })
@@ -266,7 +283,9 @@ struct SlidingWindowCompactorTests {
         let ctx = try context(history)
         let captured = Box<Int>()
         _ = try requireCompaction(
-            await makeCompactor(outputReserve: 300).compact(context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()) {
+            await makeCompactor(outputReserve: 300).compact(
+                context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()
+            ) {
                 request in
                 captured.value = request.maxOutputTokens
                 return "rolled"
@@ -280,7 +299,8 @@ struct SlidingWindowCompactorTests {
         let ctx = try context(history)
         let captured = Box<[Transcript.Entry]>()
         _ = try requireCompaction(
-            await makeCompactor().compact(context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()) { request in
+            await makeCompactor().compact(context: ctx, request: assembleStandardPrompt(ctx), budget: try budget()) {
+                request in
                 captured.value = request.entries
                 return "rolled"
             })
@@ -299,10 +319,12 @@ struct SlidingWindowCompactorTests {
         _ = try requireCompaction(
             await makeCompactor(keepRecentShare: 0.05, outputReserve: 800).compact(
                 context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(1_000),
-                measuring: .counted(RequestMeasurement(tokenCount: 500, source: .reported), by: { candidate in
-                    measured.value = (measured.value ?? 0) + 1
-                    return RequestMeasurement(tokenCount: candidate.entries.count * 20, source: .reported)
-                }),
+                measuring: .counted(
+                    RequestMeasurement(tokenCount: 500, source: .reported),
+                    by: { candidate in
+                        measured.value = (measured.value ?? 0) + 1
+                        return RequestMeasurement(tokenCount: candidate.entries.count * 20, source: .reported)
+                    }),
                 summarize: { _ in "rolled" }, trigger: .threshold))
         #expect((measured.value ?? 0) > 0)
     }
@@ -313,10 +335,12 @@ struct SlidingWindowCompactorTests {
         let ctx = try context(history)
         let decision = try await makeCompactor(keepRecentShare: 0.05).compact(
             context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(1_000),
-            measuring: .counted(RequestMeasurement(tokenCount: 500, source: .reported), by: { candidate in
-                let withSummary = candidate.entries.contains { text(in: $0).contains("rolled") }
-                return RequestMeasurement(tokenCount: withSummary ? 900 : 300, source: .reported)
-            }),
+            measuring: .counted(
+                RequestMeasurement(tokenCount: 500, source: .reported),
+                by: { candidate in
+                    let withSummary = candidate.entries.contains { text(in: $0).contains("rolled") }
+                    return RequestMeasurement(tokenCount: withSummary ? 900 : 300, source: .reported)
+                }),
             summarize: { _ in "rolled" }, trigger: .threshold)
         #expect(decision == .unchanged)
     }
@@ -328,10 +352,12 @@ struct SlidingWindowCompactorTests {
         await #expect(throws: AgentRuntimeError.contextLengthExceeded) {
             _ = try await makeCompactor(keepRecentShare: 0.05).compact(
                 context: ctx, request: assembleStandardPrompt(ctx), budget: try budget(1_000),
-                measuring: .counted(RequestMeasurement(tokenCount: 1_100, source: .reported), by: { candidate in
-                    let withSummary = candidate.entries.contains { text(in: $0).contains("rolled") }
-                    return RequestMeasurement(tokenCount: withSummary ? 900 : 300, source: .reported)
-                }),
+                measuring: .counted(
+                    RequestMeasurement(tokenCount: 1_100, source: .reported),
+                    by: { candidate in
+                        let withSummary = candidate.entries.contains { text(in: $0).contains("rolled") }
+                        return RequestMeasurement(tokenCount: withSummary ? 900 : 300, source: .reported)
+                    }),
                 summarize: { _ in "rolled" }, trigger: .contextLengthExceeded)
         }
     }

@@ -60,7 +60,10 @@ struct ToolCallsRanOutTests {
             default: return nil
             }
         }
-        #expect(steps == ["received", "called", "resulted", "called", "resulted", "noticed 2", "replied Two of three done."])
+        #expect(
+            steps == [
+                "received", "called", "resulted", "called", "resulted", "noticed 2", "replied Two of three done.",
+            ])
         let asked = model.requests.withLock { $0 }
         #expect(asked.count == 2)
         let second = try #require(asked.last)
@@ -105,7 +108,11 @@ private final class CallsPastTheLimit: ModelEndpoint, Sendable {
                     for index in 1...3 {
                         let (reply, answer) = ToolReply.awaiting()
                         continuation.yield(
-                            .toolCall(ModelToolCall(call: ToolCall(id: "call-\(index)", name: "weather-\(index)", arguments: GeneratedContent(properties: [:])), reply: reply)))
+                            .toolCall(
+                                ModelToolCall(
+                                    call: ToolCall(
+                                        id: "call-\(index)", name: "weather-\(index)",
+                                        arguments: GeneratedContent(properties: [:])), reply: reply)))
                         _ = await answer.first { _ in true }
                     }
                 } else {

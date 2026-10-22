@@ -1,7 +1,7 @@
 import AnyLanguageModel
 import HailCore
-import Testing
 import Synchronization
+import Testing
 
 @testable import HailAgentRuntime
 
@@ -128,8 +128,12 @@ struct CompactionFailurePolicyTests {
     private func history(_ said: [String]) throws -> AgentHistory {
         try said.enumerated().reduce(AgentHistory()) { history, next in
             let at = Date(timeIntervalSince1970: TimeInterval(next.offset))
-            return try history
-                .applying(.received(.init(from: .user(id: "u"), content: GeneratedContent(next.element), at: at), turn: TurnID()))
+            return
+                try history
+                .applying(
+                    .received(
+                        .init(from: .user(id: "u"), content: GeneratedContent(next.element), at: at), turn: TurnID())
+                )
                 .applying(.replied(.init(content: GeneratedContent("ok"), at: at)))
         }
     }

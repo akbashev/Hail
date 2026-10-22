@@ -177,7 +177,9 @@ public struct SlidingWindowCompactor: ContextCompactor {
         _ history: AgentHistory, through: AgentHistory.Cut, budget: Int
     ) throws(AgentRuntimeError) -> AgentHistory.KeptInputs {
         let inputs = try Self.fold(history, through: through, kept: .all).kept
-        let newestFirst = inputs.reversed().map { (turn: $0.turn, cost: estimator.estimate(Self.text(of: $0.input.content))) }
+        let newestFirst = inputs.reversed().map {
+            (turn: $0.turn, cost: estimator.estimate(Self.text(of: $0.input.content)))
+        }
         let totals = newestFirst.reduce(into: [Int]()) { $0.append(($0.last ?? 0) + $1.cost) }
         let fitting = totals.prefix { $0 <= budget }.count
         switch fitting {
@@ -213,14 +215,18 @@ public struct SlidingWindowCompactor: ContextCompactor {
         }
     }
 
-    private func currentSize(of request: PreparedRequest, measuring: RequestMeasuring) async throws(AgentRuntimeError) -> Int {
+    private func currentSize(of request: PreparedRequest, measuring: RequestMeasuring) async throws(AgentRuntimeError)
+        -> Int
+    {
         switch measuring {
         case .counted(let current, _), .reportedFloor(let current): current.tokenCount
         case .estimated: try await estimator.estimate(messages: request.entries, tools: request.tools)
         }
     }
 
-    private func candidateSize(of request: PreparedRequest, measuring: RequestMeasuring) async throws(AgentRuntimeError) -> Int {
+    private func candidateSize(of request: PreparedRequest, measuring: RequestMeasuring) async throws(AgentRuntimeError)
+        -> Int
+    {
         switch measuring {
         case .counted(_, let count): try await count(request).tokenCount
         case .reportedFloor, .estimated: try await estimator.estimate(messages: request.entries, tools: request.tools)

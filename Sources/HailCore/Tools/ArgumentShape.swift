@@ -43,7 +43,11 @@ struct ArgumentSchema {
         let definitions: [String: Node]?
 
         enum CodingKeys: String, CodingKey {
-            case ref = "$ref", type, properties, required, items, choices = "enum", anyOf, definitions = "$defs"
+            case ref = "$ref"
+            case type, properties, required, items
+            case choices = "enum"
+            case anyOf
+            case definitions = "$defs"
         }
     }
 
@@ -53,7 +57,8 @@ struct ArgumentSchema {
     }
 
     func resolve(_ node: Node) -> Node {
-        guard let ref = node.ref, let name = ref.split(separator: "/").last, let target = definitions[String(name)] else {
+        guard let ref = node.ref, let name = ref.split(separator: "/").last, let target = definitions[String(name)]
+        else {
             return node
         }
         return resolve(target)
@@ -76,7 +81,8 @@ extension GeneratedContent {
         switch node.type {
         case "object":
             guard case .structure(let properties, let keys) = try readingJSON(opening: "{", at: path).kind else {
-                throw ArgumentMismatch(description: "\(Self.naming(path)) is `\(shown)`, but it's an object. \(Self.parts(of: node))")
+                throw ArgumentMismatch(
+                    description: "\(Self.naming(path)) is `\(shown)`, but it's an object. \(Self.parts(of: node))")
             }
             let missing = (node.required ?? []).filter { key in
                 if case .null? = properties[key]?.kind { return true }
@@ -94,13 +100,16 @@ extension GeneratedContent {
                 throw ArgumentMismatch(description: said + ". \(Self.parts(of: node))")
             }
             if let key = unknown.first {
-                throw ArgumentMismatch(description: "\(Self.naming(path)) has `\(key)`, which isn't one of its parts. \(Self.parts(of: node))")
+                throw ArgumentMismatch(
+                    description:
+                        "\(Self.naming(path)) has `\(key)`, which isn't one of its parts. \(Self.parts(of: node))")
             }
             var conformed: [String: GeneratedContent] = [:]
             for key in keys {
                 guard let value = properties[key] else { continue }
                 if let property = node.properties?[key] {
-                    conformed[key] = try value.conformed(to: property, in: schema, at: path.isEmpty ? key : "\(path).\(key)")
+                    conformed[key] = try value.conformed(
+                        to: property, in: schema, at: path.isEmpty ? key : "\(path).\(key)")
                 } else {
                     conformed[key] = value
                 }
@@ -126,14 +135,17 @@ extension GeneratedContent {
             }
             if let choices = node.choices, !choices.contains(text) {
                 throw ArgumentMismatch(
-                    description: "\(Self.naming(path)) is `\(text)`, but it's one of \(choices.joined(separator: ", ")).")
+                    description:
+                        "\(Self.naming(path)) is `\(text)`, but it's one of \(choices.joined(separator: ", ")).")
             }
             return GeneratedContent(kind: .string(text))
         case "integer", "number":
             switch kind {
             case .number: return self
             case .string(let text):
-                if let number = Double(text.trimmingCharacters(in: .whitespaces)) { return GeneratedContent(kind: .number(number)) }
+                if let number = Double(text.trimmingCharacters(in: .whitespaces)) {
+                    return GeneratedContent(kind: .number(number))
+                }
             default: break
             }
             throw ArgumentMismatch(description: "\(Self.naming(path)) is `\(shown)`, but it's a number.")

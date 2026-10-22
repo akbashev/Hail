@@ -251,7 +251,9 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             throw CancellationError()
         }
     }
@@ -272,7 +274,9 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             throw ToolError.notConfigured("test")
         }
     }
@@ -300,7 +304,9 @@ struct ToolRegistryCancellationTests {
             ClockEffect()
         }
 
-        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws -> CallReturn {
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
             .text("ok")
         }
     }

@@ -365,7 +365,7 @@ public struct NetworkDependency: Sendable {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = request.method
         urlRequest.httpBody = request.body
-        request.headers.forEach { name, value in
+        for (name, value) in request.headers {
             urlRequest.setValue(value, forHTTPHeaderField: name)
         }
 

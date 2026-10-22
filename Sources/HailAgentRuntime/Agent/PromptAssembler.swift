@@ -89,7 +89,9 @@ public let assembleStandardPrompt: PromptAssembler = { context in
         prefix: prefix,
         history: (history.earlier?.kept ?? []).map { inputEntry($0.input) }
             + history.closed.enumerated().flatMap { closedTurnEntries($1, shown.in(turn: $0)) },
-        openTurn: history.open.map { turnEntries(input: $0.input, steps: $0.steps, shown.in(turn: history.closed.count)) } ?? []
+        openTurn: history.open.map {
+            turnEntries(input: $0.input, steps: $0.steps, shown.in(turn: history.closed.count))
+        } ?? []
     )
 }
 
@@ -108,7 +110,9 @@ struct Landings {
     init(in history: AgentHistory) {
         let turns = history.closed.map(\.steps) + (history.open.map { [$0.steps] } ?? [])
         let landings = turns.enumerated().flatMap { turn, steps in
-            steps.enumerated().compactMap { step, value in value.landed.map { (address: $0, place: Place(turn: turn, step: step)) } }
+            steps.enumerated().compactMap { step, value in
+                value.landed.map { (address: $0, place: Place(turn: turn, step: step)) }
+            }
         }
         let latest = Dictionary(landings.map { ($0.address, $0.place) }) { _, later in later }.values
         // Each result's call: the nearest call before it, in its turn, with its ID.
@@ -140,7 +144,8 @@ func inputEntry(_ input: AgentHistory.Input) -> Transcript.Entry {
 }
 
 /// A turn as the model sees it: what was said, then each call and its result.
-func turnEntries(input: AgentHistory.Input, steps: [AgentHistory.Step], _ shown: Landings.InTurn) -> [Transcript.Entry] {
+func turnEntries(input: AgentHistory.Input, steps: [AgentHistory.Step], _ shown: Landings.InTurn) -> [Transcript.Entry]
+{
     [inputEntry(input)]
         + steps.map { step in
             switch step {

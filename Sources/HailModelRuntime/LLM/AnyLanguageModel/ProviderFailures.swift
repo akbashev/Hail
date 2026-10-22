@@ -51,8 +51,8 @@ extension ProviderFailures {
             return .failed(.cancelled)
         }
         if let error = error as? ModelEndpointError { return .failed(error) }
-        if case .httpError(let response, let body) = error as? HTTPTransportError {
-            return read(response, body: body)
+        if let error = error as? HTTPTransportError, error.kind == .httpError, let response = error.response {
+            return read(response, body: error.body.map { String(decoding: $0, as: UTF8.self) } ?? "")
         }
         if let error = error as? LanguageModelSession.GenerationError {
             switch error {
@@ -97,7 +97,8 @@ extension ProviderFailures {
     }
 
     private static let httpDate = Date.ParseStrategy(
-        format: "\(weekday: .abbreviated), \(day: .twoDigits) \(month: .abbreviated) \(year: .padded(4)) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits) GMT",
+        format:
+            "\(weekday: .abbreviated), \(day: .twoDigits) \(month: .abbreviated) \(year: .padded(4)) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits) GMT",
         locale: Locale(identifier: "en_US_POSIX"),
         timeZone: TimeZone(identifier: "GMT")!
     )

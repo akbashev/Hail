@@ -39,7 +39,9 @@ struct PageTabTests {
 
         func effect(for input: EmptyToolInput) throws -> ClockEffect { ClockEffect() }
 
-        func run(_ input: EmptyToolInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>) async throws
+        func run(
+            _ input: EmptyToolInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>
+        ) async throws
             -> CallReturn
         {
             .text("did \(name)", landing: ToolPageAddress(rawValue: "counter"))
@@ -56,7 +58,9 @@ struct PageTabTests {
         return session
     }
 
-    @Test("a group is a page: the turn starts from its link, which says what it's for in a sentence; going there shows the rest and its tools")
+    @Test(
+        "a group is a page: the turn starts from its link, which says what it's for in a sentence; going there shows the rest and its tools"
+    )
     func aGroupIsAPage() async throws {
         var session = AgentSession()
         session.offer(

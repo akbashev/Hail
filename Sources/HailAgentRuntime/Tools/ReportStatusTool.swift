@@ -55,7 +55,10 @@ public struct ReportStatusTool {
         CoordinationEffect(subsystem: "agent", action: "report_status")
     }
 
-    public func run(_ input: ReportStatusToolInput, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<CoordinationEffect>) async throws
+    public func run(
+        _ input: ReportStatusToolInput, in scope: borrowing ToolScope<Never>,
+        token: borrowing EffectToken<CoordinationEffect>
+    ) async throws
         -> CallReturn
     {
         _ = token

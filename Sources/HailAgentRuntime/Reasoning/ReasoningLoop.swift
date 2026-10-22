@@ -205,7 +205,8 @@ enum TurnEnd: Equatable {
     init(_ error: any Error) {
         switch error {
         case is CancellationError: self = .cancelled
-        case let runtimeError as AgentRuntimeError: self = runtimeError == .cancelled ? .cancelled : .failed(runtimeError)
+        case let runtimeError as AgentRuntimeError:
+            self = runtimeError == .cancelled ? .cancelled : .failed(runtimeError)
         default: self = .failed(.infrastructureFailure(String(describing: error)))
         }
     }
@@ -740,26 +741,27 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             recordActivity: recordActivity,
             clock: clock
         )
-        let generation = try await Self.value(of: try await runner.run(
-            model: endpoint.model,
-            kind: .compaction,
-            contentHashes: RequestContentHash.chain(tools: [], messages: entries),
-            stream: endpoint.stream(
-                request: ModelRequest(
-                    input: CompactionSummaryRequest(
-                        entries: entries,
-                        maxOutputTokens: maxOutputTokens
+        let generation = try await Self.value(
+            of: try await runner.run(
+                model: endpoint.model,
+                kind: .compaction,
+                contentHashes: RequestContentHash.chain(tools: [], messages: entries),
+                stream: endpoint.stream(
+                    request: ModelRequest(
+                        input: CompactionSummaryRequest(
+                            entries: entries,
+                            maxOutputTokens: maxOutputTokens
+                        ),
+                        entries: entries
                     ),
-                    entries: entries
+                    tools: [],
+                    authority: authority,
+                    generating: GeneratedContent.self,
+                    purpose: .compaction(maxOutputTokens: maxOutputTokens)
                 ),
-                tools: [],
-                authority: authority,
-                generating: GeneratedContent.self,
-                purpose: .compaction(maxOutputTokens: maxOutputTokens)
-            ),
-            from: Generation<GeneratedContent>.pending,
-            reduce: Self.generating
-        ))
+                from: Generation<GeneratedContent>.pending,
+                reduce: Self.generating
+            ))
         guard case .generated(let summary) = generation else {
             throw AgentRuntimeError.modelMisbehavior("Compaction produced an empty summary")
         }
@@ -777,14 +779,15 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             recordActivity: recordActivity,
             clock: clock
         )
-        let generation = try await Self.value(of: try await runner.run(
-            model: endpoint.model,
-            kind: .compaction,
-            contentHashes: RequestContentHash.chain(tools: [], messages: request.entries),
-            stream: operation.stream(endpoint, request, authority),
-            from: Generation<GeneratedContent>.pending,
-            reduce: Self.generating
-        ))
+        let generation = try await Self.value(
+            of: try await runner.run(
+                model: endpoint.model,
+                kind: .compaction,
+                contentHashes: RequestContentHash.chain(tools: [], messages: request.entries),
+                stream: operation.stream(endpoint, request, authority),
+                from: Generation<GeneratedContent>.pending,
+                reduce: Self.generating
+            ))
         guard case .generated(let report) = generation else {
             throw AgentRuntimeError.modelMisbehavior("Compaction produced an empty report")
         }
@@ -889,7 +892,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 promptMetadata["tokenCounts"] = .string("unavailable")
             }
             logger.info("Prompt composition", metadata: promptMetadata)
-            let turn = TurnRequest(value: input, request: turnContext.preparedRequest.receiving(arrivals).offering(schemas))
+            let turn = TurnRequest(
+                value: input, request: turnContext.preparedRequest.receiving(arrivals).offering(schemas))
             let delta = TurnDelta(
                 currentEntries: turn.request.openTurn,
                 sessionIdentity: turnContext.sessionIdentity
@@ -982,12 +986,15 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         case .ranOut(let calls):
             // Told so, journaled, and asked again from the journal, without thinking: the tools
             // it called have answered, and aren't run again. A few times, then it's said why.
-            guard noticesGiven < Self.mostNoticesOfAnAnswerRunningOut else { throw AgentRuntimeError.modelThoughtPastAnswer }
+            guard noticesGiven < Self.mostNoticesOfAnAnswerRunningOut else {
+                throw AgentRuntimeError.modelThoughtPastAnswer
+            }
             try await emit(.history(.noticed(.answerRanOut, at: Date())))
             let rebuilt = try await rebuildContext(turnSnapshot)
             let schemas = session.schemas()
             return try await runTurn(
-                input: TurnRequest(value: input.value, request: rebuilt.preparedRequest.receiving(arrivals).offering(schemas)),
+                input: TurnRequest(
+                    value: input.value, request: rebuilt.preparedRequest.receiving(arrivals).offering(schemas)),
                 delta: delta,
                 arrivals: arrivals,
                 schemas: schemas,
@@ -1009,7 +1016,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             try await emit(.history(.noticed(.toolCallsRanOut(limit: calls.limit), at: Date())))
             let rebuilt = try await rebuildContext(turnSnapshot)
             return try await runTurn(
-                input: TurnRequest(value: input.value, request: rebuilt.preparedRequest.receiving(arrivals).offering([])),
+                input: TurnRequest(
+                    value: input.value, request: rebuilt.preparedRequest.receiving(arrivals).offering([])),
                 delta: delta,
                 arrivals: arrivals,
                 schemas: [],
@@ -1113,14 +1121,15 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let request = ModelRequest(
             input: input.value,
             entries: input.request.entries,
-            reasoning: thinking ?? modelReasoningPolicy(
-                ModelReasoningContext(
-                    model: endpoint.model,
-                    purpose: .generation,
-                    hasTools: !modelTools.isEmpty,
-                    completedToolRounds: calls.count
-                )
-            ),
+            reasoning: thinking
+                ?? modelReasoningPolicy(
+                    ModelReasoningContext(
+                        model: endpoint.model,
+                        purpose: .generation,
+                        hasTools: !modelTools.isEmpty,
+                        completedToolRounds: calls.count
+                    )
+                ),
             toolCallsLeft: calls.limit - calls.count
         )
         if let sessionEndpoint = endpoint as? SessionOwningEndpoint {
@@ -1172,7 +1181,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                     await recordActivity(.turn(.progress(.status(message)), at: Date()))
                 case .toolCall(let toolCall):
                     await recordActivity(.turn(.progress(.toolCalled(toolCall.call)), at: Date()))
-                    let ran = try await runToolCall(toolCall.call, calls: progress.calls, in: &session, through: connection)
+                    let ran = try await runToolCall(
+                        toolCall.call, calls: progress.calls, in: &session, through: connection)
                     toolCall.reply.give(ran.answer)
                     return TurnProgress(calls: ran.calls, generation: progress.generation)
                 case .generated(let value):
@@ -1229,7 +1239,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         await recordActivity(.turn(.progress(.toolFinished(result)), at: Date()))
         await broadcast(.toolCompleted(result: result, at: Date()), to: connection)
 
-        return (ToolAnswer(result: result, page: execution.page, tools: session.allTools()), try calling.resulted(result))
+        return (
+            ToolAnswer(result: result, page: execution.page, tools: session.allTools()), try calling.resulted(result)
+        )
     }
 
     // MARK: - Updates

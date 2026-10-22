@@ -15,9 +15,9 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "509.0.0"..<"605.0.0"),
-        .package(url: "https://github.com/apple/swift-distributed-actors.git", branch: "main"),
-        .package(url: "https://github.com/akbashev/cluster-virtual-actors.git", branch: "main"),
-        .package(url: "https://github.com/akbashev/cluster-event-sourcing.git", branch: "main"),
+        .package(url: "https://github.com/turgai-labs/swift-distributed-actors.git", branch: "turgai-integration"),
+        .package(url: "https://github.com/akbashev/cluster-virtual-actors.git", branch: "stable-references"),
+        .package(url: "https://github.com/akbashev/cluster-event-sourcing.git", branch: "turgai-integration"),
         .package(
             url: "https://github.com/huggingface/AnyLanguageModel.git",
             branch: "main",

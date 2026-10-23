@@ -1,5 +1,5 @@
 {
-  "originHash" : "1eaefbc6d714ae491b4edfd7b0614e651d1cc205a0444605c3d5aabdae275c15",
+  "originHash" : "f099c9fad92f9e096ce75deea824aa41a454cecd7e777090f3f829061c1fc8d3",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
@@ -71,15 +71,6 @@
       "state" : {
         "revision" : "7e69bedaaaea09673524d83de12dac6e09d5b74a",
         "version" : "1.1.1"
-      }
-    },
-    {
-      "identity" : "swift-acp",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/wiedymi/swift-acp.git",
-      "state" : {
-        "branch" : "main",
-        "revision" : "9498537769d1309b6519fbb87d0c22fcf9317f3e"
       }
     },
     {

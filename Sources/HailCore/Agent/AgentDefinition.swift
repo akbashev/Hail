@@ -21,21 +21,17 @@ public struct AgentModelProvider: RawRepresentable, Codable, Sendable, Hashable,
     public init(stringLiteral value: String) { self.init(rawValue: value) }
     public var description: String { rawValue }
 
-    public static let kimiCode = Self(rawValue: "kimi-code")
-    public static let claude = Self(rawValue: "claude")
     public static let moonshot = Self(rawValue: "moonshot")
     public static let openAI = Self(rawValue: "openai")
     public static let anthropic = Self(rawValue: "anthropic")
     public static let gemini = Self(rawValue: "gemini")
     public static let ollama = Self(rawValue: "ollama")
-    public static let codex = Self(rawValue: "codex")
     public static let system = Self(rawValue: "system")
     public static let openAICompatible = Self(rawValue: "openai-compatible")
     public static let llamaCPP = Self(rawValue: "llama-cpp")
 
     public static let builtIns: [Self] = [
-        .kimiCode, .claude, .moonshot, .openAI, .anthropic,
-        .gemini, .ollama, .codex, .system, .openAICompatible, .llamaCPP,
+        .moonshot, .openAI, .anthropic, .gemini, .ollama, .system, .openAICompatible, .llamaCPP,
     ]
 
     public static func custom(_ rawValue: String) -> Self {

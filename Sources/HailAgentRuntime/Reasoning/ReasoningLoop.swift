@@ -138,7 +138,7 @@ enum ReasoningLoopError: Error, Sendable, Equatable {
 }
 
 /// Pure reducer that turns a stream of ``ModelEvent`` values into typed
-/// ``AgentRunEvent`` values. Narration (status/thinking/text/tool) is
+/// ``AgentRunEvent`` values. Progress (status, thinking, the reply so far, tools) is
 /// recorded on the activity stream by the loop; control, typed partial
 /// snapshots, and the typed outcome are emitted here.
 enum TurnReducer {
@@ -157,7 +157,8 @@ enum TurnReducer {
         case .generated(let value):
             return [.modelOutputGenerated(content: value, at: timestamp)]
 
-        case .partialUpdated(let partial):
+        case .partialUpdated(let content):
+            guard let partial = try? Output.PartiallyGenerated(content) else { return [] }
             return [.modelOutputPartialUpdated(content: partial, at: timestamp)]
 
         case .usage, .contextUsage:
@@ -171,9 +172,7 @@ enum TurnReducer {
 
 // MARK: - ReasoningLoop
 
-/// The assembled context for one turn, plus the session metadata the
-/// session-owning endpoint path needs and the stable identity fingerprint
-/// (invalidates stale sessions).
+/// The assembled context for one turn.
 struct TurnContext: Sendable {
     /// The policy-owned request. Messages are always derived from this value,
     /// so prompt assembly and compaction cannot drift apart.
@@ -182,10 +181,6 @@ struct TurnContext: Sendable {
     /// The derived turn context from which the request was assembled; handed
     /// to the compactor independently from request accounting.
     let promptContext: PromptContext
-    let sessionIdentity: SessionIdentity
-    /// The journaled harness session (id + identity) from previous runs, used
-    /// to resume after a restart and to detect when the id changes.
-    let modelSession: ModelSessionResume?
     /// Occupancy the provider reported for the most recent request. The next
     /// request strictly grows on it, so it is a floor for threshold decisions
     /// when no preflight token counter exists. Consumed (cleared) once
@@ -277,9 +272,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     let turnID: TurnID
 
     /// The effect authority this turn runs under (the turn's lane, or the
-    /// agent's default). Handed to session-owning endpoints alongside the
-    /// ``TurnDelta`` so the harness's own effects (fs/terminal delegation,
-    /// process spawns) are checked against the same lane as the tool registry.
+    /// agent's default).
     let authority: any Authority
 
     /// Builds the prompt context (system prompt, memory, agent history,
@@ -301,8 +294,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// behavior.
     let modelReasoningPolicy: ModelReasoningPolicy
 
-    /// Optional context compactor, consulted after each turn, and when a request overflows, for
-    /// non-session-owning endpoints. See ``ContextCompactor``.
+    /// Optional context compactor, consulted after each turn, and when a request overflows. See
+    /// ``ContextCompactor``.
     let compactor: (any ContextCompactor)?
 
     /// The host may provide one typed report operation whose context projection
@@ -555,8 +548,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
 
     /// Offers the turn's context to the compactor and journals the result.
     ///
-    /// Session-owning harnesses manage their own context server-side and are
-    /// never offered compaction. A failure during a `.threshold` pass is
+    /// A failure during a `.threshold` pass is
     /// logged and the turn continues un-compacted: the threshold predicts the
     /// request will soon exhaust the window, it does not know the request is
     /// already over, and the provider remains the authority on overflow — its
@@ -575,16 +567,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         trigger: ContextCompactionTrigger = .threshold
     ) async throws(AgentRuntimeError) -> TurnContext {
         let turnContext = turnContext
-        let implementsSessionContract = endpoint is SessionOwningEndpoint
-        guard
-            (endpoint.contextOwnership == .endpointSession) == implementsSessionContract
-        else {
-            throw AgentRuntimeError.configurationError(
-                "Model endpoint \(endpoint.model) declares \(endpoint.contextOwnership) context ownership "
-                    + "but its SessionOwningEndpoint conformance does not match"
-            )
-        }
-        guard let compactor, endpoint.contextOwnership == .runtime else {
+        guard let compactor else {
             return turnContext
         }
 
@@ -874,7 +857,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             let modelTools = session.allTools()
             // Budget the request that will actually be sent, not a second
             // approximation assembled from AgentState fields. This includes the
-            // per-turn delta and tool schemas as well as assembled prompt output.
+            // tool schemas as well as assembled prompt output.
             let schemas = session.schemas()
             var promptMetadata: [String: Logger.MetadataValue] = [
                 "agentID": .string(agentID.rawValue),
@@ -894,14 +877,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             logger.info("Prompt composition", metadata: promptMetadata)
             let turn = TurnRequest(
                 value: input, request: turnContext.preparedRequest.receiving(arrivals).offering(schemas))
-            let delta = TurnDelta(
-                currentEntries: turn.request.openTurn,
-                sessionIdentity: turnContext.sessionIdentity
-            )
-
             return try await runTurn(
                 input: turn,
-                delta: delta,
                 arrivals: arrivals,
                 schemas: schemas,
                 modelTools: modelTools,
@@ -910,18 +887,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 endpoint: endpoint,
                 calls: TurnCalls(limit: maxToolRounds, count: opening.callsMade),
                 through: connection
-            )
-        }
-
-        // Persist the harness session id (and its identity fingerprint) so a
-        // restart can resume the CLI session instead of bootstrapping from
-        // the journal.
-        if let sessionEndpoint = endpoint as? SessionOwningEndpoint,
-            let sessionID = await sessionEndpoint.currentSessionID,
-            sessionID != turnContext.modelSession?.id
-        {
-            try await emit(
-                .modelSessionIdentified(id: sessionID, identity: turnContext.sessionIdentity)
             )
         }
 
@@ -954,7 +919,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// compacted, a bounded number of times.
     private func runTurn<Input: Sendable, Output>(
         input: TurnRequest<Input>,
-        delta: TurnDelta,
         arrivals: [Arrival],
         schemas: [ToolDefinition],
         modelTools: [AnyTool],
@@ -972,7 +936,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         try Self.checkCancellation()
         switch try await requestTurn(
             input: input,
-            delta: delta,
             schemas: schemas,
             modelTools: modelTools,
             session: &session,
@@ -995,7 +958,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             return try await runTurn(
                 input: TurnRequest(
                     value: input.value, request: rebuilt.preparedRequest.receiving(arrivals).offering(schemas)),
-                delta: delta,
                 arrivals: arrivals,
                 schemas: schemas,
                 modelTools: session.allTools(),
@@ -1018,7 +980,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             return try await runTurn(
                 input: TurnRequest(
                     value: input.value, request: rebuilt.preparedRequest.receiving(arrivals).offering([])),
-                delta: delta,
                 arrivals: arrivals,
                 schemas: [],
                 modelTools: [],
@@ -1049,7 +1010,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
             return try await runTurn(
                 input: compactedInput,
-                delta: delta,
                 arrivals: arrivals,
                 schemas: schemas,
                 modelTools: modelTools,
@@ -1080,7 +1040,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         turnSnapshot: TurnContext,
         endpoint: ModelEndpoint
     ) async throws(AgentRuntimeError) -> TurnRequest<Input> {
-        guard endpoint.contextOwnership == .runtime, compactor != nil else {
+        guard compactor != nil else {
             throw AgentRuntimeError.contextLengthExceeded
         }
 
@@ -1107,7 +1067,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// same request; the generated value ends it.
     private func requestTurn<Input: Sendable, Output>(
         input: TurnRequest<Input>,
-        delta: TurnDelta,
         schemas: [ToolDefinition],
         modelTools: [AnyTool],
         session: inout AgentSession,
@@ -1132,24 +1091,13 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 ),
             toolCallsLeft: calls.limit - calls.count
         )
-        if let sessionEndpoint = endpoint as? SessionOwningEndpoint {
-            stream = sessionEndpoint.stream(
-                request: request,
-                delta: delta,
-                authority: authority,
-                tools: modelTools,
-                generating: Output.self,
-                purpose: .generation
-            )
-        } else {
-            stream = endpoint.stream(
-                request: request,
-                tools: modelTools,
-                authority: authority,
-                generating: Output.self,
-                purpose: .generation
-            )
-        }
+        stream = endpoint.stream(
+            request: request,
+            tools: modelTools,
+            authority: authority,
+            generating: Output.self,
+            purpose: .generation
+        )
 
         let runner = ModelRequestRunner(
             turnID: turnID,
@@ -1173,8 +1121,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                     await broadcast(update, to: connection)
                 }
                 switch event {
-                case .activity(.narrationDelta(let fragment)):
-                    await recordActivity(.turn(.progress(.narration(fragment)), at: Date()))
+                case .partialUpdated(let content):
+                    await recordActivity(.turn(.progress(.partial(content)), at: Date()))
                 case .activity(.reasoningDelta(let fragment)):
                     await recordActivity(.turn(.progress(.reasoning(fragment)), at: Date()))
                 case .activity(.status(let message)):
@@ -1187,7 +1135,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                     return TurnProgress(calls: ran.calls, generation: progress.generation)
                 case .generated(let value):
                     return TurnProgress(calls: progress.calls, generation: .generated(value))
-                case .partialUpdated, .usage, .contextUsage:
+                case .usage, .contextUsage:
                     break
                 case .failed(let modelError):
                     throw Self.map(modelError: modelError)

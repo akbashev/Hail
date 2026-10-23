@@ -14,7 +14,6 @@ import Synchronization
 /// for any provider supported by AnyLanguageModel.
 public struct AnyLanguageModelEndpoint: ModelEndpoint {
     public let model: String
-    public let contextOwnership: ModelContextOwnership = .runtime
     public let effectiveContextWindow: Int?
     public let tokenCounting: TokenCounting
     private let languageModel: any LanguageModel
@@ -199,8 +198,6 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                     // Each tool call the model makes goes to the agent's session, and the model
                     // goes on with the session's answer, in this same request.
                     let delegate = SessionToolsDelegate { call in
-                        // The text written before it streams as narration; it isn't tied to the
-                        // call, which reaches the delegate independently of the relayed text.
                         let (reply, answer) = ToolReply.awaiting()
                         continuation.yield(.activity(.status(GeneratedContent("Calling \(call.toolName)."))))
                         continuation.yield(
@@ -238,11 +235,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                         )
                         for try await snapshot in stream {
                             await delegate.underWay()
-                            let narration = response.receive(snapshot)
-                            if !narration.isEmpty {
-                                continuation.yield(.activity(.narrationDelta(GeneratedContent(narration))))
-                            }
-                            continuation.yield(.partialUpdated(snapshot.content))
+                            response.receive(snapshot)
+                            continuation.yield(.partialUpdated(snapshot.rawContent))
                         }
                         for event in usageEvents(of: response, in: session) { continuation.yield(event) }
 

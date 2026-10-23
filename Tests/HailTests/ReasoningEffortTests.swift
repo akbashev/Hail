@@ -56,11 +56,11 @@ struct ReasoningEffortTests {
     @Test("model catalogs use typed provider and model identifiers")
     func modelCatalogUsesDomainIDs() throws {
         let catalog = ModelCatalog(suggestions: [
-            .kimiCode: ["k3"],
+            .ollama: ["qwen3"],
             .custom("host-provider"): ["host-model"],
         ])
 
-        #expect(catalog.suggestions(for: .kimiCode).map(\.rawValue) == ["k3"])
+        #expect(catalog.suggestions(for: .ollama).map(\.rawValue) == ["qwen3"])
         #expect(catalog.modelNames(for: .custom("host-provider")) == ["host-model"])
 
         let data = try JSONEncoder().encode(catalog)

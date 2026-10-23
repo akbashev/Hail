@@ -80,27 +80,6 @@ struct ModelRouteTests {
         }
     }
 
-    @Test("built-in endpoint constructors reject missing models")
-    func endpointRejectsMissingModel() {
-        #expect(
-            throws: ModelRouterError.invalidModel(.missingID("claude"))
-        ) {
-            try ClaudeCliEndpoint(model: " ", workingDirectory: "/tmp")
-        }
-        #expect(
-            throws: ModelRouterError.invalidModel(
-                .missingID(AgentModelProvider.kimiCode.rawValue)
-            )
-        ) {
-            try KimiCodeEndpoint(model: "", workingDirectory: "/tmp")
-        }
-        #expect(
-            throws: ModelRouterError.invalidModel(.missingID("codex"))
-        ) {
-            try CodexAppServerEndpoint(model: "", workingDirectory: "/tmp")
-        }
-    }
-
     @Test("the router does not invent an application model default")
     func routerRejectsEmptyModel() async throws {
         let router = ModelRouter(
@@ -129,20 +108,6 @@ struct ModelRouteTests {
                 for: "openai/gpt-test",
                 agentID: agentID("coder-main"),
                 workspace: AgentWorkspace(rootPath: "/tmp")
-            )
-        }
-    }
-
-    @Test("local process routes require resolved workspace context")
-    func localRouteRequiresWorkspace() async throws {
-        let router = ModelRouter(
-            configuration: try ModelRouterConfiguration(temperature: 0.7)
-        )
-
-        await #expect(throws: ModelRouterError.missingWorkingDirectory) {
-            try await router.endpoint(
-                for: "codex/gpt-test",
-                agentID: agentID("coder-main")
             )
         }
     }

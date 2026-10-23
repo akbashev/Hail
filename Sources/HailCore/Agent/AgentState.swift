@@ -35,9 +35,6 @@ public struct AgentState: Codable, Sendable {
         return .idle
     }
 
-    /// The model session a session-owning endpoint can resume.
-    public private(set) var modelSession: ModelSessionResume?
-
     public private(set) var usageSummary: AgentUsageSummary = .init()
 
     /// The most recent context occupancy a provider reported.
@@ -76,8 +73,6 @@ public struct AgentState: Codable, Sendable {
                 modelRequests[index].durationMilliseconds = durationMilliseconds
                 modelRequests[index].outcome = .failed(error)
             }
-        case .modelSessionIdentified(let id, let identity):
-            modelSession = ModelSessionResume(id: id, identity: identity)
         case .deactivated:
             break
         }

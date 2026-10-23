@@ -82,6 +82,33 @@ struct AnyLanguageModelEndpointTests {
         )
     }
 
+    @Test("a typed request answered in prose ends as an answer out of shape, with what it wrote")
+    func aTypedRequestAnsweredInProseIsOutOfShape() async {
+        let endpoint = AnyLanguageModelEndpoint(
+            languageModel: ProseLanguageModel(text: "It's sunny."),
+            modelIdentifier: "test",
+            temperature: 0,
+            failures: .swiftErrors
+        )
+        var events: [ModelEvent<Forecast>] = []
+        for await event in endpoint.stream(
+            request: ModelRequest(
+                input: "hello", entries: [.prompt(.init(segments: [.text(.init(content: "hello"))]))]),
+            tools: [],
+            authority: FullAuthority(),
+            generating: Forecast.self,
+            purpose: .generation
+        ) {
+            events.append(event)
+        }
+
+        guard case .failed(.answerOutOfShape(let written))? = events.last else {
+            Issue.record("Expected an answer out of shape, got \(events.map { String(describing: $0) })")
+            return
+        }
+        #expect(written == "It's sunny.")
+    }
+
     @Test("a request's reasoning override reaches the options through the endpoint's switch")
     func reasoningOverrideReachesOptions() async {
         let recorded = RecordedOptions()
@@ -233,6 +260,47 @@ struct AnyLanguageModelEndpointTests {
             if case .failed = event { failed = true }
         }
         #expect(failed)
+    }
+}
+
+@Generable
+private struct Forecast: Codable {
+    let text: String
+}
+
+/// A model that answers in prose whatever it's asked for.
+private struct ProseLanguageModel: LanguageModel {
+    let text: String
+
+    func respond<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) async throws -> LanguageModelSession.Response<Content> where Content: Generable {
+        fatalError("The streaming test should not call respond")
+    }
+
+    func streamResponse<Content>(
+        within session: LanguageModelSession,
+        to prompt: Prompt,
+        generating type: Content.Type,
+        includeSchemaInPrompt: Bool,
+        options: GenerationOptions
+    ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
+        let text = text
+        let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
+            continuation in
+            continuation.yield(
+                .init(
+                    content: try! Content.PartiallyGenerated(GeneratedContent(properties: [:])),
+                    rawContent: GeneratedContent(text)
+                )
+            )
+            continuation.finish()
+        }
+        return LanguageModelSession.ResponseStream(stream: stream)
     }
 }
 

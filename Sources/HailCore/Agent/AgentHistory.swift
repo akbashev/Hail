@@ -188,6 +188,9 @@ extension AgentHistory {
         case answerRanOut
         /// The turn made all the tool calls a turn may make: no more can be made in it.
         case toolCallsRanOut(limit: Int)
+        /// It answered, but not in the form asked for: `written` is what it wrote, which wasn't
+        /// taken.
+        case answerOutOfShape(written: String)
         /// It asked for the same tool calls as in the round before, which weren't run again.
         /// Nothing records it now, as a repeated round runs like any other; it's kept so that
         /// journals that hold it still read.
@@ -200,6 +203,8 @@ extension AgentHistory {
                 "From the runtime: your answer ran out while you were thinking. The tools you called answered above. Go on from their results to your answer, without going over them again."
             case .toolCallsRepeated:
                 "From the runtime: you asked for the same tool calls as in the round before, and they weren't run again. To run them again, call them again; otherwise go on from the results above."
+            case .answerOutOfShape(let written):
+                "From the runtime: your answer wasn't in the form asked for, so it wasn't taken. You wrote: \"\(written)\". Write it again in that form."
             case .toolCallsRanOut(let limit):
                 "From the runtime: this turn has made all \(limit) of its tool calls, so no more can be made in it. Answer now: say what you did and what's left to do, so you can go on when asked."
             }

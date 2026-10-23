@@ -278,6 +278,8 @@ public enum ModelEndpointError: Error, Sendable, Equatable {
     case decodingError(String)
     /// The model thought its whole length without answering, asked again without thinking too.
     case thoughtPastAnswer
+    /// The model answered, but not in the form asked for: `written` is what it wrote.
+    case answerOutOfShape(written: String)
     case cancelled
 }
 
@@ -299,6 +301,8 @@ public enum HailErrorFormatter {
             "Model error: \(sanitizedModelOutput(reason))"
         case .modelThoughtPastAnswer:
             "The model thought for the whole length of an answer without answering."
+        case .modelAnswerOutOfShape:
+            "The model's answer wasn't in the form asked for."
         case .toolCallsRanOut(let limit):
             "The model made all \(limit) tool calls a turn may make, and went on calling."
         case .modelRequestFailed:
@@ -348,6 +352,8 @@ public enum HailErrorFormatter {
             return "Failed to decode model response: \(underlying)"
         case .thoughtPastAnswer:
             return "The model thought past the length of an answer without answering."
+        case .answerOutOfShape:
+            return "The model's answer wasn't in the form asked for."
         case .cancelled:
             return "Model request was cancelled."
         }

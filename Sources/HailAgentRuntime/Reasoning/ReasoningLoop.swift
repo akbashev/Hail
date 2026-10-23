@@ -25,6 +25,9 @@ private enum TurnRequestOutcome<Output> {
     /// The turn made all the tool calls it may make: the model is told so, and answers without
     /// tools.
     case outOfCalls(TurnCalls)
+    /// The model answered, but not in the form asked for: it's told so, with what it wrote, and
+    /// answers again.
+    case outOfShape(TurnCalls, written: String)
 }
 
 /// A model request's value, before and after the model generates it.
@@ -971,6 +974,31 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 callsRanOut: callsRanOut,
                 through: connection
             )
+        case .outOfShape(let calls, let written):
+            // Told so, with what it wrote, journaled, and asked again from the journal: the tools
+            // it called have answered, and aren't run again. A few times, then it's said why.
+            guard noticesGiven < Self.mostNoticesOfAnAnswerRunningOut else {
+                throw AgentRuntimeError.modelAnswerOutOfShape(written: written)
+            }
+            try await emit(.history(.noticed(.answerOutOfShape(written: written), at: Date())))
+            let rebuilt = try await rebuildContext(turnSnapshot)
+            let schemas = callsRanOut ? [] : session.schemas()
+            return try await runTurn(
+                input: TurnRequest(
+                    value: input.value, request: rebuilt.preparedRequest.receiving(arrivals).offering(schemas)),
+                arrivals: arrivals,
+                schemas: schemas,
+                modelTools: callsRanOut ? [] : session.allTools(),
+                turnSnapshot: turnSnapshot,
+                session: &session,
+                endpoint: endpoint,
+                calls: calls,
+                contextRecoveryAttempts: contextRecoveryAttempts,
+                noticesGiven: noticesGiven + 1,
+                thinking: thinking,
+                callsRanOut: callsRanOut,
+                through: connection
+            )
         case .outOfCalls(let calls):
             // Told so, journaled, and asked once more from the journal, offered no tools: the
             // calls it made have answered, and it says where the work stands.
@@ -1148,6 +1176,9 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 return .ranOut(error.state.calls)
             }
             if case .toolCallsRanOut = error.error { return .outOfCalls(error.state.calls) }
+            if case .modelAnswerOutOfShape(let written) = error.error {
+                return .outOfShape(error.state.calls, written: written)
+            }
             guard error.error == .contextLengthExceeded else { throw error.error }
             return .overflowed(error.state.calls)
         }
@@ -1262,6 +1293,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             return .modelMisbehavior("decoding error: \(underlying)")
         case .thoughtPastAnswer:
             return .modelThoughtPastAnswer
+        case .answerOutOfShape(let written):
+            return .modelAnswerOutOfShape(written: written)
         case .cancelled:
             return .cancelled
         }

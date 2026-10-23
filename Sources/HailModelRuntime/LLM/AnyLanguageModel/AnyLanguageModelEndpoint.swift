@@ -247,6 +247,11 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                             return
                         case .wroteNothing:
                             ending = .wroteNothing
+                        case .outOfShape(let written):
+                            // Its turn tells it so and asks again, with its tools' results.
+                            continuation.yield(.failed(.answerOutOfShape(written: written)))
+                            continuation.finish()
+                            return
                         }
                     } catch {
                         ending = .failed(failures.read(error))

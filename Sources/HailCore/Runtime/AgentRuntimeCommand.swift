@@ -10,6 +10,9 @@ public enum AgentRuntimeError: Error, Sendable, Equatable, Codable {
     case modelMisbehavior(String)
     /// The model thought for the whole length of an answer without answering.
     case modelThoughtPastAnswer
+    /// The model answered, but not in the form asked for, even when told so: `written` is what it
+    /// wrote last.
+    case modelAnswerOutOfShape(written: String)
     /// The turn made all `limit` tool calls a turn may make, and went on calling.
     case toolCallsRanOut(limit: Int)
     case modelRequestFailed(String)

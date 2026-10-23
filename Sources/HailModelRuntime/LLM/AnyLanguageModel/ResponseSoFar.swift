@@ -16,6 +16,8 @@ struct ResponseSoFar<Output: Generable> {
         case answered(Output)
         /// The model wrote nothing after its last tool call.
         case wroteNothing
+        /// The model wrote an answer that isn't the content asked for: `written` is what it wrote.
+        case outOfShape(written: String)
     }
 
     private var text = ""
@@ -48,7 +50,13 @@ struct ResponseSoFar<Output: Generable> {
     /// How the response ended, once its stream did.
     func ending() throws -> Ending {
         guard wroteAfterCalls == calls, let last else { return .wroteNothing }
-        return .answered(try last.content as? Output ?? Output(last.raw))
+        if let output = last.content as? Output { return .answered(output) }
+        do {
+            return .answered(try Output(last.raw))
+        } catch {
+            if case .string(let text) = last.raw.kind { return .outOfShape(written: text) }
+            return .outOfShape(written: last.raw.jsonString)
+        }
     }
 
     /// What a snapshot adds to the text before it: the suffix after `accumulated`.

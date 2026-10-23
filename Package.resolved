@@ -1,5 +1,5 @@
 {
-  "originHash" : "ad124cc02c50352c492de136063cfb24f98651583e70b56a087862489c9f8cb2",
+  "originHash" : "21511edfadb78d550c4415c0781c6b6c96f63464239a12a7bd91b8cbab8c2054",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/akbashev/cluster-event-sourcing.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "8aa779a2003c27be2d5f74c9b96d72e4a427cedf"
+        "branch" : "turgai-integration",
+        "revision" : "68d432e3d251b381266d9b8bce2d867a1d4fb90c"
       }
     },
     {
@@ -33,8 +33,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/akbashev/cluster-virtual-actors.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "99c1eba0c65f77de827b141760c0f41fc6719df7"
+        "branch" : "stable-references",
+        "revision" : "d2cc73594b24e7b9c95921f933e2127159c6ef0b"
       }
     },
     {
@@ -175,10 +175,10 @@
     {
       "identity" : "swift-distributed-actors",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-distributed-actors.git",
+      "location" : "https://github.com/turgai-labs/swift-distributed-actors.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "50e789fbb6db9a9869a60b1915e659bd752e1d42"
+        "branch" : "turgai-integration",
+        "revision" : "6f84628db766c0e3396623f80a2b16c6f001e402"
       }
     },
     {

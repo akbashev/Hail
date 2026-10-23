@@ -54,8 +54,14 @@ struct ResponseSoFar<Output: Generable> {
         do {
             return .answered(try Output(last.raw))
         } catch {
-            if case .string(let text) = last.raw.kind { return .outOfShape(written: text) }
-            return .outOfShape(written: last.raw.jsonString)
+            guard case .string(let text) = last.raw.kind else { return .outOfShape(written: last.raw.jsonString) }
+            // Plain text is all an object of one text property can say, so it says that.
+            if let property = Output.generationSchema.soleTextProperty,
+                let output = try? Output(GeneratedContent(properties: [property: text]))
+            {
+                return .answered(output)
+            }
+            return .outOfShape(written: text)
         }
     }
 
@@ -72,5 +78,28 @@ struct ResponseSoFar<Output: Generable> {
         // accumulator and publish the replacement.
         accumulated = snapshot
         return snapshot
+    }
+}
+
+extension GenerationSchema {
+    /// The name of an object's one property, when it's text the object must have, with no
+    /// choices or pattern: the only thing such an object says, as plain text says it.
+    var soleTextProperty: String? {
+        guard let data = try? JSONEncoder().encode(self),
+            var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        if let reference = object["$ref"] as? String, let definitions = object["$defs"] as? [String: Any] {
+            guard let definition = definitions[String(reference.dropFirst("#/$defs/".count))] as? [String: Any]
+            else { return nil }
+            object = definition
+        }
+        guard object["type"] as? String == "object",
+            let properties = object["properties"] as? [String: Any], properties.count == 1,
+            let (name, value) = properties.first, let property = value as? [String: Any],
+            property["type"] as? String == "string",
+            property["enum"] == nil, property["pattern"] == nil, property["const"] == nil,
+            (object["required"] as? [String])?.contains(name) == true
+        else { return nil }
+        return name
     }
 }

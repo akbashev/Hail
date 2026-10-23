@@ -78,7 +78,7 @@ struct AnswerOutOfShapeTests {
         let (steps, requests) = try await run(OutOfShape(timesOutOfShape: .max))
 
         let notices = steps.filter { $0.hasPrefix("noticed") }
-        #expect(notices.count == ReasoningLoop<ContinuousClock>.mostNoticesOfAnAnswerRunningOut)
+        #expect(notices.count == ReasoningLoop<ContinuousClock>.mostAnswersAskedAgainForTheirForm)
         #expect(requests.count == notices.count + 1)
         #expect(steps.last?.contains("modelAnswerOutOfShape") == true)
     }

@@ -931,6 +931,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         calls: TurnCalls,
         contextRecoveryAttempts: Int = 0,
         noticesGiven: Int = 0,
+        answersAskedAgainForTheirForm: Int = 0,
         thinking: ModelReasoningOverride? = nil,
         callsRanOut: Bool = false,
         through connection: AgentConnection<Output>
@@ -970,6 +971,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 calls: calls,
                 contextRecoveryAttempts: contextRecoveryAttempts,
                 noticesGiven: noticesGiven + 1,
+                answersAskedAgainForTheirForm: answersAskedAgainForTheirForm,
                 thinking: .disabled,
                 callsRanOut: callsRanOut,
                 through: connection
@@ -977,7 +979,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         case .outOfShape(let calls, let written):
             // Told so, with what it wrote, journaled, and asked again from the journal: the tools
             // it called have answered, and aren't run again. A few times, then it's said why.
-            guard noticesGiven < Self.mostNoticesOfAnAnswerRunningOut else {
+            guard answersAskedAgainForTheirForm < Self.mostAnswersAskedAgainForTheirForm else {
                 throw AgentRuntimeError.modelAnswerOutOfShape(written: written)
             }
             try await emit(.history(.noticed(.answerOutOfShape(written: written), at: Date())))
@@ -994,7 +996,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 endpoint: endpoint,
                 calls: calls,
                 contextRecoveryAttempts: contextRecoveryAttempts,
-                noticesGiven: noticesGiven + 1,
+                noticesGiven: noticesGiven,
+                answersAskedAgainForTheirForm: answersAskedAgainForTheirForm + 1,
                 thinking: thinking,
                 callsRanOut: callsRanOut,
                 through: connection
@@ -1017,6 +1020,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 calls: calls,
                 contextRecoveryAttempts: contextRecoveryAttempts,
                 noticesGiven: noticesGiven,
+                answersAskedAgainForTheirForm: answersAskedAgainForTheirForm,
                 thinking: thinking,
                 callsRanOut: true,
                 through: connection
@@ -1047,6 +1051,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 calls: calls,
                 contextRecoveryAttempts: contextRecoveryAttempts + 1,
                 noticesGiven: noticesGiven,
+                answersAskedAgainForTheirForm: answersAskedAgainForTheirForm,
                 thinking: thinking,
                 callsRanOut: callsRanOut,
                 through: connection
@@ -1056,6 +1061,10 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
 
     /// How many times a turn's model is told its answer ran out, and asked again.
     static var mostNoticesOfAnAnswerRunningOut: Int { 2 }
+
+    /// How many times a turn's model is asked again for an answer in the form asked for: a model
+    /// that misses the form with the notice right before it won't keep to it on another try.
+    static var mostAnswersAskedAgainForTheirForm: Int { 1 }
 
     /// A provider is the authority on whether a request actually fits. The
     /// normal compaction pass is intentionally conservative and may not know

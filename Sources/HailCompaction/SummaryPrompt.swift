@@ -79,12 +79,7 @@ enum SummaryPrompt {
     }
 
     private static func render(_ input: AgentHistory.Input) -> String {
-        let speaker =
-            switch input.from {
-            case .user(let id): "user \(id)"
-            case .agent(let agent): "agent \(agent.rawValue)"
-            }
-        return "\(speaker): \(text(of: input.content))"
+        "user: \(text(of: input.content))"
     }
 
     private static func render(_ step: AgentHistory.Step) -> String {

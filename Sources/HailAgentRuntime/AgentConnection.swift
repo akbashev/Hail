@@ -62,16 +62,13 @@ extension AgentStream {
     /// yielded to ``updates``; structured partial snapshots appear as
     /// ``AgentRunEvent/modelOutputPartialUpdated(content:at:)`` events and the
     /// final response appears as a ``AgentRunEvent/responseRecorded`` event.
-    public func send<Input: Codable & Sendable>(
+    public func send<Input: ConvertibleToGeneratedContent & Codable & Sendable>(
         _ input: Input,
-        received: AgentHistory.Input,
         inputID: String? = nil,
         to agent: Agent
     ) async throws {
         try await agent.stream(
             input,
-            received: received,
-
             inputID: inputID,
             through: connection
         )

@@ -15,7 +15,7 @@ struct AgentHistoryReplayTests {
 
     private func input(_ text: String, at seconds: TimeInterval = 0) -> AgentHistory.Input {
         AgentHistory.Input(
-            from: .user(id: "u"), content: GeneratedContent(text), at: Date(timeIntervalSince1970: seconds))
+            content: GeneratedContent(text), at: Date(timeIntervalSince1970: seconds))
     }
 
     private func replay(_ events: [AgentHistory.Event]) throws -> AgentState {

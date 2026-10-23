@@ -34,7 +34,7 @@ struct SlidingWindowCompactorTests {
                 try history
                 .applying(
                     .received(
-                        .init(from: .user(id: "u"), content: GeneratedContent("before"), at: Date()), turn: earlier)
+                        .init(content: GeneratedContent("before"), at: Date()), turn: earlier)
                 )
                 .applying(.replied(.init(content: GeneratedContent("ok"), at: Date())))
                 .applying(
@@ -49,7 +49,7 @@ struct SlidingWindowCompactorTests {
             let at = Date(timeIntervalSince1970: TimeInterval(index))
             history = try history.applying(
                 .received(
-                    AgentHistory.Input(from: .user(id: "u"), content: GeneratedContent(exchange.said), at: at), turn: id
+                    AgentHistory.Input(content: GeneratedContent(exchange.said), at: at), turn: id
                 ))
             for (step, work) in exchange.work.enumerated() {
                 let call = ToolCall(

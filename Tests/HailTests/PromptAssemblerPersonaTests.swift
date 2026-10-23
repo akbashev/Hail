@@ -42,7 +42,7 @@ struct PromptAssemblyPersonaTests {
     }
 
     private func input(_ text: String) -> AgentHistory.Input {
-        AgentHistory.Input(from: .user(id: "u"), content: GeneratedContent(text), at: Date(timeIntervalSince1970: 0))
+        AgentHistory.Input(content: GeneratedContent(text), at: Date(timeIntervalSince1970: 0))
     }
 
     private func context(_ events: [AgentHistory.Event]) throws -> PromptContext {

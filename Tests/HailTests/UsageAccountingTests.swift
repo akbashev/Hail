@@ -46,7 +46,7 @@ struct UsageAccountingTests {
         let usage = ModelUsage(inputTokens: 8, outputTokens: 3, totalTokens: 11, source: .reported)
         let events: [AgentEvent] = [
             .history(
-                .received(.init(from: .user(id: "u"), content: GeneratedContent("go"), at: startedAt), turn: turnID)),
+                .received(.init(content: GeneratedContent("go"), at: startedAt), turn: turnID)),
             .modelRequestStarted(record),
             .modelUsage(usage, at: completedAt),
             .modelRequestCompleted(

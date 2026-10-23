@@ -51,7 +51,7 @@ struct PrefixStabilityTests {
         for (id, text) in [(earlier, "earlier"), (TurnID(), "current")] {
             history = try history.applying(
                 .received(
-                    .init(from: .user(id: "u"), content: GeneratedContent(text), at: Date(timeIntervalSince1970: 1)),
+                    .init(content: GeneratedContent(text), at: Date(timeIntervalSince1970: 1)),
                     turn: id))
             if id == earlier {
                 history = try history.applying(

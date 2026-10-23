@@ -132,7 +132,7 @@ struct CompactionFailurePolicyTests {
                 try history
                 .applying(
                     .received(
-                        .init(from: .user(id: "u"), content: GeneratedContent(next.element), at: at), turn: TurnID())
+                        .init(content: GeneratedContent(next.element), at: at), turn: TurnID())
                 )
                 .applying(.replied(.init(content: GeneratedContent("ok"), at: at)))
         }

@@ -45,7 +45,7 @@ struct AnswerRanOutTests {
         let connection = AgentConnection<String>(actorSystem: system) { _ in }
         try await loop.run(
             "weather",
-            opening: .received(.init(from: .user(id: "u"), content: GeneratedContent("weather"), at: Date())),
+            opening: .received(.init(content: GeneratedContent("weather"), at: Date())),
             inputID: nil, through: connection)
 
         let steps = await journal.events.compactMap { event -> String? in

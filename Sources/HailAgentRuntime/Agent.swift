@@ -333,16 +333,16 @@ public distributed actor Agent: AsyncSequence {
     /// `nil` runs the turn under the agent's plugin-derived authority. The lane
     /// is a per-turn value: the agent's default tool registry and future turns
     /// are unaffected.
-    public distributed func stream<Input: Codable & Sendable, Output>(
+    public distributed func stream<Input: ConvertibleToGeneratedContent & Codable & Sendable, Output>(
         _ input: Input,
-        received: AgentHistory.Input,
         inputID: String? = nil,
         through connection: AgentConnection<Output>,
         authority lane: TurnAuthorityLane? = nil
     ) async throws
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         try await run(
-            input, opening: .received(received), inputID: inputID,
+            input, opening: .received(AgentHistory.Input(content: input.generatedContent, at: Date())),
+            inputID: inputID,
             through: connection, authority: lane)
     }
 
@@ -404,9 +404,8 @@ public distributed actor Agent: AsyncSequence {
     /// This is a convenience over ``stream(_:through:)`` that ignores live
     /// updates and returns only the final result. `authority` pins the turn to
     /// an effect lane, exactly as in ``stream(_:through:authority:)``.
-    public distributed func respond<Input: Codable & Sendable, Output>(
+    public distributed func respond<Input: ConvertibleToGeneratedContent & Codable & Sendable, Output>(
         _ input: Input,
-        received: AgentHistory.Input,
         inputID: String? = nil,
         authority lane: TurnAuthorityLane? = nil
     ) async throws -> Output
@@ -426,8 +425,6 @@ public distributed actor Agent: AsyncSequence {
 
         try await self.stream(
             input,
-            received: received,
-
             inputID: inputID,
             through: stream.connection,
             authority: lane

@@ -133,22 +133,12 @@ extension AgentHistory {
         }
     }
 
-    /// Who spoke to the agent.
-    public enum Participant: Codable, Sendable, Equatable, Hashable {
-        /// A person, by the host's identifier for them.
-        case user(id: String)
-        /// Another agent.
-        case agent(AgentID)
-    }
-
-    /// What someone said to the agent: what a turn answers.
+    /// What was said to the agent: what a turn answers.
     public struct Input: Codable, Sendable, Equatable {
-        public let from: Participant
         public let content: GeneratedContent
         public let at: Date
 
-        public init(from: Participant, content: GeneratedContent, at: Date) {
-            self.from = from
+        public init(content: GeneratedContent, at: Date) {
             self.content = content
             self.at = at
         }

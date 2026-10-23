@@ -509,7 +509,7 @@ struct RepeatedCrashTests {
         let result = { (id: String) in ToolResult(toolCallID: id, name: "read_file", output: .text("ok")) }
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
         let input = AgentHistory.Input(
-            from: .user(id: "u"), content: GeneratedContent("hello"), at: Date(timeIntervalSince1970: 2_000))
+            content: GeneratedContent("hello"), at: Date(timeIntervalSince1970: 2_000))
 
         try state.apply(.history(.received(input, turn: TurnID("t1"))))
         for (round, id) in ["call-1", "call-2"].enumerated() {
@@ -553,7 +553,7 @@ struct CorruptedJournalTests {
     @Test("a torn tail event throws and never partially applies")
     func tornTailThrowsAndKeepsState() throws {
         let input = AgentHistory.Input(
-            from: .user(id: "u"), content: GeneratedContent("hello"), at: Date(timeIntervalSince1970: 2_000))
+            content: GeneratedContent("hello"), at: Date(timeIntervalSince1970: 2_000))
         var state = AgentState(agentID: AgentID(role: Role("coder"), contextID: AgentContextID("T-1")))
 
         let validLines = [
@@ -607,7 +607,7 @@ struct CorruptedJournalTests {
                 .history(
                     .received(
                         .init(
-                            from: .user(id: "u"), content: GeneratedContent("hi"),
+                            content: GeneratedContent("hi"),
                             at: Date(timeIntervalSince1970: 1_999)),
                         turn: TurnID("t1")))),
         ]

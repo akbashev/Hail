@@ -125,16 +125,14 @@ public struct AgentTool {
                 )
             }
             let other: Agent = try await system.agent(targetID)
-            // Tag the real sender and queue asynchronously. The runtime owns
+            // Queue asynchronously. The runtime owns
             // the task so it remains observable until completion, while the
             // tool still returns without waiting for the recipient. This is
             // intentionally best effort: a process restart can lose it.
             let logger = system.log
             let deliveryID = await system.agentRuntime.enqueueDelivery {
                 do {
-                    let received = AgentHistory.Input(
-                        from: .agent(sourceAgentID), content: GeneratedContent(messageText), at: Date())
-                    let _: String = try await other.respond(messageText, received: received)
+                    let _: String = try await other.respond(messageText)
                 } catch {
                     logger.error(
                         "Asynchronous agent delivery failed",

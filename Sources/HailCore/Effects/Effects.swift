@@ -20,7 +20,7 @@ import Subprocess
     import Foundation
 #endif
 
-/// Generic effect descriptions used by Hail's tools and model harnesses.
+/// Generic effect descriptions used by Hail's tools.
 ///
 /// An effect is inert data. Performing it requires an ``EffectToken`` issued
 /// by ``withEffect(_:authority:)`` after the current authority grants it.

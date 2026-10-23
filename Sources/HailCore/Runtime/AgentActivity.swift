@@ -45,7 +45,7 @@ public enum AgentActivity: Codable, Sendable, Equatable {
         case toolFinished(ToolResult)
         /// Token usage reported by the model provider for the current request.
         case usage(ModelUsage)
-        /// Current context occupancy reported by a session-owning endpoint.
+        /// Current context occupancy reported by the model's provider.
         case contextUsage(ContextUsage)
         /// The full generated compaction value and the projection inserted
         /// into conversation context. The latter may intentionally omit

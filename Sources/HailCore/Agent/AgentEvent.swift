@@ -15,7 +15,7 @@ public enum AgentEvent: Codable, Sendable {
     /// intentionally separate from the agent's history so a dashboard
     /// can project usage without replaying model output.
     case modelUsage(ModelUsage, at: Date)
-    /// Durable context occupancy for session-owning endpoints.
+    /// Durable context occupancy the model's provider reported.
     case contextUsage(ContextUsage, at: Date)
     /// Durable model request lifecycle. The record is intentionally coarse;
     /// streamed narration remains ephemeral through AgentActivity.
@@ -32,11 +32,6 @@ public enum AgentEvent: Codable, Sendable {
         durationMilliseconds: Int,
         at: Date
     )
-    /// The harness (kimi/claude CLI) session this agent's turns run in,
-    /// journaled so a restart can resume it instead of bootstrapping. The
-    /// `identity` is the ``AgentSessionIdentity`` fingerprint the session was
-    /// created with; a config change invalidates the resume.
-    case modelSessionIdentified(id: SessionID, identity: SessionIdentity)
     case deactivated(reason: String)
 }
 

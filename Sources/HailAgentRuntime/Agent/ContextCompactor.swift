@@ -191,13 +191,9 @@ public struct PreparedRequest: Sendable {
     }
 }
 
-/// Decides — after each turn, and when a request overflows, for non-session-owning endpoints —
-/// whether the context needs compacting, and produces the rolling summary.
-///
-/// Session-owning harnesses (kimi/claude/codex) manage context in their own
-/// sessions and are never offered compaction. Stateless chat endpoints
-/// (Ollama, hosted chat APIs) have no server-side memory management, so the
-/// agent runtime owns it here.
+/// Decides — after each turn, and when a request overflows — whether the context needs
+/// compacting, and produces the rolling summary. Model endpoints have no server-side memory
+/// management, so the agent runtime owns it here.
 ///
 /// The result is journaled as a single ``AgentHistory/Event/compacted(_:through:kept:)``
 /// event: the summary is a non-deterministic fold of the archived work, so it must be

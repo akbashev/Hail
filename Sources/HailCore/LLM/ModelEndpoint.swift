@@ -38,8 +38,7 @@ public struct ModelUsage: Codable, Sendable, Equatable {
     }
 }
 
-/// The model-visible context occupancy reported by a session-owning harness or
-/// measured by a runtime-owned endpoint.
+/// The model-visible context occupancy a provider reported or an endpoint measured.
 public struct ContextUsage: Codable, Sendable, Equatable {
     public var usedTokens: Int
     public var limitTokens: Int
@@ -139,17 +138,6 @@ where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendabl
     case failed(ModelEndpointError)
 }
 
-/// Identifies which layer owns the model-visible conversation window.
-///
-/// Every endpoint must choose explicitly. Runtime-owned endpoints receive an
-/// assembled transcript on every request and may use Hail's context compactor.
-/// Endpoint-session-owned endpoints receive turn deltas after bootstrap and
-/// manage their own context window behind ``SessionOwningEndpoint``.
-public enum ModelContextOwnership: Sendable, Equatable {
-    case runtime
-    case endpointSession
-}
-
 /// The semantic purpose of a model request. Providers can use this to apply
 /// operation-specific limits without making compaction a provider-specific
 /// concern in the reasoning loop.
@@ -247,7 +235,6 @@ public struct ModelRequest<Input: Sendable>: Sendable {
 
 public protocol ModelEndpoint: Sendable {
     var model: String { get }
-    var contextOwnership: ModelContextOwnership { get }
 
     /// The effective context limit configured for this endpoint, if known.
     /// This is preferred over a model-name lookup because local servers often
@@ -357,7 +344,7 @@ public enum HailErrorFormatter {
         case .invalidRequest(let reason):
             return "Invalid request: \(reason)"
         case .requestFailed(let reason):
-            return extractErrorLine(from: reason) ?? reason
+            return reason
         case .invalidResponse(let reason):
             return "Invalid model response: \(reason)"
         case .decodingError(let underlying):
@@ -369,20 +356,7 @@ public enum HailErrorFormatter {
         }
     }
 
-    private static func extractErrorLine(from output: String) -> String? {
-        let lines = output.split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        if let errorLine = lines.last(where: { $0.hasPrefix("ERROR:") }) {
-            return String(errorLine.dropFirst("ERROR:".count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return lines.last
-    }
-
     public static func sanitizedModelOutput(_ output: String) -> String {
-        return extractErrorLine(from: output) ?? output
+        output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

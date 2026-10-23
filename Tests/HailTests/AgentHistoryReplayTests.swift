@@ -149,18 +149,4 @@ struct AgentHistoryReplayTests {
         #expect(state.history.open?.steps.isEmpty == true)
         #expect(state.history.earlier?.kept.isEmpty == true)
     }
-
-    @Test("model session events fold id and identity for later resume")
-    func modelSessionFolds() throws {
-        var state = AgentState(agentID: agentID)
-        #expect(state.modelSession == nil)
-
-        try state.apply(.modelSessionIdentified(id: SessionID("session-1"), identity: SessionIdentity("fp-A")))
-        #expect(state.modelSession?.id == SessionID("session-1"))
-        #expect(state.modelSession?.identity == SessionIdentity("fp-A"))
-
-        try state.apply(.modelSessionIdentified(id: SessionID("session-2"), identity: SessionIdentity("fp-B")))
-        #expect(state.modelSession?.id == SessionID("session-2"))
-        #expect(state.modelSession?.identity == SessionIdentity("fp-B"))
-    }
 }

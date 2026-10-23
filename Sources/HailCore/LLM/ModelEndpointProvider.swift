@@ -4,18 +4,13 @@ import ScopedEffect
 public struct ModelConfiguration: Sendable, Hashable {
     public let model: AgentModel
     public let reasoningEffort: ReasoningEffort?
-    /// Host-owned configuration identity for stateful provider sessions.
-    /// Changing this value forces a cold provider session on the next turn.
-    public let sessionConfigurationIdentity: String?
 
     public init(
         model: AgentModel,
-        reasoningEffort: ReasoningEffort? = nil,
-        sessionConfigurationIdentity: String? = nil
+        reasoningEffort: ReasoningEffort? = nil
     ) {
         self.model = model
         self.reasoningEffort = reasoningEffort
-        self.sessionConfigurationIdentity = sessionConfigurationIdentity
     }
 }
 
@@ -48,7 +43,6 @@ public struct ModelEndpointRequest: Sendable {
     /// model endpoints can ignore it.
     public let workspace: AgentWorkspace?
     public let executionPolicy: AgentExecutionPolicy
-    public let resumeSession: ModelSessionResume?
     public let authority: (any Authority)?
 
     public init(
@@ -56,7 +50,6 @@ public struct ModelEndpointRequest: Sendable {
         agentID: AgentID,
         workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy,
-        resumeSession: ModelSessionResume?,
         authority: (any Authority)?,
         reasoning: ReasoningEffortSelection? = nil
     ) {
@@ -65,7 +58,6 @@ public struct ModelEndpointRequest: Sendable {
         self.agentID = agentID
         self.workspace = workspace
         self.executionPolicy = executionPolicy
-        self.resumeSession = resumeSession
         self.authority = authority
     }
 }

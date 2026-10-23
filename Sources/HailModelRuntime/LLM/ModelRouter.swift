@@ -11,32 +11,27 @@ import ScopedEffect
 /// Resolves model identifiers to ``ModelEndpoint`` instances.
 ///
 /// Every endpoint is created for one execution turn. Durable conversation state
-/// and optional provider session resumption are supplied by Hail; the router
-/// does not retain provider endpoints between turns.
+/// is supplied by Hail; the router does not retain provider endpoints between turns.
 public actor ModelRouter {
-    private let mcpServerConfiguration: MCPServerConfiguration?
     private let modelEndpointProvider: ModelEndpointProvider?
     private let configuration: ModelRouterConfiguration
     public init(
         configuration: ModelRouterConfiguration,
-        mcpServerConfiguration: MCPServerConfiguration? = nil,
         modelEndpointProvider: ModelEndpointProvider? = nil
     ) {
         self.configuration = configuration
-        self.mcpServerConfiguration = mcpServerConfiguration
         self.modelEndpointProvider = modelEndpointProvider
     }
 
     /// Returns an endpoint for the given configuration.
     ///
-    /// The caller owns the endpoint's execution lifetime. `resumeSession` and
-    /// `authority` apply to this turn's endpoint creation.
+    /// The caller owns the endpoint's execution lifetime. `authority` applies to
+    /// this turn's endpoint creation.
     public func endpoint(
         for model: String,
         agentID: AgentID,
         workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
-        resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         reasoningEffort: ReasoningEffort? = nil
     ) async throws(ModelRouterError) -> any ModelEndpoint {
@@ -45,7 +40,6 @@ public actor ModelRouter {
             agentID: agentID,
             workspace: workspace,
             executionPolicy: executionPolicy,
-            resumeSession: resumeSession,
             authority: authority,
             reasoningEffort: reasoningEffort
         )
@@ -71,7 +65,6 @@ public actor ModelRouter {
         agentID: AgentID,
         workspace: AgentWorkspace?,
         executionPolicy: AgentExecutionPolicy,
-        resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         reasoningEffort: ReasoningEffort? = nil
     ) async throws(ModelRouterError) -> any ModelEndpoint {
@@ -92,7 +85,6 @@ public actor ModelRouter {
                     agentID: agentID,
                     workspace: workspace,
                     executionPolicy: executionPolicy,
-                    resumeSession: resumeSession,
                     authority: authority,
                     reasoning: reasoning
                 )
@@ -104,66 +96,8 @@ public actor ModelRouter {
         }
         let provider = model.provider
         let modelName = model.id.rawValue
-        let providerContextLabel = agentID.contextID.rawValue
 
         switch provider {
-        case .codex:
-            let workingDirectory = try Self.requireWorkingDirectory(workspace)
-            try Self.requireRawReasoningEncoding(
-                reasoning,
-                provider: provider,
-                model: modelName
-            )
-            return try CodexAppServerEndpoint(
-                model: modelName,
-                workingDirectory: workingDirectory,
-                agentID: agentID.rawValue,
-                contextLabel: providerContextLabel,
-                mcpServerConfiguration: mcpServerConfiguration,
-                executionPolicy: executionPolicy,
-                resumeSession: resumeSession,
-                authority: authority,
-                reasoningEffort: reasoning?.effort
-            )
-
-        case .kimiCode:
-            let workingDirectory = try Self.requireWorkingDirectory(workspace)
-            try Self.requireRawReasoningEncoding(
-                reasoning,
-                provider: provider,
-                model: modelName
-            )
-            return try KimiCodeEndpoint(
-                model: modelName,
-                workingDirectory: workingDirectory,
-                agentID: agentID.rawValue,
-                contextLabel: providerContextLabel,
-                mcpServerConfiguration: mcpServerConfiguration,
-                executionPolicy: executionPolicy,
-                resumeSession: resumeSession,
-                authority: authority,
-                reasoningEffort: reasoning?.effort
-            )
-
-        case .claude:
-            let workingDirectory = try Self.requireWorkingDirectory(workspace)
-            try Self.requireRawReasoningEncoding(
-                reasoning,
-                provider: provider,
-                model: modelName
-            )
-            return try ClaudeCliEndpoint(
-                model: modelName,
-                workingDirectory: workingDirectory,
-                agentID: agentID.rawValue,
-                contextLabel: providerContextLabel,
-                mcpServerConfiguration: mcpServerConfiguration,
-                executionPolicy: executionPolicy,
-                resumeSession: resumeSession,
-                authority: authority,
-                reasoningEffort: reasoning?.effort
-            )
-
         case .moonshot:
             let apiKey = try configuration.apiKey(for: .moonshot)
             let baseURL = try configuration.baseURL(for: .moonshot)
@@ -310,17 +244,6 @@ public actor ModelRouter {
         }
     }
 
-    private static func requireWorkingDirectory(
-        _ workspace: AgentWorkspace?
-    ) throws(ModelRouterError) -> String {
-        guard let workspace,
-            !workspace.rootPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            throw .missingWorkingDirectory
-        }
-        return workspace.rootPath
-    }
-
     public static func generationOptions(
         provider: AgentModelProvider,
         model: String,
@@ -390,20 +313,6 @@ public actor ModelRouter {
         }
         options[custom: GeminiLanguageModel.self] = .init(thinking: thinking)
         return options
-    }
-
-    private static func requireRawReasoningEncoding(
-        _ reasoning: ReasoningEffortSelection?,
-        provider: AgentModelProvider,
-        model: String
-    ) throws(ModelRouterError) {
-        guard let reasoning else { return }
-        guard reasoning.encoding != .raw else { return }
-        throw .unsupportedReasoningEffort(
-            provider: provider,
-            model: model,
-            effort: reasoning.effort
-        )
     }
 
     private static func rejectReasoningEffort(

@@ -165,10 +165,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// runtime supplies structure and context; the host owns its task rules.
     public let promptInstructions: PromptAssemblyInstructions
 
-    /// Optional compactor for non-session-owning endpoints (Ollama, hosted
-    /// chat APIs): consulted before requests, its result is journaled as one
-    /// `compacted` conversation event. Session-owning harnesses manage their
-    /// own context and are never offered compaction.
+    /// Optional compactor: consulted before requests, its result is journaled
+    /// as one `compacted` conversation event.
     public let contextCompactor: (any ContextCompactor)?
 
     /// Optional host-defined typed report generation for compaction.
@@ -186,7 +184,6 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     public init(
         maxToolRounds: Int,
         routerConfiguration: ModelRouterConfiguration,
-        mcpServerConfiguration: MCPServerConfiguration? = nil,
         modelEndpointProvider: ModelEndpointProvider? = nil,
         turnToolsProvider: TurnToolsProvider? = nil,
         authorityProvider: AuthorityProvider? = nil,
@@ -209,7 +206,6 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         }
         self.modelRouter = ModelRouter(
             configuration: routerConfiguration,
-            mcpServerConfiguration: mcpServerConfiguration,
             modelEndpointProvider: modelEndpointProvider
         )
         self.deliveryTracker = AgentDeliveryTracker()
@@ -334,14 +330,12 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     // MARK: Model endpoints
 
     /// Creates the endpoint for one execution turn. The endpoint is not
-    /// retained by the runtime; a session-owning provider receives its
-    /// journaled resume handle when appropriate.
+    /// retained by the runtime.
     public func endpoint(
         for model: String,
         agentID: AgentID,
         workspace: AgentWorkspace? = nil,
         executionPolicy: AgentExecutionPolicy = .autonomousWorkspace,
-        resumeSession: ModelSessionResume? = nil,
         authority: (any Authority)? = nil,
         reasoningEffort: ReasoningEffort? = nil
     ) async throws(ModelRouterError) -> any ModelEndpoint {
@@ -350,7 +344,6 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             agentID: agentID,
             workspace: workspace,
             executionPolicy: executionPolicy,
-            resumeSession: resumeSession,
             authority: authority,
             reasoningEffort: reasoningEffort
         )

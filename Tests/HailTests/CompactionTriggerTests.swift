@@ -101,7 +101,6 @@ struct CompactionFailurePolicyTests {
     /// never reached, so the stream stays unfinished.
     private struct StubEndpoint: ModelEndpoint {
         let model = "test/fake"
-        let contextOwnership: ModelContextOwnership = .runtime
         let effectiveContextWindow: Int? = 16_384
         let tokenCounting: TokenCounting = .unavailable
 
@@ -162,9 +161,7 @@ struct CompactionFailurePolicyTests {
         )
         var turnContext = TurnContext(
             preparedRequest: assembleStandardPrompt(promptContext),
-            promptContext: promptContext,
-            sessionIdentity: SessionIdentity("test-session"),
-            modelSession: nil
+            promptContext: promptContext
         )
         // Above the compactor's 0.8 threshold, so a threshold pass is offered
         // even without a token counter.
@@ -196,9 +193,7 @@ struct CompactionFailurePolicyTests {
                 )
                 var turnContext = TurnContext(
                     preparedRequest: assembleStandardPrompt(promptContext),
-                    promptContext: promptContext,
-                    sessionIdentity: SessionIdentity("test-session"),
-                    modelSession: nil
+                    promptContext: promptContext
                 )
                 turnContext.latestContextUsage = reported
                 return turnContext

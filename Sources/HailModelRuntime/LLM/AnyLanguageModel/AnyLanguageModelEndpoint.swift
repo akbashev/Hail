@@ -14,7 +14,6 @@ import Synchronization
 /// for any provider supported by AnyLanguageModel.
 public struct AnyLanguageModelEndpoint: ModelEndpoint {
     public let model: String
-    public let contextOwnership: ModelContextOwnership = .runtime
     public let effectiveContextWindow: Int?
     public let tokenCounting: TokenCounting
     private let languageModel: any LanguageModel

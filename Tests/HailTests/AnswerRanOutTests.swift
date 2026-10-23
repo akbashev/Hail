@@ -30,8 +30,7 @@ struct AnswerRanOutTests {
                 history: await journal.history, contextManifest: ContextManifest(items: []),
                 instructions: PromptAssemblyInstructions(task: "Rules: test."))
             return TurnContext(
-                preparedRequest: assembleStandardPrompt(promptContext), promptContext: promptContext,
-                sessionIdentity: SessionIdentity("test-session"), modelSession: nil)
+                preparedRequest: assembleStandardPrompt(promptContext), promptContext: promptContext)
         }
         let loop = ReasoningLoop(
             agentID: agentID, authority: FullAuthority(),
@@ -90,7 +89,6 @@ private actor Journal {
 /// A model that calls a tool and then writes nothing, the first time; told so, it answers.
 private final class RunsOutOnce: ModelEndpoint, Sendable {
     let model = "test/fake"
-    let contextOwnership: ModelContextOwnership = .runtime
     let effectiveContextWindow: Int? = 16_384
     let requests = Mutex<[(entries: [Transcript.Entry], reasoning: ModelReasoningOverride)]>([])
 

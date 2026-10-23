@@ -202,6 +202,4 @@ public enum ModelRouterError: Error, Sendable, Equatable {
         model: String,
         effort: ReasoningEffort
     )
-    case missingWorkingDirectory
-    case invalidEnvironmentValue(key: String, value: String)
 }

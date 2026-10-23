@@ -89,7 +89,7 @@ private final class TimeoutRace<T: Sendable>: Sendable {
 /// Unlike `withThrowingTaskGroup`, this implementation does **not** wait for
 /// the operation task to finish after a timeout. That matters when the
 /// operation is stuck in synchronous code that ignores cancellation (e.g.
-/// `swift-acp`'s shell-environment loader or a blocking `Process` call).
+/// a blocking `Process` call).
 /// In those cases `withThrowingTaskGroup` would keep the timeout from
 /// surfacing because the group waits for all child tasks to complete.
 public func withTimeout<T: Sendable>(

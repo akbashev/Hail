@@ -56,11 +56,6 @@ public distributed actor Agent: AsyncSequence {
     var role: Role { state.agentID.role }
     var contextID: AgentContextID { state.agentID.contextID }
 
-    /// The journaled harness session to resume, if one was recorded.
-    private var modelSessionResume: ModelSessionResume? {
-        state.modelSession
-    }
-
     // Durable definition plus activation-resolved host capabilities.
     /// The agent's configuration, loaded from the definition journal at
     /// activation (the journal is the truth; nothing caches it). A revived
@@ -76,8 +71,8 @@ public distributed actor Agent: AsyncSequence {
     /// starts mid-deactivation — registration otherwise happens only on
     /// activation.
     let spawnConfig: AgentSpawnConfig
-    /// The effect authority this agent's tools and harness spawns are scoped
-    /// against, resolved once at activation from the runtime plugin's provider.
+    /// The effect authority this agent's tools are scoped against, resolved
+    /// once at activation from the runtime plugin's provider.
     let authority: any Authority
     private let _agentID: AgentID
 
@@ -590,22 +585,9 @@ public distributed actor Agent: AsyncSequence {
     /// so turns keep journaling and activity streaming through this instance.
     ///
     /// `lane` is the per-turn effect lane: its authority flows into the turn's
-    /// tool registry and the session-owning endpoint's stream call. `nil`
-    /// keeps the agent's plugin-derived authority and rebuilds turn resources.
-    ///
-    /// LANE-AUTHORITY INVARIANT: the endpoint is deliberately resolved with
-    /// the agent's default authority even for a laned turn. That creation
-    /// authority scopes only endpoint *infrastructure* — the harness process
-    /// spawn — which must stay broad so a deny-everything lane (e.g.
-    /// ``TurnAuthorityLane/untrustedInput``) can still run a turn at all. The
-    /// lane's authority reaches the turn per-stream instead:
-    /// `ReasoningLoop.authority` is handed to
-    /// ``SessionOwningEndpoint/stream(messages:delta:authority:tools:responseType:)``
-    /// on every turn, and every session-owning endpoint honors it for
-    /// *model-facing* effects (the ACP delegate's fs/terminal checks, Codex's
-    /// approval decisions); Hail-side tools run through the laned registry.
-    /// Endpoint creation is scoped to the turn, so no provider resource can
-    /// carry authority or configuration across turns accidentally.
+    /// tool registry and its endpoint. `nil` keeps the agent's plugin-derived
+    /// authority. Endpoint creation is scoped to the turn, so no provider
+    /// resource can carry authority or configuration across turns.
     private func reasoningLoop(
         lane: TurnAuthorityLane?,
         turnID: TurnID = TurnID()
@@ -632,17 +614,12 @@ public distributed actor Agent: AsyncSequence {
             },
             endpoint: { turnContext async throws(AgentRuntimeError) -> any ModelEndpoint in
                 let modelConfiguration = turnContext.promptContext.modelConfiguration
-                // Creation authority is the agent's default on purpose — it
-                // scopes only the harness spawn (see the invariant above);
-                // the lane's authority reaches the endpoint per-stream via
-                // the loop's `authority`.
                 do {
                     return try await self.actorSystem.agentRuntime.endpoint(
                         for: modelConfiguration.model.identifier,
                         agentID: self.state.agentID,
                         workspace: self.workspace,
                         executionPolicy: turnContext.promptContext.definition.behavior.execution,
-                        resumeSession: turnContext.modelSession,
                         authority: turnAuthority,
                         reasoningEffort: modelConfiguration.reasoningEffort
                     )
@@ -680,8 +657,6 @@ public distributed actor Agent: AsyncSequence {
         let definition: AgentDefinition
         let contextManifest: ContextManifest
         let instructions: PromptAssemblyInstructions
-        let sessionIdentity: SessionIdentity
-        let modelSession: ModelSessionResume?
         let modelConfiguration: ModelConfiguration
 
         if let snapshot {
@@ -691,8 +666,6 @@ public distributed actor Agent: AsyncSequence {
             definition = snapshot.promptContext.definition
             contextManifest = snapshot.promptContext.contextManifest
             instructions = snapshot.promptContext.instructions
-            sessionIdentity = snapshot.sessionIdentity
-            modelSession = snapshot.modelSession
             modelConfiguration = snapshot.promptContext.modelConfiguration
         } else {
             do {
@@ -720,15 +693,6 @@ public distributed actor Agent: AsyncSequence {
             }
             instructions = runtime.promptInstructions
             modelConfiguration = try await runtime.modelConfiguration(for: state.agentID)
-            sessionIdentity = AgentSessionIdentity.fingerprint(
-                model: modelConfiguration.model.identifier,
-                reasoningEffort: modelConfiguration.reasoningEffort,
-                systemPrompt: definition.behavior.systemPrompt,
-                personaInstructions: definition.persona?.instructions,
-                configurationIdentity: modelConfiguration.sessionConfigurationIdentity
-            )
-            let persistedSession = self.modelSessionResume
-            modelSession = persistedSession?.identity == sessionIdentity ? persistedSession : nil
         }
 
         let promptContext = PromptContext(
@@ -742,8 +706,6 @@ public distributed actor Agent: AsyncSequence {
         return TurnContext(
             preparedRequest: assemblePrompt(promptContext),
             promptContext: promptContext,
-            sessionIdentity: sessionIdentity,
-            modelSession: modelSession,
             latestContextUsage: state.latestContextUsage
         )
     }

@@ -1,13 +1,13 @@
 {
-  "originHash" : "ad124cc02c50352c492de136063cfb24f98651583e70b56a087862489c9f8cb2",
+  "originHash" : "232b814b53b528358452827917cfbd7865c0f8a38da48da301b89378188bed7c",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/huggingface/AnyLanguageModel.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "15f28d9869dce3877c95d85bc3954c74bb419806"
+        "revision" : "7d432196ff19f8a2f948ce33c774fba169af0e1e",
+        "version" : "1.1.0"
       }
     },
     {

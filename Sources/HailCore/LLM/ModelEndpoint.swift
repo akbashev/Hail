@@ -53,7 +53,6 @@ public struct ContextUsage: Codable, Sendable, Equatable {
 
 /// Non-terminal provider activity. Activity never becomes the model result.
 public enum ModelActivity: Sendable, Equatable {
-    case narrationDelta(GeneratedContent)
     case reasoningDelta(GeneratedContent)
     case status(GeneratedContent)
 }
@@ -120,10 +119,8 @@ where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Sendabl
     /// and answers; the model goes on with the answer, in the same request.
     case toolCall(ModelToolCall)
 
-    /// A partial generated value as it is being generated. Providers that
-    /// support native streaming yield cumulative snapshots; plain-text typed
-    /// streams may also emit these alongside their text deltas.
-    case partialUpdated(Output.PartiallyGenerated)
+    /// The reply so far, whole: each one replaces the one before.
+    case partialUpdated(GeneratedContent)
 
     /// Token consumption for the request, when the endpoint can report it.
     case usage(ModelUsage)

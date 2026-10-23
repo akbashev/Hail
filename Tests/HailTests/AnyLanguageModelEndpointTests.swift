@@ -77,7 +77,7 @@ struct AnyLanguageModelEndpointTests {
 
         #expect(
             events.map(describe) == [
-                "status Generating", "narration hel", "partial hel", "narration lo", "partial hello", "generated hello",
+                "status Generating", "partial hel", "partial hello", "generated hello",
             ]
         )
     }
@@ -141,8 +141,8 @@ struct AnyLanguageModelEndpointTests {
         }
     }
 
-    @Test("narration before a tool call isn't an answer: a model that writes nothing after its call fails")
-    func narrationBeforeACallIsNotAnAnswer() async {
+    @Test("text before a tool call isn't an answer: a model that writes nothing after its call fails")
+    func textBeforeACallIsNotAnAnswer() async {
         let endpoint = AnyLanguageModelEndpoint(
             languageModel: ToolCallingLanguageModel(narration: ["Let me fix it."], answersAfterCall: false),
             modelIdentifier: "test",
@@ -164,7 +164,9 @@ struct AnyLanguageModelEndpointTests {
             last = event
         }
         guard case .failed(.thoughtPastAnswer) = last else {
-            Issue.record("Expected the request to fail, not to answer with its narration: \(String(describing: last))")
+            Issue.record(
+                "Expected the request to fail, not to answer with its text before the call: \(String(describing: last))"
+            )
             return
         }
     }
@@ -406,9 +408,8 @@ private struct OptionsRecordingLanguageModel: LanguageModel {
 private func describe(_ event: ModelEvent<String>) -> String {
     switch event {
     case .activity(.status(let content)): "status \(text(content))"
-    case .activity(.narrationDelta(let content)): "narration \(text(content))"
     case .activity(.reasoningDelta(let content)): "reasoning \(text(content))"
-    case .partialUpdated(let partial): "partial \(partial)"
+    case .partialUpdated(let content): "partial \(text(content))"
     case .generated(let value): "generated \(value)"
     case .toolCall(let toolCall): "call \(toolCall.call.name)"
     case .usage: "usage"

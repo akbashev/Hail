@@ -10,6 +10,13 @@ import Testing
     import Foundation
 #endif
 
+@Generable
+private struct SignalReport: Codable, Sendable {
+    let text: String
+}
+
+extension SignalReport.PartiallyGenerated: Codable {}
+
 @Suite("Reasoning loop")
 struct ReasoningLoopTests {
     @Test("structured partial model events reach typed stream updates")
@@ -18,7 +25,7 @@ struct ReasoningLoopTests {
         let timestamp = Date(timeIntervalSince1970: 1)
 
         let updates = TurnReducer.reduce(
-            event: ModelEvent<String>.partialUpdated(partial),
+            event: ModelEvent<String>.partialUpdated(GeneratedContent(partial)),
             at: timestamp
         )
 
@@ -31,6 +38,20 @@ struct ReasoningLoopTests {
 
         #expect(value == partial)
         #expect(at == timestamp)
+    }
+
+    @Test("a typed reply's content so far reaches typed stream updates as its partial type")
+    func forwardsTypedPartialUpdate() throws {
+        let updates = TurnReducer.reduce(
+            event: ModelEvent<SignalReport>.partialUpdated(try GeneratedContent(json: #"{"text":"hel"}"#)),
+            at: Date(timeIntervalSince1970: 1)
+        )
+
+        guard updates.count == 1, case .modelOutputPartialUpdated(let partial, _) = updates[0] else {
+            Issue.record("Expected one typed partial-output update")
+            return
+        }
+        #expect(partial.text == "hel")
     }
 
     @Test("a tool call the model makes in its request reaches typed stream updates")

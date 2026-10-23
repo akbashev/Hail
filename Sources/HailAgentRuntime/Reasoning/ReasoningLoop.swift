@@ -138,7 +138,7 @@ enum ReasoningLoopError: Error, Sendable, Equatable {
 }
 
 /// Pure reducer that turns a stream of ``ModelEvent`` values into typed
-/// ``AgentRunEvent`` values. Narration (status/thinking/text/tool) is
+/// ``AgentRunEvent`` values. Progress (status, thinking, the reply so far, tools) is
 /// recorded on the activity stream by the loop; control, typed partial
 /// snapshots, and the typed outcome are emitted here.
 enum TurnReducer {
@@ -157,7 +157,8 @@ enum TurnReducer {
         case .generated(let value):
             return [.modelOutputGenerated(content: value, at: timestamp)]
 
-        case .partialUpdated(let partial):
+        case .partialUpdated(let content):
+            guard let partial = try? Output.PartiallyGenerated(content) else { return [] }
             return [.modelOutputPartialUpdated(content: partial, at: timestamp)]
 
         case .usage, .contextUsage:
@@ -1120,8 +1121,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                     await broadcast(update, to: connection)
                 }
                 switch event {
-                case .activity(.narrationDelta(let fragment)):
-                    await recordActivity(.turn(.progress(.narration(fragment)), at: Date()))
+                case .partialUpdated(let content):
+                    await recordActivity(.turn(.progress(.partial(content)), at: Date()))
                 case .activity(.reasoningDelta(let fragment)):
                     await recordActivity(.turn(.progress(.reasoning(fragment)), at: Date()))
                 case .activity(.status(let message)):
@@ -1134,7 +1135,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                     return TurnProgress(calls: ran.calls, generation: progress.generation)
                 case .generated(let value):
                     return TurnProgress(calls: progress.calls, generation: .generated(value))
-                case .partialUpdated, .usage, .contextUsage:
+                case .usage, .contextUsage:
                     break
                 case .failed(let modelError):
                     throw Self.map(modelError: modelError)

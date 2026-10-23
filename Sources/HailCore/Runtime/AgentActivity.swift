@@ -25,7 +25,7 @@ public enum AgentActivity: Codable, Sendable, Equatable {
         /// The turn's opening bracket, emitted alongside the journaled
         /// `turnStarted` event.
         case started
-        /// Live narration of the work inside the turn.
+        /// Live progress of the work inside the turn.
         case progress(Progress)
         /// The turn's closing bracket, emitted alongside the journaled
         /// `turnCompleted` event.
@@ -33,12 +33,15 @@ public enum AgentActivity: Codable, Sendable, Equatable {
     }
 
     /// The work reported while a turn runs — status lines, reasoning traces,
-    /// streamed reply text, and tool calls.
+    /// the reply so far, and tool calls.
     public enum Progress: Codable, Sendable, Equatable {
         case status(GeneratedContent)
         /// Model reasoning output (distinct from reply text).
         case reasoning(GeneratedContent)
-        case narration(GeneratedContent)
+        /// The reply so far, whole: each one replaces the one before. A
+        /// follower that knows the reply's type reads it as its
+        /// `PartiallyGenerated`.
+        case partial(GeneratedContent)
         /// A tool the model called, with its arguments.
         case toolCalled(ToolCall)
         /// A tool call's result, or why it failed.

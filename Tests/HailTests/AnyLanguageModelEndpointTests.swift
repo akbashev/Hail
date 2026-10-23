@@ -82,8 +82,8 @@ struct AnyLanguageModelEndpointTests {
         )
     }
 
-    @Test("a typed request answered in prose ends as an answer out of shape, with what it wrote")
-    func aTypedRequestAnsweredInProseIsOutOfShape() async {
+    @Test("prose for a reply of one text property is that property")
+    func proseForOneTextPropertyIsThatProperty() async {
         let endpoint = AnyLanguageModelEndpoint(
             languageModel: ProseLanguageModel(text: "It's sunny."),
             modelIdentifier: "test",
@@ -97,6 +97,33 @@ struct AnyLanguageModelEndpointTests {
             tools: [],
             authority: FullAuthority(),
             generating: Forecast.self,
+            purpose: .generation
+        ) {
+            events.append(event)
+        }
+
+        guard case .generated(let forecast)? = events.last else {
+            Issue.record("Expected the prose as the reply, got \(events.map { String(describing: $0) })")
+            return
+        }
+        #expect(forecast.text == "It's sunny.")
+    }
+
+    @Test("prose for a reply of more than its text ends as an answer out of shape, with what it wrote")
+    func aTypedRequestAnsweredInProseIsOutOfShape() async {
+        let endpoint = AnyLanguageModelEndpoint(
+            languageModel: ProseLanguageModel(text: "It's sunny."),
+            modelIdentifier: "test",
+            temperature: 0,
+            failures: .swiftErrors
+        )
+        var events: [ModelEvent<DetailedForecast>] = []
+        for await event in endpoint.stream(
+            request: ModelRequest(
+                input: "hello", entries: [.prompt(.init(segments: [.text(.init(content: "hello"))]))]),
+            tools: [],
+            authority: FullAuthority(),
+            generating: DetailedForecast.self,
             purpose: .generation
         ) {
             events.append(event)
@@ -266,6 +293,33 @@ struct AnyLanguageModelEndpointTests {
 @Generable
 private struct Forecast: Codable {
     let text: String
+}
+
+@Generable
+private struct DetailedForecast: Codable {
+    let text: String
+    let degrees: Int
+}
+
+@Generable
+private struct Choice: Codable {
+    @Guide(.anyOf(["yes", "no"]))
+    let answer: String
+}
+
+@Generable
+private struct Maybe: Codable {
+    let text: String?
+}
+
+/// Which replies plain text can be: one text property it must have, any text.
+@Test("a reply of one required text property is the only one plain text can be")
+func soleTextPropertyIsOnlyOneRequiredFreeText() {
+    #expect(Forecast.generationSchema.soleTextProperty == "text")
+    #expect(DetailedForecast.generationSchema.soleTextProperty == nil)
+    #expect(Choice.generationSchema.soleTextProperty == nil)
+    #expect(Maybe.generationSchema.soleTextProperty == nil)
+    #expect(String.generationSchema.soleTextProperty == nil)
 }
 
 /// A model that answers in prose whatever it's asked for.

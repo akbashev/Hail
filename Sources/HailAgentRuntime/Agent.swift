@@ -169,7 +169,6 @@ public distributed actor Agent: AsyncSequence {
                             try await agent.run(
                                 turn.input.content,
                                 opening: .resumed(turn),
-                                inputID: nil,
                                 through: stream.connection,
                                 authority: nil
                             )
@@ -330,14 +329,12 @@ public distributed actor Agent: AsyncSequence {
     /// are unaffected.
     public distributed func stream<Input: ConvertibleToGeneratedContent & Codable & Sendable, Output>(
         _ input: Input,
-        inputID: String? = nil,
         through connection: AgentConnection<Output>,
         authority lane: TurnAuthorityLane? = nil
     ) async throws
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         try await run(
             input, opening: .received(AgentHistory.Input(content: input.generatedContent, at: Date())),
-            inputID: inputID,
             through: connection, authority: lane)
     }
 
@@ -346,7 +343,6 @@ public distributed actor Agent: AsyncSequence {
     private func run<Input: Codable & Sendable, Output>(
         _ input: Input,
         opening: TurnOpening,
-        inputID: String?,
         through connection: AgentConnection<Output>,
         authority lane: TurnAuthorityLane?
     ) async throws
@@ -366,8 +362,6 @@ public distributed actor Agent: AsyncSequence {
                 try await loop.run(
                     input,
                     opening: opening,
-
-                    inputID: inputID,
                     through: connection
                 )
             } catch let loopError as ReasoningLoopError {
@@ -401,7 +395,6 @@ public distributed actor Agent: AsyncSequence {
     /// an effect lane, exactly as in ``stream(_:through:authority:)``.
     public distributed func respond<Input: ConvertibleToGeneratedContent & Codable & Sendable, Output>(
         _ input: Input,
-        inputID: String? = nil,
         authority lane: TurnAuthorityLane? = nil
     ) async throws -> Output
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
@@ -420,7 +413,6 @@ public distributed actor Agent: AsyncSequence {
 
         try await self.stream(
             input,
-            inputID: inputID,
             through: stream.connection,
             authority: lane
         )
@@ -784,6 +776,17 @@ extension ClusterSystem {
             identifiedBy: VirtualActorID(rawValue: agentID.rawValue),
             dependency: agentID
         )
+    }
+}
+
+extension Agent {
+    /// Runs a turn and answers in plain text: what an agent answers when it's asked for no other
+    /// type. `let plan: Plan = try await agent.respond(input)` asks for a `Plan` instead.
+    public nonisolated func respond<Input: ConvertibleToGeneratedContent & Codable & Sendable>(
+        _ input: Input
+    ) async throws -> String {
+        // `authority:` names the distributed one: this one takes none, so it isn't called again.
+        try await respond(input, authority: nil)
     }
 }
 

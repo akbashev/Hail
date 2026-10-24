@@ -64,12 +64,10 @@ extension AgentStream {
     /// final response appears as a ``AgentRunEvent/responseRecorded`` event.
     public func send<Input: ConvertibleToGeneratedContent & Codable & Sendable>(
         _ input: Input,
-        inputID: String? = nil,
         to agent: Agent
     ) async throws {
         try await agent.stream(
             input,
-            inputID: inputID,
             through: connection
         )
     }

@@ -327,6 +327,10 @@ public enum HailErrorFormatter {
             "Sandbox violation: \(reason)"
         case .invalidHistory(let invalid):
             "Invalid history event: \(invalid)"
+        case .busy(.responding):
+            "The agent is busy answering."
+        case .busy(.compacting):
+            "The agent is busy compacting its history."
         }
     }
 

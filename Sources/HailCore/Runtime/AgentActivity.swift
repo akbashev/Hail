@@ -58,10 +58,12 @@ public enum AgentActivity: Codable, Sendable, Equatable {
 
     /// A turn unfolding (see ``Turn``).
     case turn(Turn, at: Date)
+    /// What the agent is doing now, as it changes.
+    case status(AgentStatus, at: Date)
 
     public var timestamp: Date {
         switch self {
-        case .turn(_, let at):
+        case .turn(_, let at), .status(_, let at):
             return at
         }
     }
@@ -70,7 +72,7 @@ public enum AgentActivity: Codable, Sendable, Equatable {
         switch self {
         case .turn(.progress(.status(let message)), _):
             return message
-        case .turn:
+        case .turn, .status:
             return nil
         }
     }

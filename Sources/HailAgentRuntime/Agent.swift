@@ -80,11 +80,10 @@ public distributed actor Agent: AsyncSequence {
     /// agent IDs (e.g. the `AgentObserver`).
     public distributed var agentID: AgentID { _agentID }
 
-    // Serializes reasoning turns. Distributed actors are reentrant, so while one
-    // turn awaits the model stream another `stream`/`respond` could start a second
-    // turn and corrupt the agent's history. Each new turn chains behind the
-    // previous one via this actor-isolated task.
-    private var processingTask: Task<Void, Never>?
+    /// What it's doing now. Distributed actors are reentrant, so while one turn awaits the model
+    /// another `stream`/`respond` could start a second turn over the same history: one asked while
+    /// it isn't idle says it's busy, and whoever asked decides what to do.
+    private var currentStatus = AgentStatus.idle
     /// The agent's session, between turns: its scopes, as the last turn left them, for the next
     /// to continue in. A turn holds it while it runs.
     private var session: AgentSession?
@@ -338,8 +337,10 @@ public distributed actor Agent: AsyncSequence {
             through: connection, authority: lane)
     }
 
-    /// Runs one turn after the one before it: the history's turns come in order. The loop
-    /// records how it opens and how it ends; a turn left open is one a crash interrupted.
+    /// Runs one turn, when it's idle: asked while it's doing something, it says it's busy. The loop
+    /// records how the turn opens and how it ends; a turn left open is one a crash interrupted. It
+    /// returns once it's idle again, its history compacted if the turn left it past the threshold:
+    /// one asked again by whoever it answered finds it ready.
     private func run<Input: Codable & Sendable, Output>(
         _ input: Input,
         opening: TurnOpening,
@@ -347,14 +348,15 @@ public distributed actor Agent: AsyncSequence {
         authority lane: TurnAuthorityLane?
     ) async throws
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
-        let previousTask = processingTask
+        // Checked and set with nothing awaited between: no second turn starts over this one.
+        if case .busy(let busy) = currentStatus { throw AgentRuntimeError.busy(busy) }
+        setStatus(.busy(.responding))
         let turnID: TurnID =
             switch opening {
             case .received: TurnID()
             case .resumed(let turn): turn.id
             }
         let workTask = Task<Void, Error> { [input, connection] in
-            await previousTask?.value
             let loop = await self.reasoningLoop(lane: lane, turnID: turnID)
             recordActivity(.turn(.started, at: Date()))
             defer { recordActivity(.turn(.completed, at: Date())) }
@@ -371,21 +373,26 @@ public distributed actor Agent: AsyncSequence {
                 }
             }
         }
-        // Chain a fire-and-forget task so the next turn waits for this one
-        // regardless of whether the caller awaits the result. After the turn, the history is
-        // compacted if the context is past the threshold: the caller has its answer already, and
-        // the next turn waits for it.
-        processingTask = Task<Void, Never> { [workTask] in
+        // After the turn, its history is compacted if it's past the threshold: whoever watches has
+        // the reply already, and the agent is idle once that's done, however the turn ended.
+        let afterTask = Task<Void, Never> { [workTask] in
             _ = try? await workTask.value
-            await self.reasoningLoop(lane: lane).compactAfterTurn()
+            await self.reasoningLoop(lane: lane).compactAfterTurn(compacting: { await self.setStatus(.busy(.compacting)) })
+            await self.setStatus(.idle)
         }
-        // The turn runs in a task of its own, so the next waits for it; its caller's cancellation
-        // reaches it all the same, as it reaches any call the caller awaits.
-        try await withTaskCancellationHandler {
-            try await workTask.value
-        } onCancel: {
-            workTask.cancel()
+        // The turn runs in a task of its own; its caller's cancellation reaches it all the same, as
+        // it reaches any call the caller awaits.
+        do {
+            try await withTaskCancellationHandler {
+                try await workTask.value
+            } onCancel: {
+                workTask.cancel()
+            }
+        } catch {
+            await afterTask.value
+            throw error
         }
+        await afterTask.value
     }
 
     /// Runs a structured turn and returns the final typed value.
@@ -426,7 +433,16 @@ public distributed actor Agent: AsyncSequence {
 
     /// Whether a turn is open on this actor: the live signal the `AgentObserver` uses.
     public distributed var isWorking: Bool {
-        state.history.open != nil
+        currentStatus != .idle || state.history.open != nil
+    }
+
+    /// What it's doing now: idle, answering, or compacting its history.
+    public distributed var status: AgentStatus { currentStatus }
+
+    private func setStatus(_ status: AgentStatus) {
+        guard currentStatus != status else { return }
+        currentStatus = status
+        recordActivity(.status(status, at: Date()))
     }
 
     // MARK: Activity stream

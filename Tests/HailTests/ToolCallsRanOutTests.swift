@@ -45,7 +45,7 @@ struct ToolCallsRanOutTests {
         try await loop.run(
             "weather",
             opening: .received(.init(content: GeneratedContent("weather"), at: Date())),
-            inputID: nil, through: connection)
+            through: connection)
 
         let steps = await journal.events.compactMap { event -> String? in
             guard case .history(let history) = event else { return nil }

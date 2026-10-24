@@ -494,7 +494,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     func run<Input: Codable & Sendable, Output>(
         _ input: Input,
         opening: TurnOpening,
-        inputID: String?,
         through connection: AgentConnection<Output>
     ) async throws(ReasoningLoopError) {
         do {
@@ -506,7 +505,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             try await runStreamingTurn(
                 input: input,
                 opening: opening,
-                inputID: inputID,
                 through: connection
             )
         } catch {
@@ -810,7 +808,6 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     private func runStreamingTurn<Input: Codable & Sendable, Output>(
         input: Input,
         opening: TurnOpening,
-        inputID: String?,
         through connection: AgentConnection<Output>
     ) async throws(AgentRuntimeError) {
         if case .received(let received) = opening {
@@ -851,8 +848,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             AgentTurnContext(
                 agentID: agentID,
                 turnID: turnID,
-                input: opening.input,
-                inputID: inputID
+                input: opening.input
             )
         ) { (session: inout AgentSession) async throws(AgentRuntimeError) -> Output in
             // What arrived since the last turn: calls that finished meanwhile.

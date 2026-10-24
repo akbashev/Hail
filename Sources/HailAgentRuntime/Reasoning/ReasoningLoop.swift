@@ -475,10 +475,13 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// After a turn: compacts the history when the context the last request reported is past the
     /// threshold, so the next turn starts with room, and nobody waits for it. A compaction that
     /// fails leaves the history as it was; a turn that overflows recovers on its own.
-    func compactAfterTurn() async {
+    /// Compacts the history after a turn if it's past the threshold; `compacting` is told when
+    /// compaction starts, after deciding there's something to compact.
+    func compactAfterTurn(compacting: (@Sendable () async -> Void)? = nil) async {
         do {
             let turnContext = try await context()
-            _ = try await compactIfNeeded(turnContext: turnContext, endpoint: try await endpoint(turnContext))
+            _ = try await compactIfNeeded(
+                turnContext: turnContext, endpoint: try await endpoint(turnContext), compacting: compacting)
         } catch {
             logger.warning(
                 "Compaction after a turn failed",
@@ -565,7 +568,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         endpoint: any ModelEndpoint,
         arrivals: [Arrival] = [],
         tools: [ToolDefinition] = [],
-        trigger: ContextCompactionTrigger = .threshold
+        trigger: ContextCompactionTrigger = .threshold,
+        compacting: (@Sendable () async -> Void)? = nil
     ) async throws(AgentRuntimeError) -> TurnContext {
         let turnContext = turnContext
         guard let compactor else {
@@ -637,6 +641,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         let operation = compactionOperation
         let summarize: @Sendable (CompactionSummaryRequest) async throws(AgentRuntimeError) -> GeneratedContent = {
             request in
+            // The compactor asks for a summary only once it's compacting.
+            await compacting?()
             if let operation {
                 return try await self.summarize(
                     request: request,

@@ -27,6 +27,9 @@ public enum AgentRuntimeError: Error, Sendable, Equatable, Codable {
     case sandboxViolation(String)
     /// An event the agent's history can't take: a bug in whoever made it.
     case invalidHistory(AgentHistory.InvalidEvent)
+    /// The agent was asked while busy, with what it's busy with: it does one thing at a time, and
+    /// whoever asked decides what to do.
+    case busy(AgentStatus.Busy)
 }
 
 public struct AgentWorkerReference: Sendable {

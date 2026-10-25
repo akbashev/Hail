@@ -43,28 +43,19 @@ struct ReasoningLoopCancellationTests {
         }
     }
 
-    @Test("repeated identical tool failures stop after one correction attempt")
-    func repeatedToolFailuresAreBounded() throws {
-        func result(id: String, output: String) throws -> ToolResult {
-            ToolResult(
-                toolCallID: id,
-                name: "timer",
-                output: .text(output),
-                failureKind: .invalidArguments
-            )
-        }
+    @Test("the same call failing the same way twice isn't run again; another call is")
+    func repeatedToolFailuresAreNotRunAgain() {
+        let call = ToolCall(id: "call-1", name: "timer", arguments: GeneratedContent(properties: ["at": "noon"]))
+        let other = ToolCall(id: "call-2", name: "timer", arguments: GeneratedContent(properties: ["at": "one"]))
+        let failure = ToolResult(
+            toolCallID: "call-1", name: "timer", output: .text("Error: expected object; found string"),
+            failureKind: .invalidArguments)
 
-        let failure = try result(
-            id: "call-1",
-            output: "Error: tool timer received invalid arguments at trigger: expected object; found string"
-        )
-        let first = try TurnCalls(limit: 8).resulted(failure)
-        #expect(throws: AgentRuntimeError.self) { try first.resulted(failure) }
-        _ = try first.resulted(
-            try result(
-                id: "call-3",
-                output: "Error: tool timer received invalid arguments at trigger: expected object; found array"
-            ))
+        let once = TurnCalls(limit: 8).resulted(failure, of: call)
+        #expect(once.repeating(call) == nil)
+        let twice = once.resulted(failure, of: call)
+        #expect(twice.repeating(call)?.failureKind == .invalidArguments)
+        #expect(twice.repeating(other) == nil)
     }
 
     @Test("a turn's tool calls stop at its limit")
@@ -75,15 +66,17 @@ struct ReasoningLoopCancellationTests {
         }
     }
 
-    @Test("transient tool failures do not trigger the deterministic failure guard")
-    func transientToolFailuresAreNotBoundedAsInvalidArguments() throws {
+    @Test("any kind of failure counts, and a success starts the count again")
+    func failuresOfAnyKindAreCounted() {
+        let call = ToolCall(id: "call-1", name: "web_search", arguments: GeneratedContent(properties: [:]))
         let failure = ToolResult(
-            toolCallID: "call-1",
-            name: "web_search",
-            output: .text("Error: service unavailable"),
-            failureKind: .unavailable
-        )
-        _ = try TurnCalls(limit: 8).resulted(failure).resulted(failure).resulted(failure)
+            toolCallID: "call-1", name: "web_search", output: .text("Error: service unavailable"),
+            failureKind: .unavailable)
+        let success = ToolResult(toolCallID: "call-1", name: "web_search", output: .text("Found."))
+
+        let twice = TurnCalls(limit: 8).resulted(failure, of: call).resulted(failure, of: call)
+        #expect(twice.repeating(call) != nil)
+        #expect(twice.resulted(success, of: call).repeating(call) == nil)
     }
 }
 

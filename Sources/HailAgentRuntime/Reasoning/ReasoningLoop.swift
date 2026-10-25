@@ -62,73 +62,78 @@ struct TurnCalls: Sendable, Equatable {
         return TurnCalls(limit: limit, count: count + 1, failures: failures)
     }
 
-    /// A call's result; the same deterministic failure twice in a row is a loop, not recovery.
-    func resulted(_ result: ToolResult) throws(AgentRuntimeError) -> TurnCalls {
-        switch failures.recording(results: [result]) {
-        case .tracking(let tracker):
-            return TurnCalls(limit: limit, count: count, failures: tracker)
-        case .repeated:
-            throw .toolFailed(
-                name: result.name,
-                reason: "The model repeated the same failed tool call twice. \(result.output.textRepresentation)")
+    /// What `call` comes to without running it: the same call that just failed the same way
+    /// twice in a row isn't run a third time, as nothing changed between the attempts.
+    func repeating(_ call: ToolCall) -> ToolResult? {
+        failures.repeating(call)
+    }
+
+    /// `call`'s result, which the failures it repeats are counted from.
+    func resulted(_ result: ToolResult, of call: ToolCall) -> TurnCalls {
+        TurnCalls(limit: limit, count: count, failures: failures.recording(result, of: call))
+    }
+}
+
+/// A call that failed: the tool, its arguments, and how it failed. Call ids are left out: a
+/// provider gives each retry a new one.
+struct FailedToolCall: Equatable, Sendable {
+    let name: String
+    let arguments: ToolArguments
+    let output: ToolOutput
+    let failureKind: ToolFailureKind
+}
+
+/// A call's arguments as values: the same whatever order their keys came in, or ids they were
+/// generated with.
+indirect enum ToolArguments: Equatable, Sendable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([ToolArguments])
+    case structure([String: ToolArguments])
+
+    init(_ content: GeneratedContent) {
+        switch content.kind {
+        case .null: self = .null
+        case .bool(let value): self = .bool(value)
+        case .number(let value): self = .number(value)
+        case .string(let value): self = .string(value)
+        case .array(let values): self = .array(values.map(ToolArguments.init))
+        case .structure(let properties, _): self = .structure(properties.mapValues(ToolArguments.init))
         }
     }
 }
 
-/// A compact description of deterministic failures produced by one tool
-/// round. Unavailable and execution failures are deliberately excluded: the
-/// model may be able to recover from those without changing its arguments.
-/// Tool call IDs are intentionally excluded because providers generate a new
-/// ID for each retry.
-struct ToolFailureSignature: Equatable, Sendable {
-    struct Entry: Equatable, Sendable {
-        let name: String
-        let output: ToolOutput
-        let failureKind: ToolFailureKind
-    }
-
-    let entries: [Entry]
-
-    init(results: [ToolResult]) {
-        self.entries =
-            results
-            .compactMap { result -> Entry? in
-                guard let failureKind = result.failureKind,
-                    failureKind == .invalidArguments || failureKind == .rejected
-                else { return nil }
-                return Entry(
-                    name: result.name,
-                    output: result.output,
-                    failureKind: failureKind
-                )
-            }
-    }
-
-    var isEmpty: Bool { entries.isEmpty }
-}
-
-/// Stops a reasoning turn when the model repeats the same failed tool round.
-/// One repeat is allowed so the model can correct an ordinary malformed call;
-/// a second identical failure is a loop, not useful recovery.
+/// The failure the model is repeating: the same call failing the same way, in a row. Any kind
+/// counts, as a failure that can clear doesn't clear between two calls made one after the other;
+/// anything else, another call, another failure or a success, starts the count again.
 struct ToolFailureTracker: Sendable, Equatable {
+    /// How often the same call may fail the same way in a row before it's no longer run.
     static let maximumRepetitions = 2
 
-    private(set) var lastFailure: ToolFailureSignature?
+    private(set) var lastFailure: FailedToolCall?
     private(set) var repetitions = 0
 
-    /// What recording results comes to: still tracking, or a failure repeated too often.
-    enum Recorded: Equatable {
-        case tracking(ToolFailureTracker)
-        case repeated(ToolFailureSignature)
+    /// What `call` comes to when it's the call that failed the same way too often: not run.
+    func repeating(_ call: ToolCall) -> ToolResult? {
+        guard let lastFailure, repetitions >= Self.maximumRepetitions,
+            lastFailure.name == call.name, lastFailure.arguments == ToolArguments(call.arguments)
+        else { return nil }
+        return ToolResult(
+            toolCallID: call.id, name: call.name,
+            output: .text(
+                "Not run: the same call failed the same way \(repetitions) times just before. "
+                    + lastFailure.output.textRepresentation),
+            failureKind: lastFailure.failureKind)
     }
 
-    func recording(results: [ToolResult]) -> Recorded {
-        let failure = ToolFailureSignature(results: results)
-        guard !failure.isEmpty else { return .tracking(Self()) }
-        let repetitions = failure == lastFailure ? self.repetitions + 1 : 1
-        return repetitions >= Self.maximumRepetitions
-            ? .repeated(failure)
-            : .tracking(Self(lastFailure: failure, repetitions: repetitions))
+    func recording(_ result: ToolResult, of call: ToolCall) -> ToolFailureTracker {
+        guard let failureKind = result.failureKind else { return Self() }
+        let failure = FailedToolCall(
+            name: call.name, arguments: ToolArguments(call.arguments), output: result.output,
+            failureKind: failureKind)
+        return Self(lastFailure: failure, repetitions: failure == lastFailure ? repetitions + 1 : 1)
     }
 }
 
@@ -1212,6 +1217,12 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         let calling = try calls.calling()
         try await emit(.history(.called(call, at: Date())))
+        if let repeated = calling.repeating(call) {
+            try await emit(.history(.resulted(repeated, at: Date())))
+            await recordActivity(.turn(.progress(.toolFinished(repeated)), at: Date()))
+            await broadcast(.toolCompleted(result: repeated, at: Date()), to: connection)
+            return (ToolAnswer(result: repeated, tools: session.allTools()), calling)
+        }
 
         let startedAt = clock.now
         let execution = try await session.execute(call)
@@ -1230,7 +1241,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         await broadcast(.toolCompleted(result: result, at: Date()), to: connection)
 
         return (
-            ToolAnswer(result: result, page: execution.page, tools: session.allTools()), try calling.resulted(result)
+            ToolAnswer(result: result, page: execution.page, tools: session.allTools()),
+            calling.resulted(result, of: call)
         )
     }
 

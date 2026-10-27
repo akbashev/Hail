@@ -55,6 +55,11 @@ where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable
     case modelOutputGenerated(content: Output, at: Date)
     case toolRequested(toolCall: ToolCall, at: Date)
     case toolCompleted(result: ToolResult, at: Date)
+    /// A status line while the run goes on, such as the model's provider calling a tool, or the
+    /// context being compacted.
+    case status(GeneratedContent, at: Date)
+    /// A piece of the model's reasoning, apart from its reply.
+    case reasoning(GeneratedContent, at: Date)
     case responseRecorded(content: Output, at: Date)
     case runCompleted(at: Date)
     case runFailed(error: AgentRuntimeError, at: Date)

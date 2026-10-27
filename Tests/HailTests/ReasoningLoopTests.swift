@@ -75,4 +75,25 @@ struct ReasoningLoopTests {
         }
         #expect(call == toolCall.call)
     }
+
+    @Test("a status line and reasoning the model reports reach typed stream updates")
+    func forwardsStatusAndReasoning() {
+        let timestamp = Date(timeIntervalSince1970: 1)
+        let status = TurnReducer.reduce(
+            event: ModelEvent<String>.activity(.status(GeneratedContent("Calling search."))), at: timestamp)
+        let reasoning = TurnReducer.reduce(
+            event: ModelEvent<String>.activity(.reasoningDelta(GeneratedContent("Thinking"))), at: timestamp)
+
+        guard case .status(let message, let at) = status.first, status.count == 1 else {
+            Issue.record("Expected one status update")
+            return
+        }
+        #expect(message == GeneratedContent("Calling search."))
+        #expect(at == timestamp)
+        guard case .reasoning(let fragment, _) = reasoning.first, reasoning.count == 1 else {
+            Issue.record("Expected one reasoning update")
+            return
+        }
+        #expect(fragment == GeneratedContent("Thinking"))
+    }
 }

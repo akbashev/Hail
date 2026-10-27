@@ -156,8 +156,11 @@ enum TurnReducer {
     ) -> [AgentRunEvent<Output>]
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         switch event {
-        case .activity:
-            return []
+        case .activity(.status(let message)):
+            return [.status(message, at: timestamp)]
+
+        case .activity(.reasoningDelta(let fragment)):
+            return [.reasoning(fragment, at: timestamp)]
 
         case .toolCall(let toolCall):
             return [.toolRequested(toolCall: toolCall.call, at: timestamp)]
@@ -1045,7 +1048,11 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
                 arrivals: arrivals,
                 schemas: schemas,
                 turnSnapshot: turnSnapshot,
-                endpoint: endpoint
+                endpoint: endpoint,
+                compacting: {
+                    await self.broadcast(
+                        .status(GeneratedContent("Compacting conversation context."), at: Date()), to: connection)
+                }
             )
             return try await runTurn(
                 input: compactedInput,
@@ -1082,7 +1089,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         arrivals: [Arrival],
         schemas: [ToolDefinition],
         turnSnapshot: TurnContext,
-        endpoint: ModelEndpoint
+        endpoint: ModelEndpoint,
+        compacting: @escaping @Sendable () async -> Void
     ) async throws(AgentRuntimeError) -> TurnRequest<Input> {
         guard compactor != nil else {
             throw AgentRuntimeError.contextLengthExceeded
@@ -1094,7 +1102,8 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             endpoint: endpoint,
             arrivals: arrivals,
             tools: schemas,
-            trigger: .contextLengthExceeded
+            trigger: .contextLengthExceeded,
+            compacting: compacting
         )
         guard prepared.promptContext.history != rebuilt.promptContext.history else {
             throw AgentRuntimeError.contextLengthExceeded

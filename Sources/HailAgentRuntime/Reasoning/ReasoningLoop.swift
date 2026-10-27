@@ -282,8 +282,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// reasoning turn.
     let turnID: TurnID
 
-    /// The effect authority this turn runs under (the turn's lane, or the
-    /// agent's default).
+    /// The effect authority this turn runs under: the agent's.
     let authority: any Authority
 
     /// Builds the prompt context (system prompt, memory, agent history,

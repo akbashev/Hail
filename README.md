@@ -215,6 +215,8 @@ let runtime = try AgentRuntimePlugin(
 )
 ```
 
+An agent's authority is what `authorityProvider` gives that agent, and every turn it runs uses it: no caller widens or narrows it. Input you don't trust goes to an agent whose authority grants less, such as another role the provider gives a narrower `CompositeAuthority`.
+
 A definition is the agent's role and instructions:
 
 ```swift
@@ -236,7 +238,7 @@ Virtual Actors give agents durable logical identity: they activate an entity whe
 
 ### Scoped effects
 
-An LLM can propose an action, but the host must decide what that action may touch. `ScopedEffect` represents file, process, and network operations as typed values. An `Authority` decides whether a concrete effect is allowed, and `withEffect` creates a non-escapable `EffectToken` only inside the granted scope. Authorities can be composed for workers, reviewers, trusted hosts, or untrusted turns.
+An LLM can propose an action, but the host must decide what that action may touch. `ScopedEffect` represents file, process, and network operations as typed values. An `Authority` decides whether a concrete effect is allowed, and `withEffect` creates a non-escapable `EffectToken` only inside the granted scope. Authorities can be composed for workers, reviewers, trusted hosts, or agents that take untrusted input.
 
 This design is inspired by Martin Odersky and collaborators' work on [tracked capabilities for safer agents](https://martinodersky.substack.com/p/tracked-capabilities-for-safer-agents), adapted to Swift's current runtime and concurrency capabilities.
 

@@ -168,8 +168,7 @@ public distributed actor Agent: AsyncSequence {
                             try await agent.run(
                                 turn.input.content,
                                 opening: .resumed(turn),
-                                through: stream.connection,
-                                authority: nil
+                                through: stream.connection
                             )
                         }
                     } catch {
@@ -321,20 +320,14 @@ public distributed actor Agent: AsyncSequence {
     /// The final generated value is emitted as a
     /// `.responseRecorded` update on the connection; callers that only need the
     /// final result use ``respond(_:)`` instead.
-    ///
-    /// `authority` pins the turn to an effect lane (e.g. ``TurnAuthorityLane/untrustedInput``);
-    /// `nil` runs the turn under the agent's plugin-derived authority. The lane
-    /// is a per-turn value: the agent's default tool registry and future turns
-    /// are unaffected.
     public distributed func stream<Input: ConvertibleToGeneratedContent & Codable & Sendable, Output>(
         _ input: Input,
-        through connection: AgentConnection<Output>,
-        authority lane: TurnAuthorityLane? = nil
+        through connection: AgentConnection<Output>
     ) async throws
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         try await run(
             input, opening: .received(AgentHistory.Input(content: input.generatedContent, at: Date())),
-            through: connection, authority: lane)
+            through: connection)
     }
 
     /// Runs one turn, when it's idle: asked while it's doing something, it says it's busy. The loop
@@ -344,8 +337,7 @@ public distributed actor Agent: AsyncSequence {
     private func run<Input: Codable & Sendable, Output>(
         _ input: Input,
         opening: TurnOpening,
-        through connection: AgentConnection<Output>,
-        authority lane: TurnAuthorityLane?
+        through connection: AgentConnection<Output>
     ) async throws
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         // Checked and set with nothing awaited between: no second turn starts over this one.
@@ -357,7 +349,7 @@ public distributed actor Agent: AsyncSequence {
             case .resumed(let turn): turn.id
             }
         let workTask = Task<Void, Error> { [input, connection] in
-            let loop = await self.reasoningLoop(lane: lane, turnID: turnID)
+            let loop = await self.reasoningLoop(turnID: turnID)
             recordActivity(.turn(.started, at: Date()))
             defer { recordActivity(.turn(.completed, at: Date())) }
             do {
@@ -377,7 +369,7 @@ public distributed actor Agent: AsyncSequence {
         // the reply already, and the agent is idle once that's done, however the turn ended.
         let afterTask = Task<Void, Never> { [workTask] in
             _ = try? await workTask.value
-            await self.reasoningLoop(lane: lane).compactAfterTurn(compacting: { await self.setStatus(.busy(.compacting)) })
+            await self.reasoningLoop().compactAfterTurn(compacting: { await self.setStatus(.busy(.compacting)) })
             await self.setStatus(.idle)
         }
         // The turn runs in a task of its own; its caller's cancellation reaches it all the same, as
@@ -398,11 +390,9 @@ public distributed actor Agent: AsyncSequence {
     /// Runs a structured turn and returns the final typed value.
     ///
     /// This is a convenience over ``stream(_:through:)`` that ignores live
-    /// updates and returns only the final result. `authority` pins the turn to
-    /// an effect lane, exactly as in ``stream(_:through:authority:)``.
+    /// updates and returns only the final result.
     public distributed func respond<Input: ConvertibleToGeneratedContent & Codable & Sendable, Output>(
-        _ input: Input,
-        authority lane: TurnAuthorityLane? = nil
+        _ input: Input
     ) async throws -> Output
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         let stream = AgentStream<Output>(actorSystem: actorSystem)
@@ -420,8 +410,7 @@ public distributed actor Agent: AsyncSequence {
 
         try await self.stream(
             input,
-            through: stream.connection,
-            authority: lane
+            through: stream.connection
         )
         stream.finish()
 
@@ -592,23 +581,11 @@ public distributed actor Agent: AsyncSequence {
     /// activation-scoped dependencies; the closures hop back onto this actor,
     /// so turns keep journaling and activity streaming through this instance.
     ///
-    /// `lane` is the per-turn effect lane: its authority flows into the turn's
-    /// tool registry and its endpoint. `nil` keeps the agent's plugin-derived
-    /// authority. Endpoint creation is scoped to the turn, so no provider
-    /// resource can carry authority or configuration across turns.
-    private func reasoningLoop(
-        lane: TurnAuthorityLane?,
-        turnID: TurnID = TurnID()
-    ) async -> ReasoningLoop<ContinuousClock> {
-        let turnAuthority: any Authority
-        if let laneAuthority = lane?.authority {
-            turnAuthority = laneAuthority
-        } else {
-            turnAuthority = await actorSystem.agentRuntime.authority(
-                for: spawnConfig,
-                workspace: workspace
-            )
-        }
+    /// The turn runs under the agent's plugin-derived authority, which flows into its tool registry
+    /// and its endpoint. Endpoint creation is scoped to the turn, so no provider resource can carry
+    /// authority or configuration across turns.
+    private func reasoningLoop(turnID: TurnID = TurnID()) async -> ReasoningLoop<ContinuousClock> {
+        let turnAuthority = await actorSystem.agentRuntime.authority(for: spawnConfig, workspace: workspace)
         return ReasoningLoop<ContinuousClock>(
             agentID: state.agentID,
             turnID: turnID,
@@ -637,11 +614,7 @@ public distributed actor Agent: AsyncSequence {
             },
             modelReasoningPolicy: actorSystem.agentRuntime.modelReasoningPolicy,
             session: { (turnContext: AgentTurnContext) async throws(AgentRuntimeError) -> AgentSession in
-                try await self.takeSession(
-                    lane: lane,
-                    defaultAuthority: turnAuthority,
-                    turnContext: turnContext
-                )
+                try await self.takeSession(authority: turnAuthority, turnContext: turnContext)
             },
             keepSession: { await self.keep($0) },
             emit: { (event: AgentEvent) async throws(AgentRuntimeError) in
@@ -724,16 +697,14 @@ public distributed actor Agent: AsyncSequence {
     /// a tool registered while this agent was idle must appear on its very
     /// next turn. Rebuilding is cheap: value-type tool construction plus the
     /// providers' journal replays, against turns that are seconds apart.
-    /// A laned turn builds under the lane's authority, an unlaned one under
-    /// the agent's plugin-derived authority.
+    /// A turn builds under the agent's plugin-derived `authority`.
     private func takeSession(
-        lane: TurnAuthorityLane?,
-        defaultAuthority: any Authority,
+        authority: any Authority,
         turnContext: AgentTurnContext
     ) async throws(AgentRuntimeError) -> AgentSession {
         // The turn holds the agent's session while it runs, under this turn's authority and tools.
         var session = self.session.take() ?? AgentSession()
-        session.authority = lane?.authority ?? defaultAuthority
+        session.authority = authority
         try await registerTools(in: &session, turnContext: turnContext)
         return session
     }
@@ -744,7 +715,7 @@ public distributed actor Agent: AsyncSequence {
     }
 
     /// Registers the host's turn tools into the turn's `scope`. Runs once per turn
-    /// (see ``takeSession(lane:defaultAuthority:turnContext:)``).
+    /// (see ``takeSession(authority:turnContext:)``).
     private func registerTools(
         in session: inout AgentSession,
         turnContext: AgentTurnContext
@@ -792,17 +763,6 @@ extension ClusterSystem {
             identifiedBy: VirtualActorID(rawValue: agentID.rawValue),
             dependency: agentID
         )
-    }
-}
-
-extension Agent {
-    /// Runs a turn and answers in plain text: what an agent answers when it's asked for no other
-    /// type. `let plan: Plan = try await agent.respond(input)` asks for a `Plan` instead.
-    public nonisolated func respond<Input: ConvertibleToGeneratedContent & Codable & Sendable>(
-        _ input: Input
-    ) async throws -> String {
-        // `authority:` names the distributed one: this one takes none, so it isn't called again.
-        try await respond(input, authority: nil)
     }
 }
 

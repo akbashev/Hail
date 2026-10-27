@@ -831,26 +831,4 @@ extension CompositeAuthority {
             .grantingAll(for: CoordinationEffect.self)
             .grantingAll(for: ClockEffect.self)
     }
-
-    public static var untrustedInput: CompositeAuthority {
-        CompositeAuthority()
-            .granting(for: FileEffect.self) { _ in .denied("untrusted-input lane cannot access files") }
-            .granting(for: TerminalEffect.self) { _ in .denied("untrusted-input lane cannot run terminal commands") }
-            .granting(for: ProcessEffect.self) { _ in .denied("untrusted-input lane cannot spawn processes") }
-            .granting(for: NetworkEffect.self) { _ in .denied("untrusted-input lane cannot access the network") }
-            .granting(for: CoordinationEffect.self) { _ in
-                .denied("untrusted-input lane cannot perform coordination operations")
-            }
-            .granting(for: ClockEffect.self) { _ in .denied("untrusted-input lane cannot read the clock") }
-    }
-}
-
-public enum TurnAuthorityLane: String, Codable, Sendable {
-    case untrustedInput
-
-    public var authority: any Authority {
-        switch self {
-        case .untrustedInput: CompositeAuthority.untrustedInput
-        }
-    }
 }

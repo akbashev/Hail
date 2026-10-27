@@ -112,9 +112,8 @@ client package:
 ## Open questions
 
 - Granularity: settled. Per-domain scopes won, and the lane is an
-  `Authority` value decided per agent/per turn (`CompositeAuthority`
-  factories + `TurnAuthorityLane` in Hail), not per scope call
-  site.
+  `Authority` value decided per agent (`CompositeAuthority` factories
+  in Hail), not per scope call site.
 - Whether a typed denial should carry the effect value (not just its name) —
   errors generic over `Effect` are awkward to catch; name strings won for now.
 - Async `withConfiguration`: a borrowing parameter cannot be held across a

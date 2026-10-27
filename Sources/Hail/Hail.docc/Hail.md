@@ -74,4 +74,3 @@ Tools are answered inside the turn's model request by the agent's `AgentSession`
 - ``NetworkEffect``
 - ``CoordinationEffect``
 - ``ClockEffect``
-- ``TurnAuthorityLane``

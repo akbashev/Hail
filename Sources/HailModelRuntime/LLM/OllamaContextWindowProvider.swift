@@ -1,5 +1,11 @@
+import AnyLanguageModel
 import AsyncHTTPClient
-import Foundation
+
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 /// Errors raised while reading Ollama's model metadata.
 public enum OllamaContextWindowError: Error, Sendable, Equatable {
@@ -27,7 +33,7 @@ public enum OllamaContextWindowProvider {
         request.method = .POST
         request.headers.add(name: "Content-Type", value: "application/json")
         do {
-            request.body = .bytes(try JSONSerialization.data(withJSONObject: ["model": model], options: []))
+            request.body = .bytes(try JSONEncoder().encode(["model": model]))
         } catch {
             throw .requestFailed(String(describing: error))
         }
@@ -39,7 +45,7 @@ public enum OllamaContextWindowProvider {
             }
             let body = try await response.body.collect(upTo: maximumResponseBytes)
 
-            let object = try JSONSerialization.jsonObject(with: Data(body.readableBytesView))
+            let object = try JSONDecoder().decode(JSONValue.self, from: Data(body.readableBytesView))
             guard let contextLength = contextLength(in: object) else {
                 throw OllamaContextWindowError.missingContextLength
             }
@@ -54,28 +60,30 @@ public enum OllamaContextWindowProvider {
         }
     }
 
-    private static func contextLength(in value: Any) -> Int? {
-        if let object = value as? [String: Any] {
+    private static func contextLength(in value: JSONValue) -> Int? {
+        switch value {
+        case .object(let object):
             for (key, nested) in object {
                 let normalized = key.lowercased()
                 if normalized == "context_length" || normalized.hasSuffix(".context_length") {
-                    if let number = nested as? NSNumber {
-                        return number.intValue
-                    }
-                    if let number = nested as? Int {
-                        return number
+                    switch nested {
+                    case .int(let number): return number
+                    case .double(let number): return Int(number)
+                    default: break
                     }
                 }
                 if let nestedLength = contextLength(in: nested) {
                     return nestedLength
                 }
             }
-        } else if let array = value as? [Any] {
+        case .array(let array):
             for nested in array {
                 if let nestedLength = contextLength(in: nested) {
                     return nestedLength
                 }
             }
+        default:
+            break
         }
         return nil
     }

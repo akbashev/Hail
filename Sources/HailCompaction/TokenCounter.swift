@@ -2,7 +2,11 @@ import AnyLanguageModel
 import HailCore
 import Tokenizers
 
-import Foundation
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 /// Counts the model-visible representation using a Hugging Face tokenizer and
 /// its configured chat template. The endpoint should use the same template
@@ -143,13 +147,24 @@ public struct TokenCounter: Sendable {
     }
 
     private func parameters(_ schema: GenerationSchema) -> [String: any Sendable] {
-        guard
-            let data = try? JSONEncoder().encode(schema),
-            let value = try? JSONSerialization.jsonObject(with: data),
-            let result = value as? [String: any Sendable]
+        guard let data = try? JSONEncoder().encode(schema),
+            case .object(let object)? = try? JSONDecoder().decode(JSONValue.self, from: data)
         else {
             return [:]
         }
-        return result
+        return object.compactMapValues(Self.templateValue)
+    }
+
+    /// A JSON value as a chat template reads it; nothing for null.
+    private static func templateValue(_ value: JSONValue) -> (any Sendable)? {
+        switch value {
+        case .null: nil
+        case .bool(let value): value
+        case .int(let value): value
+        case .double(let value): value
+        case .string(let value): value
+        case .array(let values): values.compactMap(templateValue)
+        case .object(let values): values.compactMapValues(templateValue)
+        }
     }
 }

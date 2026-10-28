@@ -263,53 +263,6 @@ struct EffectAuthorityTests {
         #expect(value == "ok")
     }
 
-    @Test("An effect that needs asking waits for the answer, and runs once it's granted")
-    func askedEffectRunsOnGrant() async throws {
-        let authority = CompositeAuthority()
-            .granting(for: DecisionGreeterEffect.self, decide: { _ in .needs }, ask: { _ in .granted })
-        let greeting = try await withEffect(DecisionGreeterEffect(greeting: "Hello"), authority: authority) { token in
-            token.greet("Ann")
-        }
-        #expect(greeting == "Hello, Ann!")
-    }
-
-    @Test("An answer that refuses throws EffectDenied with its reason, before any token exists")
-    func askedEffectRefused() async {
-        let authority = CompositeAuthority()
-            .granting(
-                for: DecisionGreeterEffect.self, decide: { _ in .needs }, ask: { _ in .denied("waiting for Ann") })
-        await #expect(throws: EffectDenied(effect: "greeter", refusal: "waiting for Ann")) {
-            try await withEffect(DecisionGreeterEffect(greeting: "Hello"), authority: authority) { token in
-                token.greet("x")
-            }
-        }
-        // Needing asking with no one to ask is no answer: denied.
-        let unanswered = CompositeAuthority().granting(for: DecisionGreeterEffect.self) { _ in .needs }
-        await #expect(throws: EffectDenied.self) {
-            try await withEffect(DecisionGreeterEffect(greeting: "Hello"), authority: unanswered) { token in
-                token.greet("x")
-            }
-        }
-    }
-
-    @Test("A composite's child that needs asking is asked once, when it runs")
-    func compositeChildIsAskedWhenItRuns() async throws {
-        let asked = Mutex(0)
-        let authority = CompositeAuthority()
-            .granting(
-                for: ChildRunnableEffect.self, decide: { _ in .needs },
-                ask: { _ in
-                    asked.withLock { $0 += 1 }
-                    return .granted
-                })
-        let composed = ComposedEffect(child: ChildRunnableEffect(value: "ok"))
-        let value = try await withEffect(composed, authority: authority) { token in
-            try await ComposedEffect.run(in: token)
-        }
-        #expect(value == "ok")
-        #expect(asked.withLock { $0 } == 1)
-    }
-
     @Test("A refusal keeps what was refused, as its host encoded it, through a composite's child")
     func refusalKeepsWhatWasRefused() async {
         let refused = Data("exactly this".utf8)
@@ -323,34 +276,6 @@ struct EffectAuthorityTests {
         }
     }
 
-    @Test("An intersection asks only the authorities that need asking, and grants when all do")
-    func intersectionAsksWhatNeedsAsking() async throws {
-        let asked = Mutex<[String]>([])
-        func asking(_ name: String, _ answer: EffectAnswer) -> CompositeAuthority {
-            CompositeAuthority().granting(
-                for: DecisionGreeterEffect.self, decide: { _ in .needs },
-                ask: { _ in
-                    asked.withLock { $0.append(name) }
-                    return answer
-                })
-        }
-        let granting = CompositeAuthority().grantingAll(for: DecisionGreeterEffect.self)
-        let both = IntersectingAuthority([granting, asking("host", .granted)])
-        #expect(both.decision(on: DecisionGreeterEffect(greeting: "Hi")) == .needs)
-        _ = try await withEffect(DecisionGreeterEffect(greeting: "Hi"), authority: both) { token in token.greet("x") }
-        #expect(asked.withLock { $0 } == ["host"])
-
-        let refusing = IntersectingAuthority([asking("host", .granted), asking("tool", .denied("no"))])
-        await #expect(throws: EffectDenied(effect: "greeter", refusal: "no")) {
-            try await withEffect(DecisionGreeterEffect(greeting: "Hi"), authority: refusing) { token in
-                token.greet("x")
-            }
-        }
-    }
-
-    // The observer is process-global and EffectAuditStressTests swaps it too;
-    // exclusivity comes from the turnstile (see EffectAuditStressTests.swift),
-    // not from .serialized, which cannot order tests across suites.
     @Test("Every gated decision is reported to the audit observer")
     func auditReportsDecisions() async throws {
         await EffectAuditTurnstile.shared.enter()

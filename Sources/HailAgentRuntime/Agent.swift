@@ -429,12 +429,6 @@ public distributed actor Agent: AsyncSequence {
 
     // MARK: Activity stream
 
-    /// Records an externally reported status line onto the activity stream (the
-    /// `report_status` tool sink). Ephemeral — not journaled.
-    public distributed func recordStatusActivity(_ message: String, at: Date) async {
-        recordActivity(.turn(.progress(.status(GeneratedContent(message))), at: at))
-    }
-
     /// Resumes the subscriber with the next activity fragment: a buffered one
     /// if fragments were recorded while it was between pulls, otherwise parks
     /// until the next fragment is published. Mirrors

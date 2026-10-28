@@ -164,7 +164,7 @@ let read = try await file.runOutput(
 print(read.result.textRepresentation)
 ```
 
-An authority that can't decide from what it holds, such as one that leaves a request to a person, answers `.needs`, and its `ask(about:)` waits for the answer before the effect runs. A composite effect isn't asked itself: each of its children that needs asking is asked when it runs.
+A refusal says why, and can carry exactly what was refused as the host encodes it, so whoever the call is for can act on it: a refused tool call's result carries its refusal back.
 
 ### Keep secrets as references
 

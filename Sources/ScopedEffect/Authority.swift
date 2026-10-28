@@ -41,27 +41,10 @@ public struct EffectRefusal: Codable, Sendable, Equatable, ExpressibleByStringIn
     }
 }
 
-/// A pure decision over one effect configuration: granted, denied, or one the authority can't
-/// make from what it holds, which only an answer to asking gives.
+/// A pure grant/deny decision over one effect configuration.
 public enum EffectDecision: Sendable, Equatable {
     case granted
     case denied(EffectRefusal)
-    /// It has to be asked: ``Authority/ask(about:)`` gives the answer.
-    case needs
-}
-
-/// What an authority answers, asked about an activation its decision said needs asking.
-public enum EffectAnswer: Sendable, Equatable {
-    case granted
-    case denied(EffectRefusal)
-
-    /// The answer as the decision it comes to.
-    public var decision: EffectDecision {
-        switch self {
-        case .granted: .granted
-        case .denied(let refusal): .denied(refusal)
-        }
-    }
 }
 
 /// The full authority of one execution lane: which effects it may activate.
@@ -76,20 +59,11 @@ public enum EffectAnswer: Sendable, Equatable {
 public protocol Authority: Sendable {
     /// The decision for one concrete effect activation.
     func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision
-
-    /// The answer for an activation whose decision ``EffectDecision/needs`` it: asked of whoever
-    /// gives it, and waited for.
-    func ask<Effect: ScopedEffect>(about effect: Effect) async -> EffectAnswer
 }
 
 extension Authority {
     /// Deny-by-default: an authority that decides nothing decides denial.
     public func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision {
-        .denied("the '\(effect.name)' effect is not granted by this authority")
-    }
-
-    /// An authority that decides everything itself has no one to ask: no answer is a denial.
-    public func ask<Effect: ScopedEffect>(about effect: Effect) async -> EffectAnswer {
         .denied("the '\(effect.name)' effect is not granted by this authority")
     }
 }
@@ -119,23 +93,8 @@ public struct IntersectingAuthority: Authority {
 
     public func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision {
         var denials: [EffectRefusal] = []
-        var needs = false
         for authority in authorities {
-            switch authority.decision(on: effect) {
-            case .granted: break
-            case .denied(let refusal): denials.append(refusal)
-            case .needs: needs = true
-            }
-        }
-        if !denials.isEmpty { return .denied(.joined(denials)) }
-        return needs ? .needs : .granted
-    }
-
-    /// Asks each member whose decision needs asking: granted only when every one of them grants.
-    public func ask<Effect: ScopedEffect>(about effect: Effect) async -> EffectAnswer {
-        var denials: [EffectRefusal] = []
-        for authority in authorities where authority.decision(on: effect) == .needs {
-            if case .denied(let refusal) = await authority.ask(about: effect) {
+            if case .denied(let refusal) = authority.decision(on: effect) {
                 denials.append(refusal)
             }
         }
@@ -155,12 +114,9 @@ public struct CompositeAuthority: Authority {
     /// Decision closures keyed by domain. Type-erased at rest, re-typed on
     /// lookup by the generic cast.
     private var decisions: [ObjectIdentifier: @Sendable (any ScopedEffect) -> EffectDecision]
-    /// Who answers, by domain, for what its decision says needs asking.
-    private var answers: [ObjectIdentifier: @Sendable (any ScopedEffect) async -> EffectAnswer]
 
     public init() {
         decisions = [:]
-        answers = [:]
     }
 
     /// Returns a copy with `decide` installed for `domain`.
@@ -174,23 +130,6 @@ public struct CompositeAuthority: Authority {
                 return .denied("the '\(effect.name)' effect is not granted by this authority")
             }
             return decide(typed)
-        }
-        return copy
-    }
-
-    /// Returns a copy with `decide` installed for `domain`, and `ask` giving the answer for what
-    /// `decide` says needs asking.
-    public func granting<Effect: ScopedEffect>(
-        for domain: Effect.Type,
-        decide: @escaping @Sendable (Effect) -> EffectDecision,
-        ask: @escaping @Sendable (Effect) async -> EffectAnswer
-    ) -> CompositeAuthority {
-        var copy = granting(for: domain, decide: decide)
-        copy.answers[ObjectIdentifier(domain)] = { effect in
-            guard let typed = effect as? Effect else {
-                return .denied("the '\(effect.name)' effect is not granted by this authority")
-            }
-            return await ask(typed)
         }
         return copy
     }
@@ -209,13 +148,6 @@ public struct CompositeAuthority: Authority {
             return .denied("the '\(effect.name)' effect is not granted by this authority")
         }
         return decide(effect)
-    }
-
-    public func ask<Effect: ScopedEffect>(about effect: Effect) async -> EffectAnswer {
-        guard let ask = answers[ObjectIdentifier(Effect.self)] else {
-            return .denied("the '\(effect.name)' effect is not granted by this authority")
-        }
-        return await ask(effect)
     }
 }
 
@@ -279,16 +211,17 @@ public enum EffectAudit {
 ///
 /// This is the runtime choke point: the effect configuration and the
 /// authority are both values, so the decision is pure and evaluated once per
-/// activation, *before* any token exists. One that needs asking waits for the
-/// authority's answer. On `.granted` the module's internal token-minting scope
-/// opens and vends its token.
+/// activation, *before* any token exists. On `.granted` the module's internal
+/// token-minting scope opens and vends its token.
 public func withEffect<Effect: ScopedEffect, Result>(
     _ effect: Effect,
     authority: any Authority,
     isolation: isolated (any Actor)? = #isolation,
     operation: (borrowing EffectToken<Effect>) async throws -> Result
 ) async throws -> Result {
-    switch await answer(of: authority, on: effect) {
+    let decision = authority.decision(on: effect)
+    EffectAudit.record(effect, decision)
+    switch decision {
     case .granted:
         return try await _withEffectUnchecked(
             effect,
@@ -297,20 +230,5 @@ public func withEffect<Effect: ScopedEffect, Result>(
         )
     case .denied(let refusal):
         throw EffectDenied(effect: effect.name, refusal: refusal)
-    }
-}
-
-/// What `authority` comes to for one activation of `effect`: its decision, or, when that needs
-/// asking, its answer. Each is recorded.
-func answer<Effect: ScopedEffect>(of authority: any Authority, on effect: Effect) async -> EffectAnswer {
-    let decision = authority.decision(on: effect)
-    EffectAudit.record(effect, decision)
-    switch decision {
-    case .granted: return .granted
-    case .denied(let refusal): return .denied(refusal)
-    case .needs:
-        let answer = await authority.ask(about: effect)
-        EffectAudit.record(effect, answer.decision)
-        return answer
     }
 }

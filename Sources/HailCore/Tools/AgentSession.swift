@@ -250,7 +250,8 @@ public struct AgentSession: ~Copyable, Sendable {
             let owner = entries.first(where: { $0.scope.read { $0.tools.contains { $0.name == call.name } } ?? false })
         else {
             guard let tool = tools[call.name] else {
-                return ToolExecution(result: result(call, .text("Error: " + unknown(call.name)), failed: .rejected))
+                let unknown = unknown(call.name)
+                return ToolExecution(result: result(call, .text("Error: " + unknown), failed: .rejected("\(unknown)")))
             }
             return try await start(call, tool, under: .root)
         }
@@ -417,7 +418,7 @@ extension AnyTool {
         case let error as ToolPageError:
             return (error.page, error.kind)
         case let denial as EffectDenied:
-            return (.text("Error: \(denial)"), .rejected)
+            return (.text("Error: \(denial)"), .rejected(denial.refusal))
         case let error as ToolError:
             return (.text(toolErrorMessage(error, toolName: name)), failureKind(for: error))
         case let mismatch as ArgumentMismatch:
@@ -450,8 +451,8 @@ extension AnyTool {
         switch error {
         case .missingArgument, .invalidArgument:
             return .invalidArguments
-        case .unauthorized:
-            return .rejected
+        case .unauthorized(let reason):
+            return .rejected(EffectRefusal(reason))
         case .notConfigured:
             return .unavailable
         }

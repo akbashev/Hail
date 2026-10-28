@@ -36,13 +36,11 @@ extension CompositeScopedEffect {
     /// child that needs asking is asked when it runs, in ``EffectToken/withChild(_:operation:)``,
     /// so it's asked once.
     public func decision(using authority: any Authority) -> EffectDecision {
-        let denials = childEffects.compactMap { child -> String? in
-            guard case .denied(let reason) = authority.decision(on: child) else { return nil }
-            return "\(child.name): \(reason)"
+        let denials = childEffects.compactMap { child -> EffectRefusal? in
+            guard case .denied(let refusal) = authority.decision(on: child) else { return nil }
+            return EffectRefusal("\(child.name): \(refusal.reason)", refused: refusal.refused)
         }
-        return denials.isEmpty
-            ? .granted
-            : .denied(denials.joined(separator: "; "))
+        return denials.isEmpty ? .granted : .denied(.joined(denials))
     }
 }
 
@@ -97,14 +95,12 @@ public struct CombinedEffect<Left: ScopedEffect, Right: ScopedEffect>:
             (right.name, authority.decision(on: right)),
         ]
 
-        let denials = decisions.compactMap { name, decision -> String? in
-            guard case .denied(let reason) = decision else { return nil }
-            return "\(name): \(reason)"
+        let denials = decisions.compactMap { name, decision -> EffectRefusal? in
+            guard case .denied(let refusal) = decision else { return nil }
+            return EffectRefusal("\(name): \(refusal.reason)", refused: refusal.refused)
         }
 
-        return denials.isEmpty
-            ? .granted
-            : .denied(denials.joined(separator: "; "))
+        return denials.isEmpty ? .granted : .denied(.joined(denials))
     }
 
     public static func run(
@@ -206,8 +202,8 @@ public struct EffectToken<Effect: ScopedEffect>: ~Escapable, ~Sendable {
                 authority: authority,
                 operation: operation
             )
-        case .denied(let reason):
-            throw EffectDenied(effect: child.name, reason: reason)
+        case .denied(let refusal):
+            throw EffectDenied(effect: child.name, refusal: refusal)
         }
     }
 }

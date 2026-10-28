@@ -1,6 +1,10 @@
 import AnyLanguageModel
 
-import Foundation
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 /// Provider-neutral information needed to expose a Hail tool to a model.
 ///
@@ -25,8 +29,8 @@ extension GenerationSchema {
     /// every name in every request, and needs them only to tell definitions apart.
     func withShortDefinitionNames() -> GenerationSchema {
         guard let data = try? JSONEncoder().encode(self),
-            var schema = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let definitions = schema["$defs"] as? [String: Any]
+            case .object(var schema)? = try? JSONDecoder().decode(JSONValue.self, from: data),
+            case .object(let definitions)? = schema["$defs"]
         else { return self }
         var names: [String: String] = [:]
         var taken: Set<String> = []
@@ -41,31 +45,31 @@ extension GenerationSchema {
             taken.insert(short)
             names[name] = short
         }
-        func renamed(_ value: Any) -> Any {
+        func renamed(_ value: JSONValue) -> JSONValue {
             switch value {
-            case let object as [String: Any]:
-                var result: [String: Any] = [:]
+            case .object(let object):
+                var result: [String: JSONValue] = [:]
                 for (key, member) in object {
-                    if key == "$ref", let ref = member as? String, ref.hasPrefix("#/$defs/"),
+                    if key == "$ref", case .string(let ref) = member, ref.hasPrefix("#/$defs/"),
                         let short = names[String(ref.dropFirst("#/$defs/".count))]
                     {
-                        result[key] = "#/$defs/" + short
+                        result[key] = .string("#/$defs/" + short)
                     } else {
                         result[key] = renamed(member)
                     }
                 }
-                return result
-            case let array as [Any]:
-                return array.map(renamed)
+                return .object(result)
+            case .array(let array):
+                return .array(array.map(renamed))
             default:
                 return value
             }
         }
-        var shortened: [String: Any] = [:]
+        var shortened: [String: JSONValue] = [:]
         for (name, definition) in definitions { shortened[names[name] ?? name] = renamed(definition) }
-        schema = renamed(schema) as? [String: Any] ?? schema
-        schema["$defs"] = shortened
-        guard let renamedData = try? JSONSerialization.data(withJSONObject: schema),
+        if case .object(let renamedSchema) = renamed(.object(schema)) { schema = renamedSchema }
+        schema["$defs"] = .object(shortened)
+        guard let renamedData = try? JSONEncoder().encode(JSONValue.object(schema)),
             let result = try? JSONDecoder().decode(GenerationSchema.self, from: renamedData)
         else { return self }
         return result

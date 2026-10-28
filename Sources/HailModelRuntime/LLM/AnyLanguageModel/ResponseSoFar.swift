@@ -1,7 +1,11 @@
 import AnyLanguageModel
 import HailCore
 
-import Foundation
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 /// A response as its snapshots come, each as the snapshot says it: its text, the tools called so
 /// far, and what it used. It answered only if the model wrote after its last tool call; text
@@ -40,7 +44,7 @@ struct ResponseSoFar<Output: Generable> {
         }
         guard case .string(let snapshotText) = snapshot.rawContent.kind else { return }
         let delta = Self.delta(from: snapshotText, after: &text)
-        if !delta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { wroteAfterCalls = calls }
+        if !delta.trimmed().isEmpty { wroteAfterCalls = calls }
     }
 
     /// How the response ended, once its stream did.
@@ -82,19 +86,19 @@ extension GenerationSchema {
     /// choices or pattern: the only thing such an object says, as plain text says it.
     var soleTextProperty: String? {
         guard let data = try? JSONEncoder().encode(self),
-            var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            case .object(var object)? = try? JSONDecoder().decode(JSONValue.self, from: data)
         else { return nil }
-        if let reference = object["$ref"] as? String, let definitions = object["$defs"] as? [String: Any] {
-            guard let definition = definitions[String(reference.dropFirst("#/$defs/".count))] as? [String: Any]
+        if case .string(let reference)? = object["$ref"], case .object(let definitions)? = object["$defs"] {
+            guard case .object(let definition)? = definitions[String(reference.dropFirst("#/$defs/".count))]
             else { return nil }
             object = definition
         }
-        guard object["type"] as? String == "object",
-            let properties = object["properties"] as? [String: Any], properties.count == 1,
-            let (name, value) = properties.first, let property = value as? [String: Any],
-            property["type"] as? String == "string",
+        guard object["type"] == .string("object"),
+            case .object(let properties)? = object["properties"], properties.count == 1,
+            let (name, value) = properties.first, case .object(let property) = value,
+            property["type"] == .string("string"),
             property["enum"] == nil, property["pattern"] == nil, property["const"] == nil,
-            (object["required"] as? [String])?.contains(name) == true
+            case .array(let required)? = object["required"], required.contains(.string(name))
         else { return nil }
         return name
     }

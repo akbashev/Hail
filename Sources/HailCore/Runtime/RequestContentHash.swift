@@ -1,7 +1,11 @@
 import AnyLanguageModel
 import Crypto
 
-import Foundation
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 /// Per-element content digests before provider-specific request serialization.
 ///
@@ -28,7 +32,7 @@ public enum RequestContentHash {
                 input.append(data)
             }
             let digest = Data(SHA256.hash(data: input))
-            digests.append(digest.prefix(8).map { String(format: "%02x", $0) }.joined())
+            digests.append(digest.prefix(8).hexString)
             previous = digest
         }
 

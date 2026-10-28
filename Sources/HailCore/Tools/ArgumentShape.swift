@@ -1,6 +1,10 @@
 import AnyLanguageModel
 
-import Foundation
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 /// Arguments that don't fit a tool's schema, with the first part that doesn't, by its path, such as
 /// `spec.receive[2].actions[0] needs action: one of set, add, …`.
@@ -139,7 +143,7 @@ extension GeneratedContent {
             switch kind {
             case .number: return self
             case .string(let text):
-                if let number = Double(text.trimmingCharacters(in: .whitespaces)) {
+                if let number = Double(text.trimmed(while: { $0.isWhitespace && !$0.isNewline })) {
                     return GeneratedContent(kind: .number(number))
                 }
             default: break
@@ -162,15 +166,20 @@ extension GeneratedContent {
     /// doesn't read is said, not read in part.
     private func readingJSON(opening: Character, at path: String) throws(ArgumentMismatch) -> GeneratedContent {
         guard case .string(let text) = kind else { return self }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = text.trimmed()
         guard trimmed.first == opening else { return self }
         do {
-            _ = try JSONSerialization.jsonObject(with: Data(trimmed.utf8))
+            _ = try JSONDecoder().decode(JSONValue.self, from: Data(trimmed.utf8))
             return try GeneratedContent(json: trimmed)
         } catch {
-            let reason = (error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String ?? "\(error)"
-            throw ArgumentMismatch(description: "\(Self.naming(path)) is JSON text that doesn't read: \(reason)")
+            throw ArgumentMismatch(description: "\(Self.naming(path)) is JSON text that doesn't read: \(Self.reason(error))")
         }
+    }
+
+    /// Why JSON text didn't read, as its decoder says.
+    private static func reason(_ error: any Error) -> String {
+        guard case DecodingError.dataCorrupted(let context) = error else { return "\(error)" }
+        return context.debugDescription
     }
 
     /// The content as written, cut short.

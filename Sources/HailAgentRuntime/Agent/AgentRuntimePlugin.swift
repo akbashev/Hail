@@ -136,10 +136,10 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// side-effect-free: value construction is fine, network calls are not.
     public var turnToolsProvider: TurnToolsProvider?
 
-    /// What decides every effect an agent's turn makes on this node: one authority for the node,
-    /// never one per agent. An agent acts for whoever its turn is for, so the authority decides
-    /// for them, as the host knows who that is.
-    public let authority: any Authority
+    /// What decides every effect an agent's turn makes on a node: one authority for the node,
+    /// made for the node it runs on, never one per agent. An agent acts for whoever its turn is
+    /// for, so the authority decides for them, as the host knows who that is.
+    public let authority: @Sendable (ClusterSystem) -> any Authority
 
     public let workspaceProvider: WorkspaceProvider
 
@@ -180,7 +180,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         routerConfiguration: ModelRouterConfiguration,
         modelEndpointProvider: ModelEndpointProvider? = nil,
         turnToolsProvider: TurnToolsProvider? = nil,
-        authority: any Authority,
+        authority: @escaping @Sendable (ClusterSystem) -> any Authority,
         workspaceProvider: @escaping WorkspaceProvider,
         spawnConfigProvider: @escaping SpawnConfigProvider = { AgentSpawnConfig(agentID: $0) },
         definitionProvider: DefinitionProvider? = nil,

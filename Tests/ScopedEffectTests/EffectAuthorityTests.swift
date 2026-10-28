@@ -217,7 +217,7 @@ struct EffectAuthorityTests {
             Issue.record("expected EffectDenied")
         } catch let denial as EffectDenied {
             #expect(denial.effect == "greeter")
-            #expect(denial.reason == "test refusal")
+            #expect(denial.refusal.reason == "test refusal")
         } catch {
             Issue.record("unexpected error: \(error)")
         }
@@ -278,7 +278,7 @@ struct EffectAuthorityTests {
         let authority = CompositeAuthority()
             .granting(
                 for: DecisionGreeterEffect.self, decide: { _ in .needs }, ask: { _ in .denied("waiting for Ann") })
-        await #expect(throws: EffectDenied(effect: "greeter", reason: "waiting for Ann")) {
+        await #expect(throws: EffectDenied(effect: "greeter", refusal: "waiting for Ann")) {
             try await withEffect(DecisionGreeterEffect(greeting: "Hello"), authority: authority) { token in
                 token.greet("x")
             }
@@ -310,6 +310,19 @@ struct EffectAuthorityTests {
         #expect(asked.withLock { $0 } == 1)
     }
 
+    @Test("A refusal keeps what was refused, as its host encoded it, through a composite's child")
+    func refusalKeepsWhatWasRefused() async {
+        let refused = Data("exactly this".utf8)
+        let authority = CompositeAuthority()
+            .granting(for: ChildRunnableEffect.self) { _ in .denied(EffectRefusal("not here", refused: refused)) }
+        let composed = ComposedEffect(child: ChildRunnableEffect(value: "ok"))
+        // Refused up front, as the composite: it says which child refused, and keeps what it refused.
+        let refusal = EffectRefusal("child-runnable: not here", refused: refused)
+        await #expect(throws: EffectDenied(effect: "composed", refusal: refusal)) {
+            try await withEffect(composed, authority: authority) { token in try await ComposedEffect.run(in: token) }
+        }
+    }
+
     @Test("An intersection asks only the authorities that need asking, and grants when all do")
     func intersectionAsksWhatNeedsAsking() async throws {
         let asked = Mutex<[String]>([])
@@ -328,7 +341,7 @@ struct EffectAuthorityTests {
         #expect(asked.withLock { $0 } == ["host"])
 
         let refusing = IntersectingAuthority([asking("host", .granted), asking("tool", .denied("no"))])
-        await #expect(throws: EffectDenied(effect: "greeter", reason: "no")) {
+        await #expect(throws: EffectDenied(effect: "greeter", refusal: "no")) {
             try await withEffect(DecisionGreeterEffect(greeting: "Hi"), authority: refusing) { token in
                 token.greet("x")
             }

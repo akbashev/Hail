@@ -106,7 +106,7 @@ enum ReadmeExamples {
             turnToolsProvider: { _, _ in
                 TurnTools(tools: [NowTool()])
             },
-            authority: CompositeAuthority.workspaceDefault(root: workspaces),
+            authority: { _ in CompositeAuthority.workspaceDefault(root: workspaces) },
             workspaceProvider: { spawn in
                 AgentWorkspace(rootPath: directory(spawn.workspaceID))
             },

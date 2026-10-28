@@ -50,11 +50,11 @@ public struct ToolCall: Codable, Sendable, Equatable {
     }
 }
 
-public enum ToolFailureKind: String, Codable, Sendable, Equatable {
+public enum ToolFailureKind: Codable, Sendable, Equatable {
     /// The model supplied arguments that cannot be decoded or validated.
     case invalidArguments
-    /// The request was understood but the operation was refused.
-    case rejected
+    /// The request was understood but the operation was refused, as the refusal says.
+    case rejected(EffectRefusal)
     /// The tool could not currently be reached or configured to run.
     case unavailable
     /// The tool ran into an execution failure that is not otherwise classified.

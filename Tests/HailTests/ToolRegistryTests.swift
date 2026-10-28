@@ -90,7 +90,10 @@ struct ToolRegistryTests {
             ToolCall(id: "1", name: "test", arguments: GeneratedContent(properties: [:]))
         ])
 
-        #expect(results[0].failureKind == .rejected)
+        guard case .rejected? = results[0].failureKind else {
+            Issue.record("a call to a tool that doesn't exist wasn't refused")
+            return
+        }
         #expect(
             results[0].output.textRepresentation
                 == "Error: There's no tool `test`. The tools are:\n- test_ping: Check that the command is reachable.")

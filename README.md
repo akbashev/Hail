@@ -201,7 +201,7 @@ let runtime = try AgentRuntimePlugin(
         TurnTools(tools: [NowTool()])
     },
     // Every agent's workspace is a directory under `workspaces`.
-    authority: CompositeAuthority.workspaceDefault(root: workspaces),
+    authority: { _ in CompositeAuthority.workspaceDefault(root: workspaces) },
     workspaceProvider: { spawn in
         // Map the logical id to a directory you control; never splice the raw id into a path.
         AgentWorkspace(rootPath: directory(spawn.workspaceID))

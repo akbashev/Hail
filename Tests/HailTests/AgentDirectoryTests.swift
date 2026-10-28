@@ -42,7 +42,7 @@ struct AgentDirectoryTests {
         let runtime = try AgentRuntimePlugin(
             maxToolRounds: 25,
             routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
-            authority: CompositeAuthority.workspaceDefault(root: "/tmp"),
+            authority: { _ in CompositeAuthority.workspaceDefault(root: "/tmp") },
             workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
             spawnConfigProvider: { agentID in
                 AgentSpawnConfig(agentID: agentID, workspaceID: WorkspaceID("project-A"))
@@ -62,7 +62,7 @@ struct AgentDirectoryTests {
         let runtime = try AgentRuntimePlugin(
             maxToolRounds: 25,
             routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
-            authority: CompositeAuthority.workspaceDefault(root: "/tmp"),
+            authority: { _ in CompositeAuthority.workspaceDefault(root: "/tmp") },
             workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
             spawnConfigProvider: { _ in AgentSpawnConfig(agentID: stranger) },
             modelSelectionProvider: { _ in
@@ -98,7 +98,7 @@ struct AgentDirectoryTests {
         let runtime = try AgentRuntimePlugin(
             maxToolRounds: 25,
             routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
-            authority: CompositeAuthority.workspaceDefault(root: "/tmp"),
+            authority: { _ in CompositeAuthority.workspaceDefault(root: "/tmp") },
             workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
             modelSelectionProvider: { _ in
                 ModelConfiguration(model: try AgentModel("test/model"))
@@ -125,7 +125,7 @@ struct AgentDirectoryTests {
         let runtime = try AgentRuntimePlugin(
             maxToolRounds: 25,
             routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
-            authority: CompositeAuthority.workspaceDefault(root: "/tmp"),
+            authority: { _ in CompositeAuthority.workspaceDefault(root: "/tmp") },
             workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
             modelSelectionProvider: { _ in
                 ModelConfiguration(model: try AgentModel("test/model"))
@@ -152,7 +152,7 @@ struct AgentDirectoryTests {
             try AgentRuntimePlugin(
                 maxToolRounds: 0,
                 routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
-                authority: CompositeAuthority.workspaceDefault(root: "/tmp"),
+                authority: { _ in CompositeAuthority.workspaceDefault(root: "/tmp") },
                 workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
                 modelSelectionProvider: { _ in
                     ModelConfiguration(model: try AgentModel("test/model"))

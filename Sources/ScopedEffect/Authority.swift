@@ -5,11 +5,47 @@
 /// point, the only thing that knows both concepts.
 import Synchronization
 
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
+
+/// Why an effect may not run: in words, and what was refused as the host encodes it, so whoever
+/// the call is for can act on it. A refusal written as a string says only why.
+public struct EffectRefusal: Codable, Sendable, Equatable, ExpressibleByStringInterpolation, CustomStringConvertible {
+    public let reason: String
+    /// What was refused, as the host encodes it: empty when it says only why.
+    public let refused: Data
+
+    public init(_ reason: String, refused: Data = Data()) {
+        self.reason = reason
+        self.refused = refused
+    }
+
+    public init(stringLiteral reason: String) {
+        self.init(reason)
+    }
+
+    public init(stringInterpolation: DefaultStringInterpolation) {
+        self.init(String(stringInterpolation: stringInterpolation))
+    }
+
+    public var description: String { reason }
+
+    /// Refusals as one: each one's reason, and what the first that says what was refused refused.
+    public static func joined(_ refusals: [EffectRefusal]) -> EffectRefusal {
+        EffectRefusal(
+            refusals.map(\.reason).joined(separator: "; "),
+            refused: refusals.first { !$0.refused.isEmpty }?.refused ?? Data())
+    }
+}
+
 /// A pure decision over one effect configuration: granted, denied, or one the authority can't
 /// make from what it holds, which only an answer to asking gives.
 public enum EffectDecision: Sendable, Equatable {
     case granted
-    case denied(String)
+    case denied(EffectRefusal)
     /// It has to be asked: ``Authority/ask(about:)`` gives the answer.
     case needs
 }
@@ -17,13 +53,13 @@ public enum EffectDecision: Sendable, Equatable {
 /// What an authority answers, asked about an activation its decision said needs asking.
 public enum EffectAnswer: Sendable, Equatable {
     case granted
-    case denied(String)
+    case denied(EffectRefusal)
 
     /// The answer as the decision it comes to.
     public var decision: EffectDecision {
         switch self {
         case .granted: .granted
-        case .denied(let reason): .denied(reason)
+        case .denied(let refusal): .denied(refusal)
         }
     }
 }
@@ -82,28 +118,28 @@ public struct IntersectingAuthority: Authority {
     }
 
     public func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision {
-        var denials: [String] = []
+        var denials: [EffectRefusal] = []
         var needs = false
         for authority in authorities {
             switch authority.decision(on: effect) {
             case .granted: break
-            case .denied(let reason): denials.append(reason)
+            case .denied(let refusal): denials.append(refusal)
             case .needs: needs = true
             }
         }
-        if !denials.isEmpty { return .denied(denials.joined(separator: "; ")) }
+        if !denials.isEmpty { return .denied(.joined(denials)) }
         return needs ? .needs : .granted
     }
 
     /// Asks each member whose decision needs asking: granted only when every one of them grants.
     public func ask<Effect: ScopedEffect>(about effect: Effect) async -> EffectAnswer {
-        var denials: [String] = []
+        var denials: [EffectRefusal] = []
         for authority in authorities where authority.decision(on: effect) == .needs {
-            if case .denied(let reason) = await authority.ask(about: effect) {
-                denials.append(reason)
+            if case .denied(let refusal) = await authority.ask(about: effect) {
+                denials.append(refusal)
             }
         }
-        return denials.isEmpty ? .granted : .denied(denials.joined(separator: "; "))
+        return denials.isEmpty ? .granted : .denied(.joined(denials))
     }
 }
 
@@ -184,18 +220,18 @@ public struct CompositeAuthority: Authority {
 }
 
 /// Thrown when an ``Authority`` refuses to open a scope.
-public struct EffectDenied: Error, Equatable, Sendable, CustomStringConvertible {
+public struct EffectDenied: Error, Codable, Equatable, Sendable, CustomStringConvertible {
     /// The denied effect's ``ScopedEffect/name``.
     public let effect: String
-    /// Why the authority refused.
-    public let reason: String
+    /// Why the authority refused, and what it refused.
+    public let refusal: EffectRefusal
 
-    public init(effect: String, reason: String) {
+    public init(effect: String, refusal: EffectRefusal) {
         self.effect = effect
-        self.reason = reason
+        self.refusal = refusal
     }
 
-    public var description: String { "effect '\(effect)' denied: \(reason)" }
+    public var description: String { "effect '\(effect)' denied: \(refusal)" }
 }
 
 /// Reports every effect decision at the scope gate — the audit hook the
@@ -259,8 +295,8 @@ public func withEffect<Effect: ScopedEffect, Result>(
             authority: authority,
             operation: operation
         )
-    case .denied(let reason):
-        throw EffectDenied(effect: effect.name, reason: reason)
+    case .denied(let refusal):
+        throw EffectDenied(effect: effect.name, refusal: refusal)
     }
 }
 
@@ -271,7 +307,7 @@ func answer<Effect: ScopedEffect>(of authority: any Authority, on effect: Effect
     EffectAudit.record(effect, decision)
     switch decision {
     case .granted: return .granted
-    case .denied(let reason): return .denied(reason)
+    case .denied(let refusal): return .denied(refusal)
     case .needs:
         let answer = await authority.ask(about: effect)
         EffectAudit.record(effect, answer.decision)

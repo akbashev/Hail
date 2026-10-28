@@ -578,7 +578,7 @@ public distributed actor Agent: AsyncSequence {
     /// flows into its tool registry and its endpoint. Endpoint creation is scoped to the turn, so no provider resource can carry
     /// authority or configuration across turns.
     private func reasoningLoop(turnID: TurnID = TurnID()) async -> ReasoningLoop<ContinuousClock> {
-        let turnAuthority = actorSystem.agentRuntime.authority
+        let turnAuthority = actorSystem.agentRuntime.authority(actorSystem)
         return ReasoningLoop<ContinuousClock>(
             agentID: state.agentID,
             turnID: turnID,

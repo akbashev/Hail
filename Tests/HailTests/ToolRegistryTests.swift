@@ -96,6 +96,14 @@ struct ToolRegistryTests {
                 == "Error: There's no tool `test`. The tools are:\n- test_ping: Check that the command is reachable.")
     }
 
+    @Test("each command is given by the name it's declared with, as its tool")
+    func commandsAreGivenByTheirNames() {
+        let commands = ParameterlessCommands().commands
+
+        #expect(Array(commands.keys) == ["ping"])
+        #expect(commands["ping"]?.name == "test_ping")
+    }
+
     @Test("parameterless commands receive an empty generated input")
     func parameterlessCommand() async throws {
         let tool = ParameterlessCommands.PingTool(owner: ParameterlessCommands())

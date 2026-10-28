@@ -178,10 +178,12 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
         let groupName = stringArgument(node) ?? inferredName
         var generated: [DeclSyntax] = []
         var tools: [String] = []
+        var named: [String] = []
 
         for command in commands {
             let wrapper = command.name.prefix(1).uppercased() + command.name.dropFirst() + "Tool"
             tools.append("\(wrapper)(owner: self)")
+            named.append(#""\#(command.name)": \#(wrapper)(owner: self)"#)
             let input =
                 command.argumentsType.map { "public typealias Input = \($0)" }
                 ?? "public typealias Input = HailCore.EmptyToolInput"
@@ -217,6 +219,12 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
 
         generated.append(
             DeclSyntax(stringLiteral: "public var tools: [any HailCore.Tool] { [\(tools.joined(separator: ", "))] }"))
+        // Each command by the name it's declared with: what a host offers it as, beside its tool's name.
+        generated.append(
+            DeclSyntax(
+                stringLiteral:
+                    "public var commands: [String: any HailCore.Tool] { [\(named.isEmpty ? ":" : named.joined(separator: ", "))] }"
+            ))
         // The group itself, with what it's for: its commands are offered under it.
         if let description = metadata(node).description {
             generated.append(

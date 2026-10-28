@@ -164,6 +164,8 @@ let read = try await file.runOutput(
 print(read.result.textRepresentation)
 ```
 
+An authority that can't decide from what it holds, such as one that leaves a request to a person, answers `.needs`, and its `ask(about:)` waits for the answer before the effect runs. A composite effect isn't asked itself: each of its children that needs asking is asked when it runs.
+
 ### Keep secrets as references
 
 Agents often need credentials when a tool performs an effect—for example, an HTTP tool calling an API. Passing the API key as a `String` would make it ordinary data that could be copied into prompts, events, logs, or configuration. `SecretRef` stores only a lookup such as an environment-variable name or secret-store ID. The agent requests the operation, the authority controls the network access, and infrastructure resolves the reference only when the tool performs the request.
@@ -198,9 +200,8 @@ let runtime = try AgentRuntimePlugin(
     turnToolsProvider: { _, _ in
         TurnTools(tools: [NowTool()])
     },
-    authorityProvider: { _, workspace in
-        CompositeAuthority.workspaceDefault(root: workspace.rootPath)
-    },
+    // Every agent's workspace is a directory under `workspaces`.
+    authority: CompositeAuthority.workspaceDefault(root: workspaces),
     workspaceProvider: { spawn in
         // Map the logical id to a directory you control; never splice the raw id into a path.
         AgentWorkspace(rootPath: directory(spawn.workspaceID))
@@ -215,7 +216,7 @@ let runtime = try AgentRuntimePlugin(
 )
 ```
 
-An agent's authority is what `authorityProvider` gives that agent, and every turn it runs uses it: no caller widens or narrows it. Input you don't trust goes to an agent whose authority grants less, such as another role the provider gives a narrower `CompositeAuthority`.
+No agent has an authority of its own. An agent acts for whoever its turn is for, so the node's one `authority` decides every effect each turn makes, for them, by what the host knows of the call.
 
 A definition is the agent's role and instructions:
 

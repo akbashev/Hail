@@ -90,12 +90,6 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             _ actorSystem: ClusterSystem
         ) async throws -> TurnTools
 
-    /// Derives the effect ``Authority`` for one agent from its durable spawn
-    /// intent and activation-resolved workspace. The authority — a value of
-    /// closures — is resolved here instead of riding on the `Codable` config.
-    public typealias AuthorityProvider =
-        @Sendable (_ spawnConfig: AgentSpawnConfig, _ workspace: AgentWorkspace) async -> any Authority
-
     /// Derives an agent's configuration from its identity. An agent is
     /// activated by `AgentID` alone — by its owner, another agent messaging
     /// it, or a dashboard reading it — so its configuration must be a host
@@ -142,10 +136,10 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     /// side-effect-free: value construction is fine, network calls are not.
     public var turnToolsProvider: TurnToolsProvider?
 
-    /// Optional closure that derives an agent's effect authority. When nil,
-    /// file effects are pinned to the agent's workspace and everything else
-    /// is open (``CompositeAuthority/workspaceDefault(root:)``).
-    public var authorityProvider: AuthorityProvider?
+    /// What decides every effect an agent's turn makes on this node: one authority for the node,
+    /// never one per agent. An agent acts for whoever its turn is for, so the authority decides
+    /// for them, as the host knows who that is.
+    public let authority: any Authority
 
     public let workspaceProvider: WorkspaceProvider
 
@@ -186,7 +180,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         routerConfiguration: ModelRouterConfiguration,
         modelEndpointProvider: ModelEndpointProvider? = nil,
         turnToolsProvider: TurnToolsProvider? = nil,
-        authorityProvider: AuthorityProvider? = nil,
+        authority: any Authority,
         workspaceProvider: @escaping WorkspaceProvider,
         spawnConfigProvider: @escaping SpawnConfigProvider = { AgentSpawnConfig(agentID: $0) },
         definitionProvider: DefinitionProvider? = nil,
@@ -212,7 +206,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         self.maxToolRounds = maxToolRounds
         self.modelReasoningPolicy = modelReasoningPolicy
         self.turnToolsProvider = turnToolsProvider
-        self.authorityProvider = authorityProvider
+        self.authority = authority
         self.workspaceProvider = workspaceProvider
         self.spawnConfigProvider = spawnConfigProvider
         self.definitionProvider = definitionProvider
@@ -293,17 +287,6 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
             throw .configurationError("Workspace provider returned an empty root")
         }
         return workspace
-    }
-
-    /// Resolves the effect authority for one agent. Defaults to
-    /// ``CompositeAuthority/workspaceDefault(root:)`` — file effects pinned
-    /// to the resolved workspace, everything else open.
-    public func authority(
-        for spawnConfig: AgentSpawnConfig,
-        workspace: AgentWorkspace
-    ) async -> any Authority {
-        await authorityProvider?(spawnConfig, workspace)
-            ?? CompositeAuthority.workspaceDefault(root: workspace.rootPath)
     }
 
     public func definition(for spawnConfig: AgentSpawnConfig) async throws -> AgentDefinition {

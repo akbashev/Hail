@@ -1,10 +1,6 @@
 import AnyLanguageModel
 
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
+import Foundation
 
 /// Arguments that don't fit a tool's schema, with the first part that doesn't, by its path, such as
 /// `spec.receive[2].actions[0] needs action: one of set, add, …`.

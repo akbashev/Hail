@@ -1,8 +1,5 @@
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
+import AsyncHTTPClient
+import Foundation
 
 /// Errors raised while reading Ollama's model metadata.
 public enum OllamaContextWindowError: Error, Sendable, Equatable {
@@ -19,32 +16,30 @@ public enum OllamaContextWindowError: Error, Sendable, Equatable {
 /// this adapter deliberately searches the returned metadata rather than
 /// baking a model-family name into the runtime.
 public enum OllamaContextWindowProvider {
+    /// The most of `/api/show`'s answer that's read.
+    private static let maximumResponseBytes = 16 * 1024 * 1024
+
     public static func resolve(
         model: String,
         baseURL: URL
     ) async throws(OllamaContextWindowError) -> Int {
-        var request = URLRequest(url: baseURL.appendingPathComponent("api/show"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 10
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var request = HTTPClientRequest(url: baseURL.appendingPathComponent("api/show").absoluteString)
+        request.method = .POST
+        request.headers.add(name: "Content-Type", value: "application/json")
         do {
-            request.httpBody = try JSONSerialization.data(
-                withJSONObject: ["model": model],
-                options: []
-            )
+            request.body = .bytes(try JSONSerialization.data(withJSONObject: ["model": model], options: []))
         } catch {
             throw .requestFailed(String(describing: error))
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let response = response as? HTTPURLResponse,
-                (200..<300).contains(response.statusCode)
-            else {
+            let response = try await HTTPClient.shared.execute(request, timeout: .seconds(10))
+            guard (200..<300).contains(response.status.code) else {
                 throw OllamaContextWindowError.invalidResponse
             }
+            let body = try await response.body.collect(upTo: maximumResponseBytes)
 
-            let object = try JSONSerialization.jsonObject(with: data)
+            let object = try JSONSerialization.jsonObject(with: Data(body.readableBytesView))
             guard let contextLength = contextLength(in: object) else {
                 throw OllamaContextWindowError.missingContextLength
             }

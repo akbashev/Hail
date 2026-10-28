@@ -1,10 +1,6 @@
 import AnyLanguageModel
 
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
+import Foundation
 
 /// Provider-neutral information needed to expose a Hail tool to a model.
 ///

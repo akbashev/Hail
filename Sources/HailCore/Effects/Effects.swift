@@ -1,3 +1,5 @@
+import AsyncHTTPClient
+import NIOCore
 import ScopedEffect
 import Subprocess
 
@@ -13,9 +15,6 @@ import Subprocess
     import SystemPackage
 #endif
 
-#if canImport(FoundationNetworking)
-    import FoundationNetworking
-#endif
 #if canImport(Foundation)
     import Foundation
 #endif
@@ -295,7 +294,7 @@ public struct NetworkRequest: Sendable, Equatable {
     public let body: Data?
     public let maximumResponseBytes: Int
     /// When present, redirects are allowed only to these normalized hosts.
-    /// nil preserves ordinary URLSession redirect behavior.
+    /// nil follows every redirect.
     public let allowedHosts: Set<String>?
 
     public init(
@@ -341,6 +340,7 @@ public enum NetworkDependencyError: Error, Equatable, Sendable {
     case invalidURL
     case invalidResponse
     case responseTooLarge
+    case tooManyRedirects
 }
 
 /// The actual HTTP boundary used by ``NetworkEffect.run(in:)``.
@@ -358,73 +358,65 @@ public struct NetworkDependency: Sendable {
     }
 
     public static let live = Self { request in
-        guard let url = URL(string: request.url) else {
+        guard var url = URL(string: request.url) else {
             throw NetworkDependencyError.invalidURL
         }
-
-        var urlRequest = URLRequest(url: url)
-        urlRequest.httpMethod = request.method
-        urlRequest.httpBody = request.body
-        for (name, value) in request.headers {
-            urlRequest.setValue(value, forHTTPHeaderField: name)
+        let allowedHosts = request.allowedHosts.map { Set($0.map(normalized)) }
+        var method = request.method
+        var body = request.body
+        for _ in 0...maximumRedirects {
+            var outgoing = HTTPClientRequest(url: url.absoluteString)
+            outgoing.method = .init(rawValue: method)
+            for (name, value) in request.headers {
+                outgoing.headers.add(name: name, value: value)
+            }
+            if let body { outgoing.body = .bytes(body) }
+            let response = try await client.execute(outgoing, timeout: .seconds(60))
+            // A redirect is followed to where it points, unless that's a host the request may not
+            // reach: then the redirect itself is what came back.
+            if [301, 302, 303, 307, 308].contains(response.status.code),
+                let location = response.headers.first(name: "Location"),
+                let next = URL(string: location, relativeTo: url)?.absoluteURL,
+                allowedHosts.map({ allowed in next.host.map { allowed.contains(normalized($0)) } ?? false }) ?? true
+            {
+                // As browsers do: a 303, or a POST moved by a 301 or 302, is fetched again with GET.
+                if response.status.code == 303 || ([301, 302].contains(response.status.code) && method == "POST") {
+                    method = "GET"
+                    body = nil
+                }
+                url = next
+                continue
+            }
+            let collected: ByteBuffer
+            do {
+                collected = try await response.body.collect(upTo: request.maximumResponseBytes)
+            } catch is NIOTooManyBytesError {
+                throw NetworkDependencyError.responseTooLarge
+            }
+            let headers = response.headers.reduce(into: [String: String]()) { result, header in
+                result[header.name] = result[header.name].map { "\($0), \(header.value)" } ?? header.value
+            }
+            return NetworkResponse(
+                statusCode: Int(response.status.code),
+                headers: headers,
+                body: Data(collected.readableBytesView)
+            )
         }
-
-        let redirectPolicy = NetworkRedirectPolicy(allowedHosts: request.allowedHosts)
-        let session = URLSession(
-            configuration: .default,
-            delegate: redirectPolicy,
-            delegateQueue: nil
-        )
-        defer { session.finishTasksAndInvalidate() }
-        let (body, response) = try await session.data(for: urlRequest)
-        guard let response = response as? HTTPURLResponse else {
-            throw NetworkDependencyError.invalidResponse
-        }
-        guard body.count <= request.maximumResponseBytes else {
-            throw NetworkDependencyError.responseTooLarge
-        }
-
-        let headers = response.allHeaderFields.reduce(into: [String: String]()) { result, item in
-            guard let key = item.key as? String else { return }
-            result[key] = String(describing: item.value)
-        }
-        return NetworkResponse(
-            statusCode: response.statusCode,
-            headers: headers,
-            body: body
-        )
-    }
-}
-
-private final class NetworkRedirectPolicy: NSObject, URLSessionTaskDelegate {
-    private let allowedHosts: Set<String>?
-
-    init(allowedHosts: Set<String>?) {
-        self.allowedHosts = allowedHosts?.map { Self.normalize($0) }
-            .reduce(into: Set<String>()) { $0.insert($1) }
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        guard let allowedHosts else {
-            completionHandler(request)
-            return
-        }
-        guard let host = request.url?.host,
-            allowedHosts.contains(Self.normalize(host))
-        else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(request)
+        throw NetworkDependencyError.tooManyRedirects
     }
 
-    private static func normalize(_ host: String) -> String {
+    /// How many redirects one request follows.
+    private static let maximumRedirects = 20
+
+    /// The client every request goes through: a browser's settings, but with redirects followed
+    /// here, so that one to a host the request may not reach is refused.
+    private static let client: HTTPClient = {
+        var configuration = HTTPClient.Configuration.singletonConfiguration
+        configuration.redirectConfiguration = .disallow
+        return HTTPClient(eventLoopGroup: HTTPClient.defaultEventLoopGroup, configuration: configuration)
+    }()
+
+    private static func normalized(_ host: String) -> String {
         host.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
     }
 }

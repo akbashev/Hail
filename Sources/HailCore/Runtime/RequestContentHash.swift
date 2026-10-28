@@ -1,11 +1,7 @@
 import AnyLanguageModel
-import CryptoKit
+import Crypto
 
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
+import Foundation
 
 /// Per-element content digests before provider-specific request serialization.
 ///

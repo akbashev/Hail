@@ -2,11 +2,7 @@ import AnyLanguageModel
 import HailCore
 import Tokenizers
 
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
+import Foundation
 
 /// Counts the model-visible representation using a Hugging Face tokenizer and
 /// its configured chat template. The endpoint should use the same template

@@ -62,9 +62,11 @@ extension ProviderFailures {
             default: break
             }
         }
-        if let error = error as? LlamaLanguageModelError, error == .promptExceedsContextWindow {
-            return .failed(.contextLengthExceeded)
-        }
+        #if Llama
+            if let error = error as? LlamaLanguageModelError, error == .promptExceedsContextWindow {
+                return .failed(.contextLengthExceeded)
+            }
+        #endif
         if Self.isUnreached(error) { return .unreached(.requestFailed(String(describing: error))) }
         return .failed(.requestFailed(String(describing: error)))
     }

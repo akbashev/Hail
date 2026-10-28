@@ -13,6 +13,9 @@ let package = Package(
         .library(name: "HailCompaction", targets: ["HailCompaction"]),
         .library(name: "ScopedEffect", targets: ["ScopedEffect"]),
     ],
+    traits: [
+        .trait(name: "Llama", description: "Local GGUF models run by llama.cpp, which builds only for Apple platforms.")
+    ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "509.0.0"..<"605.0.0"),
         .package(url: "https://github.com/apple/swift-distributed-actors.git", branch: "main"),
@@ -21,7 +24,7 @@ let package = Package(
         .package(
             url: "https://github.com/huggingface/AnyLanguageModel.git",
             from: "1.1.0",
-            traits: ["AsyncHTTPClient", "Llama"]
+            traits: ["AsyncHTTPClient", .trait(name: "Llama", condition: .when(traits: ["Llama"]))]
         ),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),
         .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "1.0.0"),

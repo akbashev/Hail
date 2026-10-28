@@ -151,6 +151,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         return [.instructions(Transcript.Instructions(segments: [], toolDefinitions: definitions))] + entries
     }
 
+    #if Llama
     public static func llamaCPP(
         model: String,
         modelPath: String,
@@ -175,6 +176,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             failures: .swiftErrors
         )
     }
+    #endif
 
     public func stream<Input, Output>(
         request: ModelRequest<Input>,
@@ -346,6 +348,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     }
 }
 
+#if Llama
 public actor LlamaCPPEndpointCache {
     private struct Key: Hashable {
         let modelPath: String
@@ -390,6 +393,7 @@ public actor LlamaCPPEndpointCache {
         )
     }
 }
+#endif
 
 // MARK: - The agent's session, from inside the request
 

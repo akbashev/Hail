@@ -16,8 +16,7 @@ import ScopedEffect
 /// one model-facing string.
 @Tool(
     "now",
-    description:
-        "Get the current time in an explicit IANA timezone. Always provide time_zone, for example Europe/Berlin. Never infer it from the server or from a message timestamp."
+    description: "The current time in an IANA time zone."
 )
 public struct NowTool {
     public init() {}

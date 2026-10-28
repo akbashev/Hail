@@ -1,6 +1,12 @@
 import HailCore
 import HailModelRuntime
 
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
+
 #if canImport(FoundationEssentials)
     import FoundationEssentials
 #else
@@ -45,7 +51,11 @@ public enum PortFinder {
     ) -> Int? {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
+        #if os(Linux)
+            hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+        #else
+            hints.ai_socktype = SOCK_STREAM
+        #endif
 
         var info: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, port, &hints, &info) == 0, let addrList = info else {

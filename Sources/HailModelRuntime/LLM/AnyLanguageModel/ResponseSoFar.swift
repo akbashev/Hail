@@ -1,11 +1,7 @@
 import AnyLanguageModel
 import HailCore
 
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
+import Foundation
 
 /// A response as its snapshots come, each as the snapshot says it: its text, the tools called so
 /// far, and what it used. It answered only if the model wrote after its last tool call; text

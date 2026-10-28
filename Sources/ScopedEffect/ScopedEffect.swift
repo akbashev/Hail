@@ -32,8 +32,9 @@ public protocol CompositeScopedEffect: ScopedEffect {
 }
 
 extension CompositeScopedEffect {
-    /// Grants only when every declared child effect is granted; denials name
-    /// the refusing children.
+    /// Grants unless a declared child effect is denied; denials name the refusing children. A
+    /// child that needs asking is asked when it runs, in ``EffectToken/withChild(_:operation:)``,
+    /// so it's asked once.
     public func decision(using authority: any Authority) -> EffectDecision {
         let denials = childEffects.compactMap { child -> String? in
             guard case .denied(let reason) = authority.decision(on: child) else { return nil }
@@ -198,9 +199,7 @@ public struct EffectToken<Effect: ScopedEffect>: ~Escapable, ~Sendable {
         _ child: Child,
         operation: (borrowing EffectToken<Child>) async throws -> Result
     ) async throws -> Result {
-        let decision = authority.decision(on: child)
-        EffectAudit.record(child, decision)
-        switch decision {
+        switch await answer(of: authority, on: child) {
         case .granted:
             return try await _withEffectUnchecked(
                 child,

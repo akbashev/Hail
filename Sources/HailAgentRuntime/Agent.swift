@@ -71,9 +71,6 @@ public distributed actor Agent: AsyncSequence {
     /// starts mid-deactivation — registration otherwise happens only on
     /// activation.
     let spawnConfig: AgentSpawnConfig
-    /// The effect authority this agent's tools are scoped against, resolved
-    /// once at activation from the runtime plugin's provider.
-    let authority: any Authority
     private let _agentID: AgentID
 
     /// The actor's identity, for observers mapping receptionist guests back to
@@ -122,10 +119,6 @@ public distributed actor Agent: AsyncSequence {
         self.agentDirectoryID = spawnConfig.agentDirectoryID
         self.interruptedTurns = spawnConfig.interruptedTurns
         self.spawnConfig = spawnConfig
-        self.authority = await actorSystem.agentRuntime.authority(
-            for: spawnConfig,
-            workspace: workspace
-        )
 
         // The virtual actor and its event-sourced state share one canonical
         // identity. A separate persistence key could drift and revive the same
@@ -581,11 +574,11 @@ public distributed actor Agent: AsyncSequence {
     /// activation-scoped dependencies; the closures hop back onto this actor,
     /// so turns keep journaling and activity streaming through this instance.
     ///
-    /// The turn runs under the agent's plugin-derived authority, which flows into its tool registry
-    /// and its endpoint. Endpoint creation is scoped to the turn, so no provider resource can carry
+    /// The turn runs under the node's authority, which decides for whoever the turn is for, and
+    /// flows into its tool registry and its endpoint. Endpoint creation is scoped to the turn, so no provider resource can carry
     /// authority or configuration across turns.
     private func reasoningLoop(turnID: TurnID = TurnID()) async -> ReasoningLoop<ContinuousClock> {
-        let turnAuthority = await actorSystem.agentRuntime.authority(for: spawnConfig, workspace: workspace)
+        let turnAuthority = actorSystem.agentRuntime.authority
         return ReasoningLoop<ContinuousClock>(
             agentID: state.agentID,
             turnID: turnID,
@@ -697,7 +690,7 @@ public distributed actor Agent: AsyncSequence {
     /// a tool registered while this agent was idle must appear on its very
     /// next turn. Rebuilding is cheap: value-type tool construction plus the
     /// providers' journal replays, against turns that are seconds apart.
-    /// A turn builds under the agent's plugin-derived `authority`.
+    /// A turn builds under the node's `authority`.
     private func takeSession(
         authority: any Authority,
         turnContext: AgentTurnContext

@@ -97,6 +97,7 @@ enum ReadmeExamples {
 
     static func host(
         definitions: [Role: AgentDefinition],
+        workspaces: String,
         directory: @escaping @Sendable (WorkspaceID) -> String
     ) throws -> AgentRuntimePlugin {
         try AgentRuntimePlugin(
@@ -105,9 +106,7 @@ enum ReadmeExamples {
             turnToolsProvider: { _, _ in
                 TurnTools(tools: [NowTool()])
             },
-            authorityProvider: { _, workspace in
-                CompositeAuthority.workspaceDefault(root: workspace.rootPath)
-            },
+            authority: CompositeAuthority.workspaceDefault(root: workspaces),
             workspaceProvider: { spawn in
                 AgentWorkspace(rootPath: directory(spawn.workspaceID))
             },

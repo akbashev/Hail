@@ -66,6 +66,20 @@ private struct ParentEffect: ScopedEffect {
     }
 }
 
+/// An effect built from a child, which it runs.
+private struct ComposedEffect: CompositeScopedEffect {
+    typealias Output = String
+
+    let name = "composed"
+    let child: ChildRunnableEffect
+
+    var childEffects: [any ScopedEffect] { [child] }
+
+    static func run(in token: borrowing EffectToken<ComposedEffect>) async throws -> String {
+        try await token.run(token.withConfiguration { $0.child })
+    }
+}
+
 extension EffectToken where Effect == DecisionGreeterEffect {
     func greet(_ who: String) -> String {
         withConfiguration { "\($0.greeting), \(who)!" }
@@ -247,6 +261,78 @@ struct EffectAuthorityTests {
         }
 
         #expect(value == "ok")
+    }
+
+    @Test("An effect that needs asking waits for the answer, and runs once it's granted")
+    func askedEffectRunsOnGrant() async throws {
+        let authority = CompositeAuthority()
+            .granting(for: DecisionGreeterEffect.self, decide: { _ in .needs }, ask: { _ in .granted })
+        let greeting = try await withEffect(DecisionGreeterEffect(greeting: "Hello"), authority: authority) { token in
+            token.greet("Ann")
+        }
+        #expect(greeting == "Hello, Ann!")
+    }
+
+    @Test("An answer that refuses throws EffectDenied with its reason, before any token exists")
+    func askedEffectRefused() async {
+        let authority = CompositeAuthority()
+            .granting(
+                for: DecisionGreeterEffect.self, decide: { _ in .needs }, ask: { _ in .denied("waiting for Ann") })
+        await #expect(throws: EffectDenied(effect: "greeter", reason: "waiting for Ann")) {
+            try await withEffect(DecisionGreeterEffect(greeting: "Hello"), authority: authority) { token in
+                token.greet("x")
+            }
+        }
+        // Needing asking with no one to ask is no answer: denied.
+        let unanswered = CompositeAuthority().granting(for: DecisionGreeterEffect.self) { _ in .needs }
+        await #expect(throws: EffectDenied.self) {
+            try await withEffect(DecisionGreeterEffect(greeting: "Hello"), authority: unanswered) { token in
+                token.greet("x")
+            }
+        }
+    }
+
+    @Test("A composite's child that needs asking is asked once, when it runs")
+    func compositeChildIsAskedWhenItRuns() async throws {
+        let asked = Mutex(0)
+        let authority = CompositeAuthority()
+            .granting(
+                for: ChildRunnableEffect.self, decide: { _ in .needs },
+                ask: { _ in
+                    asked.withLock { $0 += 1 }
+                    return .granted
+                })
+        let composed = ComposedEffect(child: ChildRunnableEffect(value: "ok"))
+        let value = try await withEffect(composed, authority: authority) { token in
+            try await ComposedEffect.run(in: token)
+        }
+        #expect(value == "ok")
+        #expect(asked.withLock { $0 } == 1)
+    }
+
+    @Test("An intersection asks only the authorities that need asking, and grants when all do")
+    func intersectionAsksWhatNeedsAsking() async throws {
+        let asked = Mutex<[String]>([])
+        func asking(_ name: String, _ answer: EffectAnswer) -> CompositeAuthority {
+            CompositeAuthority().granting(
+                for: DecisionGreeterEffect.self, decide: { _ in .needs },
+                ask: { _ in
+                    asked.withLock { $0.append(name) }
+                    return answer
+                })
+        }
+        let granting = CompositeAuthority().grantingAll(for: DecisionGreeterEffect.self)
+        let both = IntersectingAuthority([granting, asking("host", .granted)])
+        #expect(both.decision(on: DecisionGreeterEffect(greeting: "Hi")) == .needs)
+        _ = try await withEffect(DecisionGreeterEffect(greeting: "Hi"), authority: both) { token in token.greet("x") }
+        #expect(asked.withLock { $0 } == ["host"])
+
+        let refusing = IntersectingAuthority([asking("host", .granted), asking("tool", .denied("no"))])
+        await #expect(throws: EffectDenied(effect: "greeter", reason: "no")) {
+            try await withEffect(DecisionGreeterEffect(greeting: "Hi"), authority: refusing) { token in
+                token.greet("x")
+            }
+        }
     }
 
     // The observer is process-global and EffectAuditStressTests swaps it too;

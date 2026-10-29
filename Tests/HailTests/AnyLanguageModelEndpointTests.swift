@@ -109,6 +109,37 @@ struct AnyLanguageModelEndpointTests {
         #expect(forecast.text == "It's sunny.")
     }
 
+    @Test("a reply written as JSON in a Markdown fence is that JSON")
+    func aFencedJSONReplyIsItsJSON() async {
+        for (fenced, expected) in [
+            ("```json\n{\"text\": \"It's sunny.\"}\n```", "It's sunny."),
+            ("```\n{\"text\": \"It's \\\"sunny\\\".\"}\n```\n", "It's \"sunny\"."),
+        ] {
+            let endpoint = AnyLanguageModelEndpoint(
+                languageModel: ProseLanguageModel(text: fenced),
+                modelIdentifier: "test",
+                temperature: 0,
+                failures: .swiftErrors
+            )
+            var events: [ModelEvent<Forecast>] = []
+            for await event in endpoint.stream(
+                request: ModelRequest(
+                    input: "hello", entries: [.prompt(.init(segments: [.text(.init(content: "hello"))]))]),
+                tools: [],
+                authority: FullAuthority(),
+                generating: Forecast.self,
+                purpose: .generation
+            ) {
+                events.append(event)
+            }
+            guard case .generated(let forecast)? = events.last else {
+                Issue.record("Expected the JSON's reply, got \(events.map { String(describing: $0) })")
+                continue
+            }
+            #expect(forecast.text == expected)
+        }
+    }
+
     @Test("prose for a reply of more than its text ends as an answer out of shape, with what it wrote")
     func aTypedRequestAnsweredInProseIsOutOfShape() async {
         let endpoint = AnyLanguageModelEndpoint(

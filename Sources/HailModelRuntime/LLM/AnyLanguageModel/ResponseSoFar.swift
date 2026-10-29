@@ -55,6 +55,10 @@ struct ResponseSoFar<Output: Generable> {
             return .answered(try Output(last.raw))
         } catch {
             guard case .string(let text) = last.raw.kind else { return .outOfShape(written: last.raw.jsonString) }
+            // JSON in a Markdown fence is that JSON: a model that fences its answer still answers.
+            if let json = Self.fenced(text), let output = try? Output(GeneratedContent(json: json)) {
+                return .answered(output)
+            }
             // Plain text is all an object of one text property can say, so it says that.
             if let property = Output.generationSchema.soleTextProperty,
                 let output = try? Output(GeneratedContent(properties: [property: text]))
@@ -63,6 +67,16 @@ struct ResponseSoFar<Output: Generable> {
             }
             return .outOfShape(written: text)
         }
+    }
+
+    /// What `text` holds when it's all one Markdown code block, ```` ```json ```` or a bare fence:
+    /// the block's lines; `nil` for anything else.
+    static func fenced(_ text: String) -> String? {
+        let lines = text.trimmed().split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count >= 2, let first = lines.first, let last = lines.last, first.hasPrefix("```"),
+            String(last).trimmed() == "```"
+        else { return nil }
+        return lines.dropFirst().dropLast().joined(separator: "\n")
     }
 
     /// What a snapshot adds to the text before it: the suffix after `accumulated`.

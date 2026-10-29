@@ -39,6 +39,55 @@ struct ToolRegistryTests {
         #expect(report.memories.map { $0.value } == ["Haar"])
     }
 
+    /// A tool told apart by what it says it does.
+    struct Saying: HailCore.Tool {
+        typealias Input = EmptyToolInput
+        let name: String
+        let description: String
+
+        func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
+
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
+            .text(description)
+        }
+    }
+
+    /// A tool whose call changes what there is: from then on, the root offers `offering`.
+    struct Changing: HailCore.Tool {
+        typealias Input = EmptyToolInput
+        let name = "change"
+        let description = "Changes what there is."
+        let offering: [Saying]
+
+        func effect(for input: Input) throws -> ClockEffect { ClockEffect() }
+
+        func run(_ input: Input, in scope: borrowing ToolScope<Never>, token: borrowing EffectToken<ClockEffect>)
+            async throws -> CallReturn
+        {
+            CallReturn.text("Changed.").offering(offering)
+        }
+    }
+
+    /// A call that changes what there is offers the root's tools again, in the same turn: each in
+    /// place of the root's tool of its name, a new one beside them.
+    @Test("a call's result offers the root's tools again")
+    func aResultOffersTheRootsToolsAgain() async throws {
+        var session = AgentSession()
+        session.register(tools: [
+            Saying(name: "pick", description: "Picks from a."),
+            Changing(offering: [
+                Saying(name: "pick", description: "Picks from a and b."),
+                Saying(name: "drop", description: "Drops one."),
+            ]),
+        ])
+        #expect(session.allTools().first { $0.name == "pick" }?.description == "Picks from a.")
+        _ = try await session.execute(ToolCall(id: "1", name: "change", arguments: GeneratedContent(properties: [:])))
+        #expect(session.allTools().first { $0.name == "pick" }?.description == "Picks from a and b.")
+        #expect(session.allTools().map(\.name).sorted() == ["change", "drop", "pick"])
+    }
+
     @Test("schemas are sorted independently of registration order")
     func schemasHaveStableOrder() async {
         var registry = AgentSession()

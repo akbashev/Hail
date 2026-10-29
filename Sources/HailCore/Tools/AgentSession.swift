@@ -331,6 +331,8 @@ public struct AgentSession: ~Copyable, Sendable {
     private mutating func land(
         _ returned: CallReturn, from origin: Origin, under parent: Parent
     ) async -> (address: ToolPageAddress?, page: ToolPage?) {
+        // What the call changed, the root offers as it is now.
+        register(tools: returned.offered)
         switch returned.next {
         case .links(let links):
             if !links.isEmpty {

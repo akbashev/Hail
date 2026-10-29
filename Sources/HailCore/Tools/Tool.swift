@@ -101,6 +101,10 @@ public enum ToolOutput: Codable, Sendable, Equatable {
 public struct CallReturn: Sendable {
     public let result: ToolOutput
     public let next: Next
+    /// Tools of the root, offered from the next call on, each in place of the root's tool of its
+    /// name or beside them: a call that changes what there is, such as what a tool chooses from,
+    /// offers it again as it is now.
+    public private(set) var offered: [any Tool] = []
 
     public enum Next: Sendable {
         /// Tools the model can call next, offered beside the result.
@@ -129,6 +133,13 @@ public struct CallReturn: Sendable {
     /// A page shown as a result: its content, and its links.
     public init(_ page: ToolPage) {
         self.init(page.output, next: .links(page.links))
+    }
+
+    /// This result, offering `tools` at the root from the next call on.
+    public func offering(_ tools: [any Tool]) -> CallReturn {
+        var returned = self
+        returned.offered += tools
+        return returned
     }
 }
 

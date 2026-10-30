@@ -42,12 +42,15 @@ public enum ToolOutput: Codable, Sendable, Equatable {
     case text(String)
     case data(ToolData)
 
-    /// A presentation projection for adapters that can only display text.
+    /// A presentation projection for adapters that can only display text: text-like data is its
+    /// text, as the transcript has it, and other data is described.
     /// The typed value remains available through ``ToolOutput`` itself.
     public var textRepresentation: String {
         switch self {
         case .text(let text):
             return text
+        case .data(let data) where data.isTextLike:
+            return String(decoding: data.body, as: UTF8.self)
         case .data(let data):
             let source = data.source.map { " from \($0.absoluteString)" } ?? ""
             let type = data.normalizedContentType

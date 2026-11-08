@@ -1,13 +1,13 @@
 {
-  "originHash" : "cf2300c925e8ab4bc0c66af3ff19679bc8b8279bf5bbcdde3ad90fad06b8d6ae",
+  "originHash" : "df03cccf7084126d01459e7967f02d9ab922db64d8d30c3a1636f3121a421e8c",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/huggingface/AnyLanguageModel.git",
       "state" : {
-        "revision" : "7d432196ff19f8a2f948ce33c774fba169af0e1e",
-        "version" : "1.1.0"
+        "revision" : "749319da3984e341d89febc32e452054c5bfcf17",
+        "version" : "1.2.0"
       }
     },
     {
@@ -42,8 +42,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/mattt/EventSource",
       "state" : {
-        "revision" : "a3a85a85214caf642abaa96ae664e4c772a59f6e",
-        "version" : "1.4.1"
+        "revision" : "bb4b61273b5a976bb571859c17f903ebc3439df1",
+        "version" : "1.6.0"
       }
     },
     {

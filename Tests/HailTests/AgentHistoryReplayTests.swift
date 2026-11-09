@@ -76,6 +76,25 @@ struct AgentHistoryReplayTests {
         }
     }
 
+    @Test("the journal keeps every turn the agent's working history folds away")
+    func theJournalKeepsFoldedTurns() throws {
+        let events: [AgentHistory.Event] = [
+            .received(input("one"), turn: TurnID("t1")),
+            .replied(.init(content: GeneratedContent("first"), at: Date(timeIntervalSince1970: 1))),
+            .received(input("two", at: 2), turn: TurnID("t2")),
+            .replied(.init(content: GeneratedContent("second"), at: Date(timeIntervalSince1970: 3))),
+            .compacted(
+                .init(context: GeneratedContent("s"), report: GeneratedContent("s")),
+                through: .after(TurnID("t1")), kept: .all),
+        ]
+
+        #expect(try replay(events).history.closed.map(\.id) == [TurnID("t2")])
+        let journal = try AgentHistory(journal: events.map(AgentEvent.history) + [request("r1")])
+        #expect(journal.closed.map(\.id) == [TurnID("t1"), TurnID("t2")])
+        #expect(journal.closed.first?.input == input("one"))
+        #expect(journal.earlier == nil)
+    }
+
     @Test("the runtime state follows what's open and running")
     func runtimeStateIsDerived() throws {
         var state = try replay([.received(input("go"), turn: TurnID("t1"))])

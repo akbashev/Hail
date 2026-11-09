@@ -8,29 +8,29 @@ import HailModelRuntime
 /// caller without the caller conforming to a generic peer protocol.
 ///
 /// `AgentConnection` is intentionally dumb: it only holds a closure. The caller
-/// creates it, passes it to ``Agent/stream(_:connection:)``, and consumes
+/// creates it, passes it to ``Agent/stream(_:through:)``, and consumes
 /// updates through the closure or via ``AgentStream``. Updates include typed
-/// structured partial snapshots as well as the final result.
+/// structured partial snapshots as well as the final result, each with the turn it's of.
 public distributed actor AgentConnection<Output>
 where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
     public typealias ActorSystem = ClusterSystem
 
-    private let onUpdate: @Sendable (AgentRunEvent<Output>) async throws -> Void
+    private let onUpdate: @Sendable (AgentRunUpdate<Output>) async throws -> Void
 
     public init(
         actorSystem: ClusterSystem,
-        onUpdate: @escaping @Sendable (AgentRunEvent<Output>) async throws -> Void
+        onUpdate: @escaping @Sendable (AgentRunUpdate<Output>) async throws -> Void
     ) {
         self.actorSystem = actorSystem
         self.onUpdate = onUpdate
     }
 
-    public distributed func broadcast(_ update: AgentRunEvent<Output>) async throws {
+    public distributed func broadcast(_ update: AgentRunUpdate<Output>) async throws {
         try await onUpdate(update)
     }
 }
 
-/// Local convenience wrapper that exposes an ``AsyncStream`` of ``AgentRunEvent``
+/// Local convenience wrapper that exposes an ``AsyncStream`` of ``AgentRunUpdate``
 /// together with the ``AgentConnection`` that feeds it.
 ///
 /// This matches the `seamless-llms` pattern: callers pull updates from a stream
@@ -40,11 +40,11 @@ public actor AgentStream<Output>
 where Output: Codable & Sendable, Output: Generable, Output.PartiallyGenerated: Codable & Sendable {
     // Immutable and safe to read from outside the actor.
     public nonisolated let connection: AgentConnection<Output>
-    public nonisolated let updates: AsyncStream<AgentRunEvent<Output>>
-    private nonisolated let continuation: AsyncStream<AgentRunEvent<Output>>.Continuation
+    public nonisolated let updates: AsyncStream<AgentRunUpdate<Output>>
+    private nonisolated let continuation: AsyncStream<AgentRunUpdate<Output>>.Continuation
 
     public init(actorSystem: ClusterSystem) {
-        let (stream, continuation) = AsyncStream<AgentRunEvent<Output>>.makeStream()
+        let (stream, continuation) = AsyncStream<AgentRunUpdate<Output>>.makeStream()
         self.updates = stream
         self.continuation = continuation
         self.connection = AgentConnection(actorSystem: actorSystem) { [continuation] update in

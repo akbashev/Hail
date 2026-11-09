@@ -394,7 +394,7 @@ public distributed actor Agent: AsyncSequence {
         let responseTask = Task<Output?, Error> {
             var result: Output?
             for await update in stream.updates {
-                if case .responseRecorded(let content, _) = update {
+                if case .responseRecorded(let content, _) = update.event {
                     result = content
                 }
             }

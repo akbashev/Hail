@@ -41,7 +41,7 @@ enum ReadmeExamples {
         let stream = AgentStream<ChatReply>(actorSystem: system)
         let updates = Task {
             for await update in stream.updates {
-                switch update {
+                switch update.event {
                 case .toolRequested(let call, _):
                     print("Scout called:", call.name)
                 case .responseRecorded(let reply, _):

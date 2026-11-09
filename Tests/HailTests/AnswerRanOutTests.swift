@@ -41,11 +41,21 @@ struct AnswerRanOutTests {
 
         let system = await ClusterSystem("answer-ran-out") { $0.bindPort = Int.random(in: 30_000...40_000) }
         defer { try? system.shutdown() }
-        let connection = AgentConnection<String>(actorSystem: system) { _ in }
+        let updates = UpdateTurns()
+        let connection = AgentConnection<String>(actorSystem: system) { update in await updates.add(update.turn) }
         try await loop.run(
             "weather",
             opening: .received(.init(content: GeneratedContent("weather"), at: Date())),
             through: connection)
+
+        // Every update the run sent names the turn its journal opened.
+        let opened = await journal.events.compactMap { event -> TurnID? in
+            if case .history(.received(_, let turn)) = event { turn } else { nil }
+        }
+        let named = await updates.turns
+        #expect(opened.count == 1)
+        #expect(!named.isEmpty)
+        #expect(named.allSatisfy { $0 == opened.first })
 
         let steps = await journal.events.compactMap { event -> String? in
             guard case .history(let history) = event else { return nil }
@@ -72,6 +82,15 @@ struct AnswerRanOutTests {
         }
         #expect(prompt.segments.description.contains("your answer ran out while you were thinking"))
         #expect(second.reasoning == .disabled)
+    }
+}
+
+/// The turns a run's updates named, in the order they came.
+private actor UpdateTurns {
+    private(set) var turns: [TurnID] = []
+
+    func add(_ turn: TurnID) {
+        turns.append(turn)
     }
 }
 

@@ -156,5 +156,11 @@ let package = Package(
 // approachable concurrency has it: what an actor owns, such as a borrowed effect token, stays on
 // that actor.
 for target in package.targets where target.type != .binary {
-    target.swiftSettings = (target.swiftSettings ?? []) + [.enableUpcomingFeature("NonisolatedNonsendingByDefault")]
+    target.swiftSettings = (target.swiftSettings ?? []) + [
+        .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+        .unsafeFlags([
+            "-Xfrontend", "-warn-long-function-bodies=100",
+            "-Xfrontend", "-warn-long-expression-type-checking=100",
+        ]),
+    ]
 }

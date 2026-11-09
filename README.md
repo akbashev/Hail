@@ -67,13 +67,13 @@ Either agent may be on another node or activated after being idle; the calls rem
 
 ### Watch a turn
 
-`AgentStream` shows the turn you started while it runs, typed: the reply so far as `ChatReply.PartiallyGenerated`, the tools it calls, and the reply.
+`AgentStream` shows the turn you started while it runs, typed: the reply so far as `ChatReply.PartiallyGenerated`, the tools it calls, and the reply. Each update names its turn, the id the agent's history keeps it under.
 
 ```swift
 let stream = AgentStream<ChatReply>(actorSystem: system)
 let updates = Task {
     for await update in stream.updates {
-        switch update {
+        switch update.event {
         case .toolRequested(let call, _):
             print("Scout called:", call.name)
         case .responseRecorded(let reply, _):

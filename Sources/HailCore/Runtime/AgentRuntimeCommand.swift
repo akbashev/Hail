@@ -42,6 +42,20 @@ public struct AgentWorkerReference: Sendable {
     }
 }
 
+/// One update of a run, with the turn it's of: a feed that merges several runs routes and patches
+/// each update by its turn.
+public struct AgentRunUpdate<Output>: Codable, Sendable
+where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
+    /// The turn the run is, as the agent's history records it.
+    public let turn: TurnID
+    public let event: AgentRunEvent<Output>
+
+    public init(turn: TurnID, event: AgentRunEvent<Output>) {
+        self.turn = turn
+        self.event = event
+    }
+}
+
 public enum AgentRunEvent<Output>: Codable, Sendable
 where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
     case runStarted(agentID: AgentID, at: Date)

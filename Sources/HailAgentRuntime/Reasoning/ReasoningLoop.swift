@@ -1256,6 +1256,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
 
     // MARK: - Updates
 
+    /// Sends `update` to `connection`, as of this loop's turn.
     private func broadcast<Output>(
         _ update: AgentRunEvent<Output>,
         to connection: AgentConnection<Output>
@@ -1263,7 +1264,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable & Sendable {
         do {
             log(update: update)
-            try await connection.broadcast(update)
+            try await connection.broadcast(AgentRunUpdate(turn: turnID, event: update))
         } catch {
             logger.debug(
                 "Agent update consumer failed",

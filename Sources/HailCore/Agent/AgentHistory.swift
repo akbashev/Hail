@@ -103,6 +103,19 @@ public struct AgentHistory: Codable, Sendable, Equatable {
 }
 
 extension AgentHistory {
+    /// The whole history `events` tell, every turn kept: the compactions that fold the agent's
+    /// working history are skipped, so each past turn keeps its input, its steps, and how it ended.
+    public init(journal events: some Sequence<AgentEvent>) throws(InvalidEvent) {
+        var history = AgentHistory()
+        for case .history(let event) in events {
+            if case .compacted = event { continue }
+            history = try history.applying(event)
+        }
+        self = history
+    }
+}
+
+extension AgentHistory {
     /// An event the history can't take: replaying one means the journal isn't this agent's.
     public enum InvalidEvent: Error, Sendable, Equatable, Codable {
         /// A turn opened while another still was.

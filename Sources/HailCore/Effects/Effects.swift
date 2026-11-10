@@ -1,6 +1,7 @@
 import AsyncHTTPClient
 import NIOCore
-import ScopedEffect
+import NIOHTTP1
+public import ScopedEffect
 import Subprocess
 
 #if os(macOS)
@@ -16,7 +17,7 @@ import Subprocess
 #endif
 
 #if canImport(Foundation)
-    import Foundation
+    public import Foundation
 #endif
 
 /// Generic effect descriptions used by Hail's tools.

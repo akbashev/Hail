@@ -1,9 +1,9 @@
-import AnyLanguageModel
+public import AnyLanguageModel
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    public import FoundationEssentials
 #else
-    import Foundation
+    public import Foundation
 #endif
 
 public enum AgentEvent: Codable, Sendable {

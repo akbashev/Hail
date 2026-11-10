@@ -1,9 +1,9 @@
-import AnyLanguageModel
+public import AnyLanguageModel
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    public import FoundationEssentials
 #else
-    import Foundation
+    public import Foundation
 #endif
 
 /// The agent's history: who said what to it, and its work on each.

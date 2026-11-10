@@ -1,4 +1,4 @@
-import ScopedEffect
+public import ScopedEffect
 
 /// The complete model configuration selected for one agent turn.
 public struct ModelConfiguration: Sendable, Hashable {

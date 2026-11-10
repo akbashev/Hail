@@ -1,5 +1,11 @@
-import AnyLanguageModel
+public import AnyLanguageModel
 import Synchronization
+
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
 
 /// Indicates whether a token count came from the provider/tokenizer or from a
 /// conservative Hail-side estimate.

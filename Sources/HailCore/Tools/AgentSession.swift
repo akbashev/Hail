@@ -1,5 +1,5 @@
-import AnyLanguageModel
-import ScopedEffect
+public import AnyLanguageModel
+public import ScopedEffect
 
 public struct ToolExecution: Sendable {
     /// What the call did, as the history keeps it.
@@ -477,7 +477,7 @@ extension AnyTool {
         }
     }
 
-    private static func codingPath(_ path: [CodingKey]) -> String {
+    private static func codingPath(_ path: [any CodingKey]) -> String {
         let joined = path.map(\.stringValue).joined(separator: ".")
         return joined.isEmpty ? "<root>" : joined
     }

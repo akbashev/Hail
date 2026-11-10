@@ -1,4 +1,4 @@
-import HailCore
+public import HailCore
 
 /// How far a request got: nothing back yet, the model answering, or tools it called, which ran
 /// in the agent's session.

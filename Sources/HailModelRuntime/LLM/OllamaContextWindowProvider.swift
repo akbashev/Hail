@@ -1,10 +1,12 @@
 import AnyLanguageModel
 import AsyncHTTPClient
+import NIOCore
+import NIOHTTP1
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    public import FoundationEssentials
 #else
-    import Foundation
+    public import Foundation
 #endif
 
 /// Errors raised while reading Ollama's model metadata.

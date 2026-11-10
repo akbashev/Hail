@@ -22,7 +22,7 @@ struct ToolCallsRanOutTests {
     func theTurnAnswersWithoutTools() async throws {
         let journal = Journal()
         let model = CallsPastTheLimit()
-        let definition = try AgentDefinition(role: agentID.role, behavior: .init(systemPrompt: "sys"))
+        let definition = AgentDefinition(role: agentID.role, behavior: .init(systemPrompt: "sys"))
         let context: @Sendable () async -> TurnContext = { [agentID] in
             let promptContext = PromptContext(
                 agentID: agentID, definition: definition,
@@ -40,7 +40,7 @@ struct ToolCallsRanOutTests {
             clock: ContinuousClock(), maxToolRounds: 2)
 
         let system = await ClusterSystem("calls-ran-out") { $0.bindPort = Int.random(in: 30_000...40_000) }
-        defer { try? system.shutdown() }
+        defer { _ = try? system.shutdown() }
         let connection = AgentConnection<String>(actorSystem: system) { _ in }
         try await loop.run(
             "weather",

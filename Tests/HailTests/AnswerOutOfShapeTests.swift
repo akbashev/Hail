@@ -20,7 +20,7 @@ struct AnswerOutOfShapeTests {
 
     private func run(_ model: OutOfShape) async throws -> (steps: [String], requests: [[Transcript.Entry]]) {
         let journal = Journal()
-        let definition = try AgentDefinition(role: agentID.role, behavior: .init(systemPrompt: "sys"))
+        let definition = AgentDefinition(role: agentID.role, behavior: .init(systemPrompt: "sys"))
         let context: @Sendable () async -> TurnContext = { [agentID] in
             let promptContext = PromptContext(
                 agentID: agentID, definition: definition,
@@ -38,7 +38,7 @@ struct AnswerOutOfShapeTests {
             clock: ContinuousClock(), maxToolRounds: 8)
 
         let system = await ClusterSystem("answer-out-of-shape") { $0.bindPort = Int.random(in: 30_000...40_000) }
-        defer { try? system.shutdown() }
+        defer { _ = try? system.shutdown() }
         let connection = AgentConnection<String>(actorSystem: system) { _ in }
         do {
             try await loop.run(

@@ -22,7 +22,7 @@ struct AnswerRanOutTests {
     func theTurnGoesOnFromTheResults() async throws {
         let journal = Journal()
         let model = RunsOutOnce()
-        let definition = try AgentDefinition(role: agentID.role, behavior: .init(systemPrompt: "sys"))
+        let definition = AgentDefinition(role: agentID.role, behavior: .init(systemPrompt: "sys"))
         let context: @Sendable () async -> TurnContext = { [agentID] in
             let promptContext = PromptContext(
                 agentID: agentID, definition: definition,
@@ -40,7 +40,7 @@ struct AnswerRanOutTests {
             clock: ContinuousClock(), maxToolRounds: 8)
 
         let system = await ClusterSystem("answer-ran-out") { $0.bindPort = Int.random(in: 30_000...40_000) }
-        defer { try? system.shutdown() }
+        defer { _ = try? system.shutdown() }
         let updates = UpdateTurns()
         let connection = AgentConnection<String>(actorSystem: system) { update in await updates.add(update.turn) }
         try await loop.run(

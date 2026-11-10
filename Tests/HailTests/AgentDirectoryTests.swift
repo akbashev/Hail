@@ -1,3 +1,4 @@
+import EventSourcing
 import Hail
 import Testing
 

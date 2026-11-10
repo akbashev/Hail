@@ -1,4 +1,4 @@
-import AnyLanguageModel
+public import AnyLanguageModel
 
 #if canImport(FoundationEssentials)
     import FoundationEssentials
@@ -172,7 +172,8 @@ extension GeneratedContent {
             _ = try JSONDecoder().decode(JSONValue.self, from: Data(trimmed.utf8))
             return try GeneratedContent(json: trimmed)
         } catch {
-            throw ArgumentMismatch(description: "\(Self.naming(path)) is JSON text that doesn't read: \(Self.reason(error))")
+            throw ArgumentMismatch(
+                description: "\(Self.naming(path)) is JSON text that doesn't read: \(Self.reason(error))")
         }
     }
 

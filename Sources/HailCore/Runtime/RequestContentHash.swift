@@ -1,4 +1,4 @@
-import AnyLanguageModel
+public import AnyLanguageModel
 import Crypto
 
 #if canImport(FoundationEssentials)

@@ -1,21 +1,13 @@
 import HailCore
 import Synchronization
 
-/// `CheckedContinuation` is not `Sendable`, so it cannot live in the race
-/// state directly. The race resumes it exactly once (guarded by the
-/// completion flag) from exactly one of three paths, so carrying it across
-/// those paths is safe; the box only states that to the compiler.
-private struct ResumeBox<T>: @unchecked Sendable {
-    var continuation: CheckedContinuation<T, any Error>?
-}
-
 /// One-shot race state shared by `withTimeout`'s operation task, its timeout
 /// task, and the caller-cancellation handler. Exactly one path wins and its
 /// outcome is delivered; every terminal path cancels the surviving tasks, so
 /// neither the timeout sleep nor the operation outlives the call.
 private final class TimeoutRace<T: Sendable>: Sendable {
     private struct State: Sendable {
-        var continuation = ResumeBox<T>()
+        var continuation: CheckedContinuation<T, any Error>?
         var operationTask: Task<Void, Never>?
         var timeoutTask: Task<Void, Never>?
         /// The winning path's outcome. Recorded even when no continuation is
@@ -37,7 +29,7 @@ private final class TimeoutRace<T: Sendable>: Sendable {
         timeoutTask: Task<Void, Never>
     ) {
         let terminal = storage.withLock { state -> Result<T, any Error>? in
-            state.continuation.continuation = continuation
+            state.continuation = continuation
             state.operationTask = operationTask
             state.timeoutTask = timeoutTask
             return state.terminal
@@ -53,15 +45,15 @@ private final class TimeoutRace<T: Sendable>: Sendable {
     /// cancel the timeout sleep, which previously ran on to completion. With
     /// no continuation registered yet the outcome is recorded for `register`.
     func finish(with result: Result<T, any Error>) {
-        let (continuation, timeoutTask) = storage.withLock { state in
-            guard state.terminal == nil else { return (ResumeBox<T>(), nil as Task<Void, Never>?) }
+        let (continuation, timeoutTask) = storage.withLock {
+            state -> (CheckedContinuation<T, any Error>?, Task<Void, Never>?) in
+            guard state.terminal == nil else { return (nil, nil) }
             state.terminal = result
-            defer { state.continuation = ResumeBox<T>() }
+            defer { state.continuation = nil }
             return (state.continuation, state.timeoutTask)
         }
         timeoutTask?.cancel()
-        guard let continuation = continuation.continuation else { return }
-        continuation.resume(with: result)
+        continuation?.resume(with: result)
     }
 
     /// The timeout expired: cancel the operation and fail with `TimeoutError`.

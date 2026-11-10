@@ -1,5 +1,5 @@
-import DistributedCluster
-import HailCore
+public import DistributedCluster
+public import HailCore
 import HailModelRuntime
 
 /// Provides context documents for an agent turn without coupling the runtime to

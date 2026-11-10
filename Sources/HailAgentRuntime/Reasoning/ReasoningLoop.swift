@@ -1,8 +1,8 @@
 import AnyLanguageModel
-import HailCore
+public import HailCore
 import HailModelRuntime
-import Logging
-import ScopedEffect
+public import Logging
+public import ScopedEffect
 
 #if canImport(FoundationEssentials)
     import FoundationEssentials
@@ -297,7 +297,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
     /// Resolves the model endpoint from the complete scoped turn context.
     /// This includes the validated provider-session resume handle; the host
     /// must not reread mutable agent state here.
-    let endpoint: @Sendable (TurnContext) async throws(AgentRuntimeError) -> ModelEndpoint
+    let endpoint: @Sendable (TurnContext) async throws(AgentRuntimeError) -> any ModelEndpoint
 
     /// Selects a request-scoped reasoning override without requiring the
     /// endpoint to classify prompt text. The default preserves provider
@@ -448,7 +448,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         context: @escaping @Sendable () async throws(AgentRuntimeError) -> TurnContext,
         rebuildContext:
             @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> TurnContext,
-        endpoint: @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> ModelEndpoint,
+        endpoint: @escaping @Sendable (TurnContext) async throws(AgentRuntimeError) -> any ModelEndpoint,
         modelReasoningPolicy: @escaping ModelReasoningPolicy = { _ in .providerDefault },
         session: @escaping @Sendable (AgentTurnContext) async throws(AgentRuntimeError) -> AgentSession,
         keepSession: @escaping @Sendable (consuming AgentSession) async -> Void = { _ in },
@@ -847,7 +847,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
             )
         }
 
-        var turnContext = try await context()
+        let turnContext = try await context()
         let endpoint = try await self.endpoint(turnContext)
 
         // The input was journaled before `context()` ran, so the assembled
@@ -936,7 +936,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         modelTools: [AnyTool],
         turnSnapshot: TurnContext,
         session: inout AgentSession,
-        endpoint: ModelEndpoint,
+        endpoint: any ModelEndpoint,
         calls: TurnCalls,
         contextRecoveryAttempts: Int = 0,
         noticesGiven: Int = 0,
@@ -1088,7 +1088,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         arrivals: [Arrival],
         schemas: [ToolDefinition],
         turnSnapshot: TurnContext,
-        endpoint: ModelEndpoint,
+        endpoint: any ModelEndpoint,
         compacting: @escaping @Sendable () async -> Void
     ) async throws(AgentRuntimeError) -> TurnRequest<Input> {
         guard compactor != nil else {
@@ -1122,7 +1122,7 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         schemas: [ToolDefinition],
         modelTools: [AnyTool],
         session: inout AgentSession,
-        endpoint: ModelEndpoint,
+        endpoint: any ModelEndpoint,
         calls: TurnCalls,
         thinking: ModelReasoningOverride? = nil,
         through connection: AgentConnection<Output>

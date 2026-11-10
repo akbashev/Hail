@@ -1,9 +1,9 @@
-import HailCore
+public import HailCore
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    public import FoundationEssentials
 #else
-    import Foundation
+    public import Foundation
 #endif
 
 /// The two sources of a model's effective context capacity.

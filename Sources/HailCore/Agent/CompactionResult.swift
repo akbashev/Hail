@@ -1,4 +1,4 @@
-import AnyLanguageModel
+public import AnyLanguageModel
 
 /// The result of applying one compaction policy.
 ///

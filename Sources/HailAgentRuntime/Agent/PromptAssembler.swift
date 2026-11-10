@@ -1,5 +1,5 @@
 import AnyLanguageModel
-import HailCore
+public import HailCore
 import HailModelRuntime
 
 #if canImport(FoundationEssentials)

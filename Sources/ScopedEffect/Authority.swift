@@ -6,9 +6,9 @@
 import Synchronization
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    public import FoundationEssentials
 #else
-    import Foundation
+    public import Foundation
 #endif
 
 /// Why an effect may not run: in words, and what was refused as the host encodes it, so whoever

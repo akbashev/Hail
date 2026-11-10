@@ -43,11 +43,11 @@ public struct ReasoningEffort: Codable, Sendable, Hashable, CustomStringConverti
 
     public var description: String { rawValue }
 
-    public init(from decoder: Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         try self.init(decoder.singleValueContainer().decode(String.self))
     }
 
-    public func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }

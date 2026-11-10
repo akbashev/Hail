@@ -1,5 +1,5 @@
-import AnyLanguageModel
-import ScopedEffect
+public import AnyLanguageModel
+public import ScopedEffect
 import Synchronization
 
 #if canImport(FoundationEssentials)

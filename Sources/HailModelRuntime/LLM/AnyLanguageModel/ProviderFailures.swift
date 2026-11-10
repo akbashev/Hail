@@ -91,7 +91,7 @@ extension ProviderFailures {
 
     /// The wait a response's `Retry-After` asks for, in seconds or until a date.
     static func retryAfter(_ response: HTTPResponse) -> Duration? {
-        guard let value = response.headerFields[.retryAfter]?.trimmingCharacters(in: .whitespaces) else {
+        guard let value = response.headerFields[.retryAfter]?.trimmed() else {
             return nil
         }
         if let seconds = Int(value) { return .seconds(max(seconds, 0)) }

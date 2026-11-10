@@ -370,6 +370,6 @@ public enum HailErrorFormatter {
     }
 
     public static func sanitizedModelOutput(_ output: String) -> String {
-        output.trimmingCharacters(in: .whitespacesAndNewlines)
+        output.trimmed()
     }
 }

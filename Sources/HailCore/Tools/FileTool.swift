@@ -120,7 +120,7 @@ public struct FileTool {
             guard content.contains(oldContent) else {
                 throw ToolError.invalidArgument("old_content", value: "not found in \(path)")
             }
-            let updated = content.replacingOccurrences(of: oldContent, with: newContent)
+            let updated = content.replacing(oldContent, with: newContent)
             try updated.write(to: fullPath, atomically: true, encoding: .utf8)
             return .text("Replaced text in \(path)")
 

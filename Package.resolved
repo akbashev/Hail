@@ -1,5 +1,5 @@
 {
-  "originHash" : "d1271343a5c1142700e05e15b25f90b0985763bbad9f12472f3e15893e6527d5",
+  "originHash" : "56f8103ed9e6e022856e12948ea9fde2fa25ec29b22357f986cd1660af353ffa",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
@@ -25,7 +25,7 @@
       "location" : "https://github.com/akbashev/cluster-event-sourcing.git",
       "state" : {
         "branch" : "turgai-integration",
-        "revision" : "68d432e3d251b381266d9b8bce2d867a1d4fb90c"
+        "revision" : "c85a6e7de34c53ca3d42b61d077873b9de1a1015"
       }
     },
     {

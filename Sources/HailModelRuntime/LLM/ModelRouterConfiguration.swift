@@ -75,7 +75,7 @@ public struct ModelRouterConfiguration: Sendable {
         }
         var normalizedAPIKeys: [AgentModelProvider: String] = [:]
         for (provider, key) in apiKeys {
-            let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = key.trimmed()
             guard !normalized.isEmpty else {
                 throw .emptyAPIKey(provider)
             }

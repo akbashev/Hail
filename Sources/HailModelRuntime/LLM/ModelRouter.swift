@@ -57,7 +57,7 @@ public actor ModelRouter {
     /// The router only normalizes surrounding whitespace. Model defaults are
     /// application configuration and must be resolved before this boundary.
     private func effectiveModelIdentifier(_ model: String) -> String {
-        model.trimmingCharacters(in: .whitespacesAndNewlines)
+        model.trimmed()
     }
 
     private func makeEndpoint(

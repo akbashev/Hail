@@ -25,7 +25,7 @@ public struct ToolData: Codable, Sendable, Equatable {
     public var normalizedContentType: String {
         contentType?.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
             .first
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .map { $0.trimmed().lowercased() }
             ?? "application/octet-stream"
     }
 
@@ -251,7 +251,7 @@ public struct ToolGroup: ToolPages {
 
     /// Up to and including the first full stop that ends a sentence, or all of it.
     static func firstSentence(of text: String) -> String {
-        guard let end = text.range(of: ". ") else { return text }
+        guard let end = text.firstRange(of: ". ") else { return text }
         return String(text[..<end.lowerBound]) + "."
     }
 }

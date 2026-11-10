@@ -15,7 +15,7 @@ public struct AgentModelProvider: RawRepresentable, Codable, Sendable, Hashable,
     public let rawValue: String
 
     public init(rawValue: String) {
-        self.rawValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.rawValue = rawValue.trimmed()
     }
 
     public init(stringLiteral value: String) { self.init(rawValue: value) }
@@ -60,7 +60,7 @@ public struct AgentModel: Codable, Sendable, Hashable, CustomStringConvertible {
         guard !provider.rawValue.isEmpty else {
             throw .missingProvider(provider.rawValue)
         }
-        let rawID = id.rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawID = id.rawValue.trimmed()
         guard !rawID.isEmpty else {
             throw .missingID(provider.rawValue)
         }
@@ -69,7 +69,7 @@ public struct AgentModel: Codable, Sendable, Hashable, CustomStringConvertible {
     }
 
     public init(_ identifier: String) throws(AgentModelError) {
-        let identifier = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identifier = identifier.trimmed()
         guard !identifier.isEmpty else { throw .empty }
         let parts = identifier.split(
             separator: "/",

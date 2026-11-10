@@ -16,7 +16,7 @@ public struct ReasoningEffort: Codable, Sendable, Hashable, CustomStringConverti
 
     /// Creates a validated effort identifier.
     public init(_ rawValue: String) throws(ReasoningEffortError) {
-        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = rawValue.trimmed()
         guard !normalized.isEmpty else { throw .empty }
         self.rawValue = normalized
     }

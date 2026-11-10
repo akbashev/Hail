@@ -1,5 +1,5 @@
-import AnyLanguageModel
-import ScopedEffect
+public import AnyLanguageModel
+public import ScopedEffect
 
 /// A place as it is now: what the model reads there, and the tools it can call next. A call still
 /// working shows one in its scope; a page at an address is opened by its host whenever it's shown.

@@ -137,8 +137,8 @@ struct CompactionFailurePolicyTests {
         }
     }
 
-    private func definition() throws -> AgentDefinition {
-        try AgentDefinition(
+    private func definition() -> AgentDefinition {
+        AgentDefinition(
             role: agentID.role,
             behavior: .init(
                 systemPrompt: "sys"
@@ -215,7 +215,7 @@ struct CompactionFailurePolicyTests {
     func compactsAfterTheTurn() async throws {
         let compactor = RecordingCompactor()
         let loop = makeLoop(
-            definition: try definition(), events: EventLog(), compactor: compactor,
+            definition: definition(), events: EventLog(), compactor: compactor,
             reported: ContextUsage(usedTokens: 14_000, limitTokens: 16_384, source: .reported))
 
         await loop.compactAfterTurn()
@@ -225,7 +225,7 @@ struct CompactionFailurePolicyTests {
 
     @Test("a threshold-triggered compaction failure continues the turn un-compacted")
     func thresholdFailureContinuesTurn() async throws {
-        let definition = try definition()
+        let definition = definition()
         let events = EventLog()
         let loop = makeLoop(definition: definition, events: events, compactor: ThrowingCompactor())
         let turnContext = try turnContext(definition: definition)
@@ -249,7 +249,7 @@ struct CompactionFailurePolicyTests {
 
     @Test("a recovery-triggered compaction failure still fails the request")
     func recoveryFailurePropagates() async throws {
-        let definition = try definition()
+        let definition = definition()
         let events = EventLog()
         let loop = makeLoop(definition: definition, events: events, compactor: ThrowingCompactor())
         let turnContext = try turnContext(definition: definition)

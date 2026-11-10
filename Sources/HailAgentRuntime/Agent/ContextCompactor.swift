@@ -1,5 +1,5 @@
-import AnyLanguageModel
-import HailCore
+public import AnyLanguageModel
+public import HailCore
 
 /// Explicit domain decision returned by a context compactor. “No work” is a
 /// valid decision rather than absence of a result or a suppressed failure.

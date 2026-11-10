@@ -1,17 +1,17 @@
-import AnyLanguageModel
-import Distributed
-import DistributedCluster
-import EventSourcing
-import HailCore
+public import AnyLanguageModel
+public import Distributed
+public import DistributedCluster
+public import EventSourcing
+public import HailCore
 import HailModelRuntime
 import Logging
 import ScopedEffect
-import VirtualActors
+public import VirtualActors
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    public import FoundationEssentials
 #else
-    import Foundation
+    public import Foundation
 #endif
 
 // MARK: - Agent
@@ -153,17 +153,10 @@ public distributed actor Agent: AsyncSequence {
             switch interruptedTurns {
             case .resume:
                 let stream = AgentStream<String>(actorSystem: actorSystem)
-                Task { [weak self] in
-                    guard let self else { return }
+                Task {
                     defer { stream.finish() }
                     do {
-                        try await self.whenLocal { agent in
-                            try await agent.run(
-                                turn.input.content,
-                                opening: .resumed(turn),
-                                through: stream.connection
-                            )
-                        }
+                        try await self.run(turn.input.content, opening: .resumed(turn), through: stream.connection)
                     } catch {
                         actorSystem.log.error(
                             "Interrupted turn replay failed",
@@ -341,7 +334,7 @@ public distributed actor Agent: AsyncSequence {
             case .received: TurnID()
             case .resumed(let turn): turn.id
             }
-        let workTask = Task<Void, Error> { [input, connection] in
+        let workTask = Task<Void, any Error> { [input, connection] in
             let loop = await self.reasoningLoop(turnID: turnID)
             recordActivity(.turn(.started, at: Date()))
             defer { recordActivity(.turn(.completed, at: Date())) }
@@ -363,7 +356,7 @@ public distributed actor Agent: AsyncSequence {
         let afterTask = Task<Void, Never> { [workTask] in
             _ = try? await workTask.value
             await self.reasoningLoop().compactAfterTurn(compacting: { await self.setStatus(.busy(.compacting)) })
-            await self.setStatus(.idle)
+            self.setStatus(.idle)
         }
         // The turn runs in a task of its own; its caller's cancellation reaches it all the same, as
         // it reaches any call the caller awaits.
@@ -391,7 +384,7 @@ public distributed actor Agent: AsyncSequence {
         let stream = AgentStream<Output>(actorSystem: actorSystem)
         defer { stream.finish() }
 
-        let responseTask = Task<Output?, Error> {
+        let responseTask = Task<Output?, any Error> {
             var result: Output?
             for await update in stream.updates {
                 if case .responseRecorded(let content, _) = update.event {

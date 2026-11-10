@@ -15,10 +15,10 @@ public struct AgentModelID: RawRepresentable, Codable, Sendable, Hashable,
     public init(stringLiteral value: String) { self.init(rawValue: value) }
     public var description: String { rawValue }
 
-    public init(from decoder: Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         self.rawValue = try decoder.singleValueContainer().decode(String.self)
     }
-    public func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }
@@ -44,7 +44,7 @@ public struct ModelCatalog: Codable, Sendable, Hashable {
 
     /// Decodes the configuration-facing object map at the boundary, then
     /// keeps provider identifiers typed in the domain value.
-    public init(from decoder: Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let raw = try container.decode([String: [AgentModelID]].self, forKey: .suggestions)
         self.suggestions = raw.reduce(into: [:]) { result, entry in
@@ -54,7 +54,7 @@ public struct ModelCatalog: Codable, Sendable, Hashable {
 
     /// Encodes a configuration-facing object map without making the domain
     /// dictionary itself string-keyed.
-    public func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         let raw = suggestions.reduce(into: [String: [AgentModelID]]()) { result, entry in
             result[entry.key.rawValue] = entry.value

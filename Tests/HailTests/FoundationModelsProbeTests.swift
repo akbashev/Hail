@@ -50,7 +50,7 @@ struct FoundationModelsProbeTests {
 
     @Test("the on-device model counts a request's tokens, its tools included")
     func countsTokens() async throws {
-        guard case .available = await AnyLanguageModel.SystemLanguageModel.default.availability else { return }
+        guard case .available = AnyLanguageModel.SystemLanguageModel.default.availability else { return }
         let endpoint = AnyLanguageModelEndpoint.system(model: "on-device", temperature: 0.2, contextWindow: 4096)
         guard case .available(let count) = endpoint.tokenCounting else {
             Issue.record("Expected the on-device model to count tokens")
@@ -73,7 +73,7 @@ struct FoundationModelsProbeTests {
 
     @Test("live probe of enum tool argument through the on-device model")
     func probe() async throws {
-        let availability = await AnyLanguageModel.SystemLanguageModel.default.availability
+        let availability = AnyLanguageModel.SystemLanguageModel.default.availability
         guard case .available = availability else {
             print("PROBE SKIP: system model unavailable:", String(describing: availability))
             return

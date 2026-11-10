@@ -89,11 +89,11 @@ public struct AgentModel: Codable, Sendable, Hashable, CustomStringConvertible {
     public var identifier: String { "\(provider.rawValue)/\(id.rawValue)" }
     public var description: String { identifier }
 
-    public init(from decoder: Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         try self.init(decoder.singleValueContainer().decode(String.self))
     }
 
-    public func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(identifier)
     }
@@ -186,7 +186,7 @@ public struct AgentDefinition: Codable, Sendable {
             self.execution = execution
         }
 
-        public init(from decoder: Decoder) throws {
+        public init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.systemPrompt = try container.decode(String.self, forKey: .systemPrompt)
 

@@ -1,12 +1,12 @@
-import AnyLanguageModel
-import HailCore
+public import AnyLanguageModel
+public import HailCore
 import Logging
 import Synchronization
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    public import FoundationEssentials
 #else
-    import Foundation
+    public import Foundation
 #endif
 
 /// A `ModelEndpoint` adapter that routes requests through AnyLanguageModel's
@@ -152,30 +152,30 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     }
 
     #if Llama
-    public static func llamaCPP(
-        model: String,
-        modelPath: String,
-        temperature: Double,
-        contextWindow: Int,
-        gpuLayers: Int32 = LlamaLanguageModel.defaultGPULayerCount
-    ) -> Self {
-        var options = GenerationOptions(temperature: temperature)
-        options[custom: LlamaLanguageModel.self] = .init(
-            contextSize: UInt32(contextWindow),
-            temperature: Float(temperature)
-        )
-        return Self(
-            languageModel: LlamaLanguageModel(
-                modelPath: modelPath,
-                gpuLayers: gpuLayers
-            ),
-            modelIdentifier: model,
-            temperature: temperature,
-            effectiveContextWindow: contextWindow,
-            generationOptions: options,
-            failures: .swiftErrors
-        )
-    }
+        public static func llamaCPP(
+            model: String,
+            modelPath: String,
+            temperature: Double,
+            contextWindow: Int,
+            gpuLayers: Int32 = LlamaLanguageModel.defaultGPULayerCount
+        ) -> Self {
+            var options = GenerationOptions(temperature: temperature)
+            options[custom: LlamaLanguageModel.self] = .init(
+                contextSize: UInt32(contextWindow),
+                temperature: Float(temperature)
+            )
+            return Self(
+                languageModel: LlamaLanguageModel(
+                    modelPath: modelPath,
+                    gpuLayers: gpuLayers
+                ),
+                modelIdentifier: model,
+                temperature: temperature,
+                effectiveContextWindow: contextWindow,
+                generationOptions: options,
+                failures: .swiftErrors
+            )
+        }
     #endif
 
     public func stream<Input, Output>(
@@ -349,50 +349,50 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
 }
 
 #if Llama
-public actor LlamaCPPEndpointCache {
-    private struct Key: Hashable {
-        let modelPath: String
-        let gpuLayers: Int32
-    }
-
-    private var models: [Key: LlamaLanguageModel] = [:]
-
-    public init() {}
-
-    public func endpoint(
-        model: String,
-        modelPath: String,
-        temperature: Double,
-        contextWindow: Int,
-        gpuLayers: Int32
-    ) -> AnyLanguageModelEndpoint {
-        let key = Key(
-            modelPath: modelPath,
-            gpuLayers: gpuLayers
-        )
-        let languageModel: LlamaLanguageModel
-        if let loaded = models[key] {
-            languageModel = loaded
-        } else {
-            let loaded = LlamaLanguageModel(modelPath: modelPath, gpuLayers: gpuLayers)
-            models[key] = loaded
-            languageModel = loaded
+    public actor LlamaCPPEndpointCache {
+        private struct Key: Hashable {
+            let modelPath: String
+            let gpuLayers: Int32
         }
-        var options = GenerationOptions(temperature: temperature)
-        options[custom: LlamaLanguageModel.self] = .init(
-            contextSize: UInt32(contextWindow),
-            temperature: Float(temperature)
-        )
-        return AnyLanguageModelEndpoint(
-            languageModel: languageModel,
-            modelIdentifier: model,
-            temperature: temperature,
-            effectiveContextWindow: contextWindow,
-            generationOptions: options,
-            failures: .swiftErrors
-        )
+
+        private var models: [Key: LlamaLanguageModel] = [:]
+
+        public init() {}
+
+        public func endpoint(
+            model: String,
+            modelPath: String,
+            temperature: Double,
+            contextWindow: Int,
+            gpuLayers: Int32
+        ) -> AnyLanguageModelEndpoint {
+            let key = Key(
+                modelPath: modelPath,
+                gpuLayers: gpuLayers
+            )
+            let languageModel: LlamaLanguageModel
+            if let loaded = models[key] {
+                languageModel = loaded
+            } else {
+                let loaded = LlamaLanguageModel(modelPath: modelPath, gpuLayers: gpuLayers)
+                models[key] = loaded
+                languageModel = loaded
+            }
+            var options = GenerationOptions(temperature: temperature)
+            options[custom: LlamaLanguageModel.self] = .init(
+                contextSize: UInt32(contextWindow),
+                temperature: Float(temperature)
+            )
+            return AnyLanguageModelEndpoint(
+                languageModel: languageModel,
+                modelIdentifier: model,
+                temperature: temperature,
+                effectiveContextWindow: contextWindow,
+                generationOptions: options,
+                failures: .swiftErrors
+            )
+        }
     }
-}
 #endif
 
 // MARK: - The agent's session, from inside the request

@@ -1,10 +1,10 @@
-import AnyLanguageModel
-import ScopedEffect
+public import AnyLanguageModel
+public import ScopedEffect
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    public import FoundationEssentials
 #else
-    import Foundation
+    public import Foundation
 #endif
 /// Raw content produced by a tool. It preserves transport data and metadata;
 /// interpreting the MIME type belongs to the model adapter.

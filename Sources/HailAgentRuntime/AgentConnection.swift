@@ -1,7 +1,7 @@
-import AnyLanguageModel
-import Distributed
-import DistributedCluster
-import HailCore
+public import AnyLanguageModel
+public import Distributed
+public import DistributedCluster
+public import HailCore
 import HailModelRuntime
 
 /// A distributed callback handle that lets an agent push live updates to a

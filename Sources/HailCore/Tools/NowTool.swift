@@ -1,5 +1,5 @@
-import AnyLanguageModel
-import ScopedEffect
+public import AnyLanguageModel
+public import ScopedEffect
 
 #if canImport(FoundationEssentials)
     import FoundationEssentials

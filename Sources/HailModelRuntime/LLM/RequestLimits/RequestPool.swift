@@ -1,5 +1,5 @@
-import AnyLanguageModel
-import Foundation
+public import AnyLanguageModel
+public import Foundation
 import HTTPTypes
 
 /// The requests to one provider account in flight at once: at most its limit, the rest waiting

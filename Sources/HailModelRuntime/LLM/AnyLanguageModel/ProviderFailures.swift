@@ -1,6 +1,6 @@
 import AnyLanguageModel
 import HTTPTypes
-import HailCore
+public import HailCore
 
 import struct AsyncHTTPClient.HTTPClientError
 import struct Foundation.URLError

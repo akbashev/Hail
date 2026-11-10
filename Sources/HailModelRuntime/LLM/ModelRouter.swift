@@ -1,6 +1,6 @@
-import AnyLanguageModel
-import HailCore
-import ScopedEffect
+public import AnyLanguageModel
+public import HailCore
+public import ScopedEffect
 
 #if canImport(FoundationEssentials)
     import FoundationEssentials

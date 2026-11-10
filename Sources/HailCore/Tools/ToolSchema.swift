@@ -1,4 +1,4 @@
-import AnyLanguageModel
+public import AnyLanguageModel
 
 /// Small construction helpers for the model schema value supplied by
 /// AnyLanguageModel. The stored schema remains `GenerationSchema`; these

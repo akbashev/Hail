@@ -1,11 +1,11 @@
-import AnyLanguageModel
-import HailCore
-import Tokenizers
+public import AnyLanguageModel
+public import HailCore
+public import Tokenizers
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    public import FoundationEssentials
 #else
-    import Foundation
+    public import Foundation
 #endif
 
 /// Counts the model-visible representation using a Hugging Face tokenizer and

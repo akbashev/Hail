@@ -1,7 +1,7 @@
-import SwiftCompilerPlugin
-import SwiftSyntax
+public import SwiftCompilerPlugin
+public import SwiftSyntax
 import SwiftSyntaxBuilder
-import SwiftSyntaxMacros
+public import SwiftSyntaxMacros
 
 private struct EffectMethod {
     let function: FunctionDeclSyntax
@@ -256,5 +256,5 @@ public struct ToolMacro: MemberMacro, ExtensionMacro {
 
 @main
 struct HailPlugin: CompilerPlugin {
-    let providingMacros: [Macro.Type] = [ToolMacro.self, CommandMacro.self]
+    let providingMacros: [any Macro.Type] = [ToolMacro.self, CommandMacro.self]
 }

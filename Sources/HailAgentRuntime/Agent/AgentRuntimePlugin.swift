@@ -1,9 +1,9 @@
-import DistributedCluster
-import EventSourcing
+public import DistributedCluster
+public import EventSourcing
 import Foundation
-import HailCore
-import HailModelRuntime
-import ScopedEffect
+public import HailCore
+public import HailModelRuntime
+public import ScopedEffect
 
 // MARK: - Directory entry
 

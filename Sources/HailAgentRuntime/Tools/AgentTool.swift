@@ -1,8 +1,9 @@
-import AnyLanguageModel
-import DistributedCluster
-import HailCore
+public import AnyLanguageModel
+public import DistributedCluster
+public import HailCore
 import HailModelRuntime
-import ScopedEffect
+import Logging
+public import ScopedEffect
 import VirtualActors
 
 #if canImport(FoundationEssentials)

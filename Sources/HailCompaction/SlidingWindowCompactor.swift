@@ -1,6 +1,6 @@
-import AnyLanguageModel
-import HailAgentRuntime
-import HailCore
+public import AnyLanguageModel
+public import HailAgentRuntime
+public import HailCore
 
 /// Folds the oldest history into the summary, one compaction request at a time, keeping the most
 /// recent history whole within a share of the window: so an 8K window keeps the last few calls,

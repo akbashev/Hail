@@ -1,5 +1,5 @@
-import CompilerPluginSupport
 // swift-tools-version: 6.4
+import CompilerPluginSupport
 import PackageDescription
 
 let package = Package(
@@ -61,6 +61,7 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")
@@ -76,6 +77,8 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")
@@ -120,6 +123,7 @@ let package = Package(
             name: "HailTests",
             dependencies: [
                 "Hail", "HailCore", "HailModelRuntime", "HailAgentRuntime", "ScopedEffect",
+                .product(name: "EventSourcing", package: "cluster-event-sourcing"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
             ],
             swiftSettings: [
@@ -152,15 +156,28 @@ let package = Package(
     ]
 )
 
-// Every async function runs on its caller's executor unless it says otherwise, as Swift 6.2's
-// approachable concurrency has it: what an actor owns, such as a borrowed effect token, stays on
-// that actor.
+// Swift 7's language, ahead of it. Among it, every async function runs on its caller's executor
+// unless it says otherwise: what an actor owns, such as a borrowed effect token, stays on that actor.
 for target in package.targets where target.type != .binary {
-    target.swiftSettings = (target.swiftSettings ?? []) + [
-        .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
-        .unsafeFlags([
-            "-Xfrontend", "-warn-long-function-bodies=100",
-            "-Xfrontend", "-warn-long-expression-type-checking=100",
-        ]),
-    ]
+    target.swiftSettings =
+        (target.swiftSettings ?? []) + [
+            .enableUpcomingFeature("ExistentialAny"),
+            .enableUpcomingFeature("ImmutableWeakCaptures"),
+            .enableUpcomingFeature("InferIsolatedConformances"),
+            .enableUpcomingFeature("InternalImportsByDefault"),
+            .enableUpcomingFeature("MemberImportVisibility"),
+            .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+        ]
+}
+
+// Code slow to type-check is told, except in tests: each expectation is a macro, and a test of
+// many crosses the limit by itself.
+for target in package.targets where target.type != .binary && target.type != .test {
+    target.swiftSettings =
+        (target.swiftSettings ?? []) + [
+            .unsafeFlags([
+                "-Xfrontend", "-warn-long-function-bodies=100",
+                "-Xfrontend", "-warn-long-expression-type-checking=100",
+            ])
+        ]
 }

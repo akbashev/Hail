@@ -1,5 +1,5 @@
-import AnyLanguageModel
-import HailCore
+public import AnyLanguageModel
+public import HailCore
 
 /// A Hail tool as AnyLanguageModel declares it to the model: its name, description and
 /// parameters. Calls never run here: each one goes, through the session's tool execution

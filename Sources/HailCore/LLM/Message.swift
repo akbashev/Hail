@@ -1,4 +1,4 @@
-import AnyLanguageModel
+public import AnyLanguageModel
 
 #if canImport(FoundationEssentials)
     import FoundationEssentials

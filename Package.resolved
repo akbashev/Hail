@@ -1,13 +1,13 @@
 {
-  "originHash" : "e5601046ea33eea94da59924e1d739afc9dfefd587b240452f5feec3b3678f8a",
+  "originHash" : "0719d74b9efd6569bd1ec87165bc47c481f2581d52ad78c10f32968b582d8750",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/huggingface/AnyLanguageModel.git",
+      "location" : "https://github.com/akbashev/AnyLanguageModel.git",
       "state" : {
-        "revision" : "749319da3984e341d89febc32e452054c5bfcf17",
-        "version" : "1.2.0"
+        "branch" : "feat/ollama-api-key",
+        "revision" : "5697f71f8282247327e4336274a76dfd2cfdad3f"
       }
     },
     {
@@ -53,15 +53,6 @@
       "state" : {
         "revision" : "4c6f2467d5bc72b062c7a9b7e4cd77a09635ea8b",
         "version" : "1.3.1"
-      }
-    },
-    {
-      "identity" : "llama.swift",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/mattt/llama.swift",
-      "state" : {
-        "revision" : "716419d4d7aa542fce301e809cde7234c68ddbc6",
-        "version" : "2.10549.0"
       }
     },
     {

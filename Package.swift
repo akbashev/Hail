@@ -22,8 +22,9 @@ let package = Package(
         .package(url: "https://github.com/akbashev/cluster-virtual-actors.git", branch: "main"),
         .package(url: "https://github.com/akbashev/cluster-event-sourcing.git", branch: "main"),
         .package(
-            url: "https://github.com/huggingface/AnyLanguageModel.git",
-            from: "1.2.0",
+            // Ollama's API key, until huggingface/AnyLanguageModel releases it.
+            url: "https://github.com/akbashev/AnyLanguageModel.git",
+            branch: "feat/ollama-api-key",
             traits: ["AsyncHTTPClient", .trait(name: "Llama", condition: .when(traits: ["Llama"]))]
         ),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),

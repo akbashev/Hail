@@ -59,6 +59,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     public static func ollama(
         model: String,
         baseURL: URL,
+        apiKey: String? = nil,
         temperature: Double,
         contextWindow: Int? = nil,
         keepAlive: String? = nil,
@@ -90,8 +91,15 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                 ollamaOptions["think"] = .bool(thinking == .enabled)
                 options[custom: OllamaLanguageModel.self] = ollamaOptions
             }
+        // A key, for Ollama's cloud; a local server asks for none.
+        let languageModel =
+            if let apiKey {
+                OllamaLanguageModel(baseURL: baseURL, apiKey: apiKey, model: model, transport: transport)
+            } else {
+                OllamaLanguageModel(baseURL: baseURL, model: model, transport: transport)
+            }
         return Self(
-            languageModel: OllamaLanguageModel(baseURL: baseURL, model: model, transport: transport),
+            languageModel: languageModel,
             modelIdentifier: model,
             temperature: temperature,
             effectiveContextWindow: contextWindow,

@@ -1,13 +1,13 @@
 {
-  "originHash" : "56f8103ed9e6e022856e12948ea9fde2fa25ec29b22357f986cd1660af353ffa",
+  "originHash" : "d38ba500bebd77fd1c903f0f252b7dbe25712c48564eaa1461deebe5b945c2c3",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/huggingface/AnyLanguageModel.git",
+      "location" : "https://github.com/akbashev/AnyLanguageModel.git",
       "state" : {
-        "revision" : "749319da3984e341d89febc32e452054c5bfcf17",
-        "version" : "1.2.0"
+        "branch" : "feat/ollama-api-key",
+        "revision" : "5697f71f8282247327e4336274a76dfd2cfdad3f"
       }
     },
     {

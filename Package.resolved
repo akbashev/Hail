@@ -1,13 +1,13 @@
 {
-  "originHash" : "0719d74b9efd6569bd1ec87165bc47c481f2581d52ad78c10f32968b582d8750",
+  "originHash" : "6bb615977544df5dae8d25cc815b97954a5eb3dbc46c98055c0c4121cc7771ae",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/akbashev/AnyLanguageModel.git",
       "state" : {
-        "branch" : "feat/ollama-api-key",
-        "revision" : "5697f71f8282247327e4336274a76dfd2cfdad3f"
+        "branch" : "feat/list-models",
+        "revision" : "c29bae468c69748870f8395f3988ced8c13880d7"
       }
     },
     {

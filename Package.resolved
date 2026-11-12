@@ -1,13 +1,13 @@
 {
-  "originHash" : "65feb91b4f2a28a875a9512f9d37976b4204669380a69f8c493f50889ee778ec",
+  "originHash" : "96addaa02a380fc62f1e992d60662dd0d8933651f6ba93767af906c580ae2c9b",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/akbashev/AnyLanguageModel.git",
+      "location" : "https://github.com/huggingface/AnyLanguageModel.git",
       "state" : {
-        "branch" : "feat/list-models",
-        "revision" : "98ff4a92719bb919863b3afd23d90aa55ba1a04d"
+        "branch" : "main",
+        "revision" : "6f9387a974c5254ac58c918b747f672463d252fb"
       }
     },
     {

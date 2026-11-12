@@ -47,10 +47,12 @@ public struct ModelUsage: Codable, Sendable, Equatable {
 /// The model-visible context occupancy a provider reported or an endpoint measured.
 public struct ContextUsage: Codable, Sendable, Equatable {
     public var usedTokens: Int
-    public var limitTokens: Int
+    /// The model's window, when the endpoint knows it: a provider that doesn't say its window
+    /// still counts what it was sent.
+    public var limitTokens: Int?
     public var source: ModelMeasurementSource
 
-    public init(usedTokens: Int, limitTokens: Int, source: ModelMeasurementSource) {
+    public init(usedTokens: Int, limitTokens: Int?, source: ModelMeasurementSource) {
         self.usedTokens = usedTokens
         self.limitTokens = limitTokens
         self.source = source

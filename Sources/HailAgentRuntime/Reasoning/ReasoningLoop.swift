@@ -591,11 +591,20 @@ struct ReasoningLoop<ClockType: Clock>: Sendable where ClockType.Duration == Dur
         // supported counter that fails is an operation failure, not absence
         // of the capability, and therefore propagates.
         let request = turnContext.preparedRequest.receiving(arrivals).offering(tools)
-        guard let contextWindow = endpoint.effectiveContextWindow else {
-            throw AgentRuntimeError.configurationError(
-                "No context window is configured for model \(endpoint.model); "
-                    + "context compaction requires an explicit model capability."
-            )
+        let contextWindow: Int
+        if let window = endpoint.effectiveContextWindow {
+            contextWindow = window
+        } else if trigger == .contextLengthExceeded {
+            // The provider doesn't say its window, but the last request it took was within it:
+            // compaction fits under that. With none taken yet, the overflow stands.
+            guard let taken = turnContext.latestContextUsage?.usedTokens, taken > 0 else {
+                throw AgentRuntimeError.contextLengthExceeded
+            }
+            contextWindow = taken
+        } else {
+            // Without a window there's no threshold to cross: the provider's refusal starts
+            // compaction.
+            return turnContext
         }
         let budget = try CompactionBudget(contextWindow: contextWindow)
         let measuring: RequestMeasuring

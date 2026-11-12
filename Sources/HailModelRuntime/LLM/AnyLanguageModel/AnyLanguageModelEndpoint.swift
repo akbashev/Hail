@@ -61,7 +61,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         baseURL: URL,
         apiKey: String? = nil,
         temperature: Double,
-        contextWindow: Int? = nil,
+        context: OllamaContext? = nil,
         keepAlive: String? = nil,
         think: Bool? = nil,
         transport: any HTTPTransport = makeDefaultTransport()
@@ -71,8 +71,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         // answers without the prompt's beginning: such a request fails instead, which the
         // endpoint reads as the context being exceeded.
         var ollamaOptions: OllamaLanguageModel.CustomGenerationOptions = ["truncate": .bool(false)]
-        if let contextWindow {
-            ollamaOptions["num_ctx"] = .int(contextWindow)
+        if case .given(let tokens) = context {
+            ollamaOptions["num_ctx"] = .int(tokens)
         }
         if let keepAlive {
             ollamaOptions["keep_alive"] = .string(keepAlive)
@@ -102,7 +102,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             languageModel: languageModel,
             modelIdentifier: model,
             temperature: temperature,
-            effectiveContextWindow: contextWindow,
+            effectiveContextWindow: context?.tokens,
             generationOptions: options,
             reasoningSwitch: reasoningSwitch,
             failures: .ollama
@@ -342,9 +342,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                     source: .reported
                 ))
         ]
-        if let effectiveContextWindow, let final = response.usage,
-            let used = Self.reportedCount(final.input.totalTokenCount)
-        {
+        if let final = response.usage, let used = Self.reportedCount(final.input.totalTokenCount) {
             events.append(
                 .contextUsage(ContextUsage(usedTokens: used, limitTokens: effectiveContextWindow, source: .reported)))
         }
@@ -464,4 +462,19 @@ private actor SessionToolsDelegate: ToolExecutionDelegate {
     func didFailToolCall(
         _ toolCall: Transcript.ToolCall, error: any Error, in session: LanguageModelSession
     ) async {}
+}
+
+/// How much context an Ollama server gives a model.
+public enum OllamaContext: Sendable, Equatable {
+    /// The server gives the model this many tokens, as it's told with `num_ctx`.
+    case given(Int)
+    /// The model's own window, which the server keeps whatever it's told: Ollama's cloud.
+    case own(Int)
+
+    /// How many tokens the model has.
+    public var tokens: Int {
+        switch self {
+        case .given(let tokens), .own(let tokens): tokens
+        }
+    }
 }

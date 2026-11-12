@@ -79,6 +79,7 @@ struct CompactionFailurePolicyTests {
     /// A compactor that records the triggers it's asked with, and leaves the context as it is.
     private final class RecordingCompactor: ContextCompactor, Sendable {
         let triggers = Mutex<[ContextCompactionTrigger]>([])
+        let windows = Mutex<[Int]>([])
 
         func compact<Output: Codable & Sendable & Generable>(
             context: PromptContext,
@@ -93,6 +94,7 @@ struct CompactionFailurePolicyTests {
             trigger: ContextCompactionTrigger
         ) async throws(AgentRuntimeError) -> CompactionDecision<Output> {
             triggers.withLock { $0.append(trigger) }
+            windows.withLock { $0.append(budget.contextWindow) }
             return .unchanged
         }
     }
@@ -101,7 +103,7 @@ struct CompactionFailurePolicyTests {
     /// never reached, so the stream stays unfinished.
     private struct StubEndpoint: ModelEndpoint {
         let model = "test/fake"
-        let effectiveContextWindow: Int? = 16_384
+        var effectiveContextWindow: Int? = 16_384
         let tokenCounting: TokenCounting = .unavailable
 
         func stream<Input: Sendable, Output: Codable & Sendable & Generable>(
@@ -221,6 +223,52 @@ struct CompactionFailurePolicyTests {
         await loop.compactAfterTurn()
 
         #expect(compactor.triggers.withLock { $0 } == [.threshold])
+    }
+
+    @Test("without a window, there's no threshold to cross")
+    func noWindowNoThreshold() async throws {
+        let compactor = RecordingCompactor()
+        let definition = definition()
+        let loop = makeLoop(definition: definition, events: EventLog(), compactor: compactor)
+
+        _ = try await loop.compactIfNeeded(
+            turnContext: try turnContext(definition: definition),
+            endpoint: StubEndpoint(effectiveContextWindow: nil))
+
+        #expect(compactor.triggers.withLock { $0 }.isEmpty)
+    }
+
+    /// A provider that doesn't say its window took the last request: compaction fits under it.
+    @Test("without a window, an overflow compacts within the last request the provider took")
+    func noWindowOverflowFitsTheLastRequestTaken() async throws {
+        let compactor = RecordingCompactor()
+        let definition = definition()
+        let loop = makeLoop(definition: definition, events: EventLog(), compactor: compactor)
+        var context = try turnContext(definition: definition)
+        context.latestContextUsage = ContextUsage(usedTokens: 9_000, limitTokens: nil, source: .reported)
+
+        _ = try await loop.compactIfNeeded(
+            turnContext: context, endpoint: StubEndpoint(effectiveContextWindow: nil),
+            trigger: .contextLengthExceeded)
+
+        #expect(compactor.triggers.withLock { $0 } == [.contextLengthExceeded])
+        #expect(compactor.windows.withLock { $0 } == [9_000])
+    }
+
+    @Test("without a window or a request the provider took, an overflow stands")
+    func noWindowNorRequestTakenOverflowStands() async throws {
+        let compactor = RecordingCompactor()
+        let definition = definition()
+        let loop = makeLoop(definition: definition, events: EventLog(), compactor: compactor)
+        var context = try turnContext(definition: definition)
+        context.latestContextUsage = nil
+
+        await #expect(throws: AgentRuntimeError.contextLengthExceeded) {
+            _ = try await loop.compactIfNeeded(
+                turnContext: context, endpoint: StubEndpoint(effectiveContextWindow: nil),
+                trigger: .contextLengthExceeded)
+        }
+        #expect(compactor.triggers.withLock { $0 }.isEmpty)
     }
 
     @Test("a threshold-triggered compaction failure continues the turn un-compacted")

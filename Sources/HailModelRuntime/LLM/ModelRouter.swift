@@ -211,7 +211,7 @@ public actor ModelRouter {
                 model: modelName,
                 baseURL: baseURL,
                 temperature: configuration.temperature,
-                contextWindow: numContext,
+                context: numContext.map(OllamaContext.given),
                 think: think
             )
 

@@ -84,6 +84,24 @@ struct RequestAttemptsTests {
         #expect(context == ContextUsage(usedTokens: 400, limitTokens: 1000, source: .reported))
         #expect(usage?.inputTokens == 400)
     }
+
+    @Test("a provider that doesn't say its window still has what it was sent counted")
+    func contextUsageWithoutAWindow() async {
+        let endpoint = AnyLanguageModelEndpoint(
+            languageModel: UsageReportingLanguageModel(),
+            modelIdentifier: "test",
+            temperature: 0,
+            failures: .swiftErrors
+        )
+        var context: ContextUsage?
+        for await event in endpoint.stream(
+            request: ModelRequest(input: "hi", entries: [.prompt(.init(segments: [.text(.init(content: "hi"))]))]),
+            tools: [], authority: FullAuthority(), generating: String.self, purpose: .generation
+        ) {
+            if case .contextUsage(let reported) = event { context = reported }
+        }
+        #expect(context == ContextUsage(usedTokens: 400, limitTokens: nil, source: .reported))
+    }
 }
 
 /// Answers once, with 400 tokens of input in its final request.

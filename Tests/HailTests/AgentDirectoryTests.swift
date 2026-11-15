@@ -48,7 +48,7 @@ struct AgentDirectoryTests {
             spawnConfigProvider: { agentID in
                 AgentSpawnConfig(agentID: agentID, workspaceID: WorkspaceID("project-A"))
             },
-            modelSelectionProvider: { _ in
+            modelSelectionProvider: { _, _ in
                 ModelConfiguration(model: try AgentModel("test/model"))
             }
         )
@@ -66,7 +66,7 @@ struct AgentDirectoryTests {
             authority: { _ in CompositeAuthority.workspaceDefault(root: "/tmp") },
             workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
             spawnConfigProvider: { _ in AgentSpawnConfig(agentID: stranger) },
-            modelSelectionProvider: { _ in
+            modelSelectionProvider: { _, _ in
                 ModelConfiguration(model: try AgentModel("test/model"))
             }
         )
@@ -101,7 +101,7 @@ struct AgentDirectoryTests {
             routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
             authority: { _ in CompositeAuthority.workspaceDefault(root: "/tmp") },
             workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
-            modelSelectionProvider: { _ in
+            modelSelectionProvider: { _, _ in
                 ModelConfiguration(model: try AgentModel("test/model"))
             }
         )
@@ -128,7 +128,7 @@ struct AgentDirectoryTests {
             routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
             authority: { _ in CompositeAuthority.workspaceDefault(root: "/tmp") },
             workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
-            modelSelectionProvider: { _ in
+            modelSelectionProvider: { _, _ in
                 ModelConfiguration(model: try AgentModel("test/model"))
             }
         )
@@ -155,7 +155,7 @@ struct AgentDirectoryTests {
                 routerConfiguration: try ModelRouterConfiguration(temperature: 0.7),
                 authority: { _ in CompositeAuthority.workspaceDefault(root: "/tmp") },
                 workspaceProvider: { _ in AgentWorkspace(rootPath: "/tmp") },
-                modelSelectionProvider: { _ in
+                modelSelectionProvider: { _, _ in
                     ModelConfiguration(model: try AgentModel("test/model"))
                 }
             )

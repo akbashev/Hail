@@ -105,10 +105,23 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     public typealias WorkspaceProvider =
         @Sendable (_ spawnConfig: AgentSpawnConfig) async throws(AgentRuntimeError) -> AgentWorkspace
 
-    /// Loads a definition from the host's chosen configuration store. Returning
-    /// `nil` selects Hail's generic role default.
+    /// Loads a definition from the host's chosen configuration store, on the
+    /// node the agent runs on. Returning `nil` selects Hail's generic role
+    /// default.
     public typealias DefinitionProvider =
-        @Sendable (_ spawnConfig: AgentSpawnConfig) async throws -> AgentDefinition?
+        @Sendable (_ spawnConfig: AgentSpawnConfig, _ actorSystem: ClusterSystem) async throws -> AgentDefinition?
+
+    /// Host hook for selecting the complete model configuration used by the
+    /// next turn, on the node the agent runs on. A missing or unavailable
+    /// configuration is an error, not a reason to reuse an older model.
+    public typealias ModelSelectionProvider =
+        @Sendable (_ request: ModelSelectionRequest, _ actorSystem: ClusterSystem) async throws -> ModelConfiguration
+
+    /// Host-owned extension point for model providers not built into Hail, on
+    /// the node the agent runs on. Returning `nil` delegates to Hail's built-in
+    /// provider routing.
+    public typealias ModelEndpointProvider =
+        @Sendable (_ request: ModelEndpointRequest, _ actorSystem: ClusterSystem) async throws -> (any ModelEndpoint)?
 
     public static let pluginKey: Key = "$agentRuntime"
 
@@ -119,7 +132,11 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     private var actorSystem: ClusterSystem!
     private var activeAgentIndex: ActiveAgentIndex?
     private let deliveryTracker: AgentDeliveryTracker
-    private let modelRouter: ModelRouter
+    private let routerConfiguration: ModelRouterConfiguration
+    private let modelEndpointProvider: ModelEndpointProvider?
+    /// The node's model router, made as the plugin starts: the host's endpoints are made on its
+    /// node.
+    private var modelRouter: ModelRouter!
     /// Host-selected ceiling on tool-call rounds within a single turn.
     /// There is intentionally no runtime fallback: this is an application
     /// safety policy supplied at composition time.
@@ -198,10 +215,8 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         guard maxToolRounds > 0 else {
             throw .invalidMaxToolRounds(maxToolRounds)
         }
-        self.modelRouter = ModelRouter(
-            configuration: routerConfiguration,
-            modelEndpointProvider: modelEndpointProvider
-        )
+        self.routerConfiguration = routerConfiguration
+        self.modelEndpointProvider = modelEndpointProvider
         self.deliveryTracker = AgentDeliveryTracker()
         self.maxToolRounds = maxToolRounds
         self.modelReasoningPolicy = modelReasoningPolicy
@@ -290,7 +305,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
     }
 
     public func definition(for spawnConfig: AgentSpawnConfig) async throws -> AgentDefinition {
-        try await definitionProvider?(spawnConfig)
+        try await definitionProvider?(spawnConfig, actorSystem)
             ?? .defaultDefinition(for: spawnConfig.agentID.role)
     }
 
@@ -298,11 +313,7 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
         for agentID: AgentID
     ) async throws(AgentRuntimeError) -> ModelConfiguration {
         do {
-            return try await modelSelectionProvider(
-                ModelSelectionRequest(
-                    agentID: agentID
-                )
-            )
+            return try await modelSelectionProvider(ModelSelectionRequest(agentID: agentID), actorSystem)
         } catch {
             throw .configurationError(
                 "Could not resolve model configuration: \(error)"
@@ -419,6 +430,12 @@ public actor AgentRuntimePlugin: ActorLifecyclePlugin {
 
     public func start(_ system: ClusterSystem) async throws {
         self.actorSystem = system
+        self.modelRouter = ModelRouter(
+            configuration: routerConfiguration,
+            modelEndpointProvider: modelEndpointProvider.map { provider in
+                { @Sendable request in try await provider(request, system) }
+            }
+        )
         self.activeAgentIndex = try await system.singleton.host(name: "\(Self.pluginKey)_active_index") {
             ActiveAgentIndex(actorSystem: $0)
         }

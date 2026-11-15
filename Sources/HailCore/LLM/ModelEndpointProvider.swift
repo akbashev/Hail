@@ -26,12 +26,6 @@ public struct ModelSelectionRequest: Sendable {
     }
 }
 
-/// Host hook for selecting the complete model configuration used by the next
-/// turn. A missing or unavailable configuration is an error, not a reason to
-/// reuse an older model.
-public typealias ModelSelectionProvider =
-    @Sendable (ModelSelectionRequest) async throws -> ModelConfiguration
-
 /// Everything a host needs to construct an endpoint that Hail does not own.
 /// Returning `nil` delegates to Hail's built-in provider routing.
 public struct ModelEndpointRequest: Sendable {

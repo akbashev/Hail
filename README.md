@@ -206,10 +206,10 @@ let runtime = try AgentRuntimePlugin(
         // Map the logical id to a directory you control; never splice the raw id into a path.
         AgentWorkspace(rootPath: directory(spawn.workspaceID))
     },
-    definitionProvider: { spawn in
+    definitionProvider: { spawn, _ in
         definitions[spawn.agentID.role]
     },
-    modelSelectionProvider: { _ in
+    modelSelectionProvider: { _, _ in
         ModelConfiguration(model: try AgentModel("ollama/qwen3:8b"))
     },
     contextCompactor: SlidingWindowCompactor()

@@ -67,7 +67,9 @@ public struct AgentID: Codable, Sendable, Hashable, CustomStringConvertible {
     public var description: String { rawValue }
 }
 
-extension AgentID: RawRepresentable {
+// Not `RawRepresentable`: that would have it written as its raw value, `<role>-<context>`, which
+// can't say where a role with a hyphen ends. It's written as its role and its context, apart.
+extension AgentID {
     public init?(rawValue: String) {
         // A raw agent ID must contain both a role and a context, separated by
         // the first hyphen. Roles must not contain hyphens.

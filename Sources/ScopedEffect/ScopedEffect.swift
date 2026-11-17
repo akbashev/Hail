@@ -28,16 +28,17 @@ public protocol CompositeScopedEffect: ScopedEffect {
     /// they are checked against the same authority at spawn time.
     var childEffects: [any ScopedEffect] { get }
 
-    func decision(using authority: any Authority) -> EffectDecision
+    func decision(using authority: any Authority) async -> EffectDecision
 }
 
 extension CompositeScopedEffect {
     /// Grants only when every declared child effect is granted; denials name the refusing
     /// children, and keep what each refused.
-    public func decision(using authority: any Authority) -> EffectDecision {
-        let denials = childEffects.compactMap { child -> EffectRefusal? in
-            guard case .denied(let refusal) = authority.decision(on: child) else { return nil }
-            return EffectRefusal("\(child.name): \(refusal.reason)", refused: refusal.refused)
+    public func decision(using authority: any Authority) async -> EffectDecision {
+        var denials: [EffectRefusal] = []
+        for child in childEffects {
+            guard case .denied(let refusal) = await authority.decision(on: child) else { continue }
+            denials.append(EffectRefusal("\(child.name): \(refusal.reason)", refused: refusal.refused))
         }
         return denials.isEmpty ? .granted : .denied(.joined(denials))
     }
@@ -88,10 +89,10 @@ public struct CombinedEffect<Left: ScopedEffect, Right: ScopedEffect>:
         self.right = right
     }
 
-    public func decision(using authority: any Authority) -> EffectDecision {
+    public func decision(using authority: any Authority) async -> EffectDecision {
         let decisions = [
-            (left.name, authority.decision(on: left)),
-            (right.name, authority.decision(on: right)),
+            (left.name, await authority.decision(on: left)),
+            (right.name, await authority.decision(on: right)),
         ]
 
         let denials = decisions.compactMap { name, decision -> EffectRefusal? in
@@ -194,7 +195,7 @@ public struct EffectToken<Effect: ScopedEffect>: ~Escapable, ~Sendable {
         _ child: Child,
         operation: (borrowing EffectToken<Child>) async throws -> Result
     ) async throws -> Result {
-        let decision = authority.decision(on: child)
+        let decision = await authority.decision(on: child)
         EffectAudit.record(child, decision)
         switch decision {
         case .granted:

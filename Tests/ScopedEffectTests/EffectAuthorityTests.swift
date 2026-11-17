@@ -90,47 +90,47 @@ extension EffectToken where Effect == DecisionGreeterEffect {
 struct EffectAuthorityTests {
 
     @Test("An empty authority denies by default")
-    func denyByDefault() {
+    func denyByDefault() async {
         let authority = CompositeAuthority()
         #expect(
-            authority.decision(on: DecisionGreeterEffect(greeting: "Hi"))
+            await authority.decision(on: DecisionGreeterEffect(greeting: "Hi"))
                 != .granted
         )
     }
 
     @Test("granting(for:decide:) applies the closure to its domain only")
-    func compositeLookup() {
+    func compositeLookup() async {
         let authority = CompositeAuthority()
             .granting(for: DecisionGreeterEffect.self) { effect in
                 effect.greeting.isEmpty ? .denied("empty greeting") : .granted
             }
 
-        #expect(authority.decision(on: DecisionGreeterEffect(greeting: "Hello")) == .granted)
+        #expect(await authority.decision(on: DecisionGreeterEffect(greeting: "Hello")) == .granted)
         #expect(
-            authority.decision(on: DecisionGreeterEffect(greeting: "")) == .denied("empty greeting")
+            await authority.decision(on: DecisionGreeterEffect(greeting: "")) == .denied("empty greeting")
         )
         // A domain with no closure stays closed.
-        #expect(authority.decision(on: FarewellEffect()) != .granted)
+        #expect(await authority.decision(on: FarewellEffect()) != .granted)
     }
 
     @Test("grantingAll(for:) grants its domain unconditionally")
-    func grantingAll() {
+    func grantingAll() async {
         let authority = CompositeAuthority()
             .grantingAll(for: DecisionGreeterEffect.self)
-        #expect(authority.decision(on: DecisionGreeterEffect(greeting: "")) == .granted)
-        #expect(authority.decision(on: FarewellEffect()) != .granted)
+        #expect(await authority.decision(on: DecisionGreeterEffect(greeting: "")) == .granted)
+        #expect(await authority.decision(on: FarewellEffect()) != .granted)
     }
 
     @Test("Builders return copies and do not mutate the receiver")
-    func valueSemantics() {
+    func valueSemantics() async {
         let base = CompositeAuthority()
         let extended = base.grantingAll(for: DecisionGreeterEffect.self)
-        #expect(base.decision(on: DecisionGreeterEffect(greeting: "Hi")) != .granted)
-        #expect(extended.decision(on: DecisionGreeterEffect(greeting: "Hi")) == .granted)
+        #expect(await base.decision(on: DecisionGreeterEffect(greeting: "Hi")) != .granted)
+        #expect(await extended.decision(on: DecisionGreeterEffect(greeting: "Hi")) == .granted)
     }
 
     @Test("Combined effects delegate authority to every component")
-    func combinedEffects() {
+    func combinedEffects() async {
         let authority = CompositeAuthority()
             .grantingAll(for: DecisionGreeterEffect.self)
             .grantingAll(for: SchedulingEffect.self)
@@ -138,20 +138,20 @@ struct EffectAuthorityTests {
         let requirements = DecisionGreeterEffect(greeting: "Hello")
             .combined(with: SchedulingEffect())
 
-        #expect(authority.decision(on: requirements) == .granted)
+        #expect(await authority.decision(on: requirements) == .granted)
 
         let denied = CompositeAuthority()
             .grantingAll(for: DecisionGreeterEffect.self)
             .granting(for: SchedulingEffect.self) { _ in .denied("scheduler is disabled") }
 
         #expect(
-            denied.decision(on: requirements)
+            await denied.decision(on: requirements)
                 == .denied("scheduler: scheduler is disabled")
         )
     }
 
     @Test("Combined effects compose recursively")
-    func nestedCombinedEffects() {
+    func nestedCombinedEffects() async {
         let requirements = DecisionGreeterEffect(greeting: "Hello")
             .combined(with: SchedulingEffect())
             .combined(with: FarewellEffect())
@@ -162,7 +162,7 @@ struct EffectAuthorityTests {
             .granting(for: FarewellEffect.self) { _ in .denied("farewell is disabled") }
 
         #expect(
-            authority.decision(on: requirements)
+            await authority.decision(on: requirements)
                 == .denied("farewell: farewell is disabled")
         )
     }
@@ -189,10 +189,10 @@ struct EffectAuthorityTests {
     }
 
     @Test("FullAuthority grants any domain")
-    func fullAuthority() {
+    func fullAuthority() async {
         let authority = FullAuthority()
-        #expect(authority.decision(on: DecisionGreeterEffect(greeting: "")) == .granted)
-        #expect(authority.decision(on: FarewellEffect()) == .granted)
+        #expect(await authority.decision(on: DecisionGreeterEffect(greeting: "")) == .granted)
+        #expect(await authority.decision(on: FarewellEffect()) == .granted)
     }
 
     @Test("The gated scope runs on grant and vends a working token")

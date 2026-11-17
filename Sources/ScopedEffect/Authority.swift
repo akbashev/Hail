@@ -57,13 +57,15 @@ public enum EffectDecision: Sendable, Equatable {
 ///
 /// Authority is deny-by-default: the default implementation grants nothing.
 public protocol Authority: Sendable {
-    /// The decision for one concrete effect activation.
-    func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision
+    /// The decision for one concrete effect activation. It may ask another service, such as a
+    /// policy engine or whoever decides for the resource, so it's made as the effect is activated,
+    /// against how things are then.
+    func decision<Effect: ScopedEffect>(on effect: Effect) async -> EffectDecision
 }
 
 extension Authority {
     /// Deny-by-default: an authority that decides nothing decides denial.
-    public func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision {
+    public func decision<Effect: ScopedEffect>(on effect: Effect) async -> EffectDecision {
         .denied("the '\(effect.name)' effect is not granted by this authority")
     }
 }
@@ -74,7 +76,7 @@ extension Authority {
 public struct FullAuthority: Authority {
     public init() {}
 
-    public func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision {
+    public func decision<Effect: ScopedEffect>(on effect: Effect) async -> EffectDecision {
         .granted
     }
 }
@@ -91,10 +93,10 @@ public struct IntersectingAuthority: Authority {
         self.authorities = authorities
     }
 
-    public func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision {
+    public func decision<Effect: ScopedEffect>(on effect: Effect) async -> EffectDecision {
         var denials: [EffectRefusal] = []
         for authority in authorities {
-            if case .denied(let refusal) = authority.decision(on: effect) {
+            if case .denied(let refusal) = await authority.decision(on: effect) {
                 denials.append(refusal)
             }
         }
@@ -139,9 +141,9 @@ public struct CompositeAuthority: Authority {
         granting(for: domain) { _ in .granted }
     }
 
-    public func decision<Effect: ScopedEffect>(on effect: Effect) -> EffectDecision {
+    public func decision<Effect: ScopedEffect>(on effect: Effect) async -> EffectDecision {
         if let composite = effect as? any CompositeScopedEffect {
-            return composite.decision(using: self)
+            return await composite.decision(using: self)
         }
 
         guard let decide = decisions[ObjectIdentifier(Effect.self)] else {
@@ -219,7 +221,7 @@ public func withEffect<Effect: ScopedEffect, Result>(
     isolation: isolated (any Actor)? = #isolation,
     operation: (borrowing EffectToken<Effect>) async throws -> Result
 ) async throws -> Result {
-    let decision = authority.decision(on: effect)
+    let decision = await authority.decision(on: effect)
     EffectAudit.record(effect, decision)
     switch decision {
     case .granted:

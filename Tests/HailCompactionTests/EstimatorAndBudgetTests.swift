@@ -1,15 +1,11 @@
 import AnyLanguageModel
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HailAgentRuntime
 import HailCore
 import Testing
 
 @testable import HailCompaction
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 @Suite("TokenEstimator")
 struct TokenEstimatorTests {

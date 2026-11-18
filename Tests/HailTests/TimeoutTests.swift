@@ -1,12 +1,8 @@
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import Testing
 
 @testable import HailModelRuntime
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// `withTimeout` contract: an operation that beats the ceiling returns
 /// promptly, an operation stuck past the ceiling fails with `TimeoutError`,

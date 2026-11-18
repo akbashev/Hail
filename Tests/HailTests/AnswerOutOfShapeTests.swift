@@ -1,16 +1,12 @@
 import AnyLanguageModel
 import DistributedCluster
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HailCore
 import Synchronization
 import Testing
 
 @testable import HailAgentRuntime
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// A model that answers, but not in the form asked for, is told so in the journal, with what it
 /// wrote, and asked again: the turn answers, or, when it keeps doing so, fails saying why.

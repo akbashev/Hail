@@ -1,16 +1,12 @@
 import AnyLanguageModel
 import DistributedCluster
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HailCore
 import Synchronization
 import Testing
 
 @testable import HailAgentRuntime
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// The same call failing the same way twice in a row isn't run a third time, whatever the
 /// failure, and the turn goes on: the model answers with what it has.

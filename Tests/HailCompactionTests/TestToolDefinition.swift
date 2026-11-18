@@ -1,4 +1,4 @@
-import Hail
+import HailCore
 
 enum TestToolDefinition {
     static func empty(name: String, description: String) -> ToolDefinition {

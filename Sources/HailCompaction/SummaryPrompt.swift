@@ -9,7 +9,7 @@ import HailCore
 
 /// The summarizer's task text.
 ///
-/// A typed compaction report is a ``Generable`` type whose schema and field
+/// A typed compaction report is a `Generable` type whose schema and field
 /// guides are attached to the request's output format; the built-in task
 /// below is the fallback instruction. Recovering the type-level description
 /// for the prompt would require resolving `$defs`/`$ref` shapes here, which

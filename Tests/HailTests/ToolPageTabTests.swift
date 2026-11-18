@@ -1,13 +1,9 @@
 import AnyLanguageModel
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HailCore
 import Synchronization
 import Testing
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// Calls that land on a page: the history keeps what they did and the address; the page is
 /// opened from its address, in one tab per address, whenever it's shown.

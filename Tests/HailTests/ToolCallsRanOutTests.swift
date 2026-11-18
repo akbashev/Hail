@@ -1,16 +1,12 @@
 import AnyLanguageModel
 import DistributedCluster
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HailCore
 import Synchronization
 import Testing
 
 @testable import HailAgentRuntime
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// A turn that made all the tool calls it may make is told so, in the journal, and asked once more
 /// from it, offered no tools: it answers with where the work stands.

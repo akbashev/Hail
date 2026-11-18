@@ -1,12 +1,8 @@
 import AnyLanguageModel
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HailCore
 import Testing
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 @Suite("Tool registry request stability")
 struct ToolRegistryTests {

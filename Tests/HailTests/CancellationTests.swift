@@ -1,16 +1,12 @@
 import AnyLanguageModel
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HailCore
 import ScopedEffect
 import Testing
 
 @testable import HailAgentRuntime
 @testable import HailModelRuntime
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// Cancelling the consumer of a prompt stream must reach the harness: without
 /// a `session/cancel` notification the agent keeps executing fs/terminal

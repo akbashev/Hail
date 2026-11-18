@@ -20,6 +20,15 @@ Tools are answered inside the turn's model request by the agent's `AgentSession`
 
 ## Topics
 
+### Essentials
+
+- <doc:GettingStarted>
+- <doc:TurnsAndHistory>
+- <doc:ToolsAndEffects>
+- <doc:ComposingTheRuntime>
+- <doc:ModelsAndProviders>
+- <doc:CompactingContext>
+
 ### Agents
 
 - ``Agent``

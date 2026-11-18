@@ -6,7 +6,7 @@ import AnyLanguageModel
     import Foundation
 #endif
 
-/// The event-sourced state of an ``Agent``. Kept as a separate value type so
+/// The event-sourced state of an `Agent`. Kept as a separate value type so
 /// the state transition can be tested and replayed without a distributed actor.
 public struct AgentState: Codable, Sendable {
     /// State is the actor-local dashboard projection, not the history store.

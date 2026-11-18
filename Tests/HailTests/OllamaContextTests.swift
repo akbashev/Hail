@@ -1,16 +1,12 @@
 import AnyLanguageModel
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HTTPTypes
 import HailCore
 import Synchronization
 import Testing
 
 @testable import HailModelRuntime
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// How much context an Ollama server gives a model: a server of your own is told; Ollama's cloud
 /// keeps the model's own window, so it isn't; either way compaction knows the window.

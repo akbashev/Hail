@@ -30,7 +30,7 @@ where Output: Codable & Sendable & Generable, Output.PartiallyGenerated: Codable
     }
 }
 
-/// Local convenience wrapper that exposes an ``AsyncStream`` of ``AgentRunUpdate``
+/// Local convenience wrapper that exposes an `AsyncStream` of ``AgentRunUpdate``
 /// together with the ``AgentConnection`` that feeds it.
 ///
 /// This matches the `seamless-llms` pattern: callers pull updates from a stream
@@ -61,7 +61,7 @@ extension AgentStream {
     /// Sends a typed input through this stream's connection. Live updates are
     /// yielded to ``updates``; structured partial snapshots appear as
     /// ``AgentRunEvent/modelOutputPartialUpdated(content:at:)`` events and the
-    /// final response appears as a ``AgentRunEvent/responseRecorded`` event.
+    /// final response appears as a `AgentRunEvent.responseRecorded` event.
     public func send<Input: ConvertibleToGeneratedContent & Codable & Sendable>(
         _ input: Input,
         to agent: Agent

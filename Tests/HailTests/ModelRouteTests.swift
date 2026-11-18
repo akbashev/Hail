@@ -1,12 +1,8 @@
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HailCore
 import HailModelRuntime
 import Testing
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 private actor ContextWindowStore {
     private var values: [AgentID: Int] = [:]
@@ -127,7 +123,7 @@ struct ModelRouteTests {
         ) {
             try ModelRouterConfiguration(
                 temperature: 0.7,
-                baseURLs: [.ollama: URL(fileURLWithPath: "/tmp")]
+                baseURLs: [.ollama: URL(fileURLWithPath: "/tmp", isDirectory: false)]
             )
         }
     }

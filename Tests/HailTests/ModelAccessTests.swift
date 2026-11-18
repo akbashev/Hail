@@ -1,16 +1,12 @@
 import AnyLanguageModel
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HTTPTypes
 import HailCore
 import Synchronization
 import Testing
 
 @testable import HailModelRuntime
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 #if canImport(FoundationModels)
     import FoundationModels

@@ -23,7 +23,7 @@ import Subprocess
 /// Generic effect descriptions used by Hail's tools.
 ///
 /// An effect is inert data. Performing it requires an ``EffectToken`` issued
-/// by ``withEffect(_:authority:)`` after the current authority grants it.
+/// by `withEffect(_:authority:)` after the current authority grants it.
 public struct FileEffect: ScopedEffect, Sendable {
     public enum Action: String, Sendable { case read, write, list }
 
@@ -344,11 +344,11 @@ public enum NetworkDependencyError: Error, Equatable, Sendable {
     case tooManyRedirects
 }
 
-/// The actual HTTP boundary used by ``NetworkEffect.run(in:)``.
+/// The actual HTTP boundary used by `NetworkEffect.run(in:)`.
 ///
 /// It is a dependency rather than part of the effect configuration. The
 /// effect carries only request data; callers cannot obtain this client from an
-/// effect token. Tests can replace it with ``withDependencies``.
+/// effect token. Tests can replace it with `withDependencies`.
 public struct NetworkDependency: Sendable {
     public let send: @Sendable (NetworkRequest) async throws -> NetworkResponse
 

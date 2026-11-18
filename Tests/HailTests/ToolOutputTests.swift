@@ -1,11 +1,7 @@
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import Hail
 import Testing
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// A tool's data, as the model reads it: text it can read as its text, on every path to the model,
 /// and anything else described.

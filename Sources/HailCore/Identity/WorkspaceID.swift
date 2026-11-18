@@ -6,7 +6,7 @@
 /// or the same role serving two different channels) may legitimately share
 /// one `WorkspaceID`; conversely one user may own several workspaces. Hosts
 /// decide what a `WorkspaceID` means — Hail only carries it from the spawn
-/// intent through to the ``AgentRuntimePlugin/WorkspaceProvider`` that
+/// intent through to the `AgentRuntimePlugin.WorkspaceProvider` that
 /// resolves it to a physical location at activation.
 ///
 /// This is a logical identifier, not a filesystem path. It may be journaled

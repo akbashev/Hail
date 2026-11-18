@@ -1,5 +1,5 @@
-# Builds and tests Hail on Linux, x86-64 and arm64, in Swift 6.4's container, and on macOS with
-# Xcode 27.2, where Apple's on-device model is too.
+# Builds and tests Hail on Linux, x86-64 and arm64, in Swift 6.4's container, and on macOS with the
+# image's Xcode 27 and its Swift, where Apple's on-device model is too.
 name: ci
 on:
   push:
@@ -25,8 +25,8 @@ jobs:
     runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
-      - name: Xcode 27.2
-        run: sudo xcode-select -s /Applications/Xcode_27.2.app && swift --version
+      - name: Swift
+        run: swift --version
       - name: test
         timeout-minutes: 30
         run: swift test

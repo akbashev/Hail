@@ -223,7 +223,9 @@ struct AnyLanguageModelEndpointTests {
         }
     }
 
-    @Test("an Ollama model answers within its window, and with none known, as long as Ollama lets it")
+    /// Ollama's cloud refuses an answer size above the model's own most, which it doesn't say, so
+    /// it's sent none there.
+    @Test("an Ollama model answers within the window it's given, and otherwise as long as Ollama lets it")
     func ollamaAnswersWithinItsWindow() {
         let server = URL(string: "http://127.0.0.1:11434")!
         let given = AnyLanguageModelEndpoint.ollama(
@@ -232,7 +234,7 @@ struct AnyLanguageModelEndpointTests {
             model: "llama", baseURL: server, temperature: 0, context: .own(262_144))
         let unknown = AnyLanguageModelEndpoint.ollama(model: "llama", baseURL: server, temperature: 0)
         #expect(given.answerSize == 8192)
-        #expect(own.answerSize == 262_144)
+        #expect(own.answerSize == nil)
         #expect(unknown.answerSize == nil)
     }
 

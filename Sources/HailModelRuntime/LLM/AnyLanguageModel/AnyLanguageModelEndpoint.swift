@@ -108,8 +108,10 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             modelIdentifier: model,
             temperature: temperature,
             effectiveContextWindow: context?.tokens,
-            // An answer can't be longer than the model's window; with none known, Ollama decides.
-            answerSize: context?.tokens,
+            // On a server of your own, an answer can't be longer than the window it's given. Ollama's
+            // cloud runs the model with its own window and refuses a size above the model's own
+            // most, so it decides.
+            answerSize: { if case .given(let tokens) = context { tokens } else { nil } }(),
             generationOptions: options,
             reasoningSwitch: reasoningSwitch,
             failures: .ollama

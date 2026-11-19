@@ -21,9 +21,13 @@ public struct ModelDetails: Sendable, Hashable {
     /// Ollama says the most its model was made for, which a server of your own gives it only as
     /// much memory for as it's told, so how much of it to use is the caller's choice.
     public let contextSize: Int?
+    /// The most tokens one of its answers may take, thinking included, when where it runs says:
+    /// none when it doesn't.
+    public let answerSize: Int?
 
-    public init(contextSize: Int? = nil) {
+    public init(contextSize: Int? = nil, answerSize: Int? = nil) {
         self.contextSize = contextSize
+        self.answerSize = answerSize
     }
 }
 

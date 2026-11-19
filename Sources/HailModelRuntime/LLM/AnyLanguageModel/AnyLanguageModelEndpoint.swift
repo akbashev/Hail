@@ -15,6 +15,9 @@ import Synchronization
 public struct AnyLanguageModelEndpoint: ModelEndpoint {
     public let model: String
     public let effectiveContextWindow: Int?
+    /// The most tokens one answer takes, thinking included: the model's, as where it runs says, or
+    /// the whole window it's given. None leaves it to where the model runs.
+    public let answerSize: Int?
     public let tokenCounting: TokenCounting
     private let languageModel: any LanguageModel
     private let generationOptions: GenerationOptions
@@ -40,6 +43,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         modelIdentifier: String,
         temperature: Double,
         effectiveContextWindow: Int? = nil,
+        answerSize: Int? = nil,
         countTokens: (
             @Sendable ([Transcript.Entry], [ToolDefinition]) async throws(AgentRuntimeError) -> Int
         )? = nil,
@@ -53,6 +57,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         self.generationOptions = generationOptions ?? GenerationOptions(temperature: temperature)
         self.reasoningSwitch = reasoningSwitch
         self.effectiveContextWindow = effectiveContextWindow
+        self.answerSize = answerSize
         self.tokenCounting = countTokens.map(TokenCounting.available) ?? .unavailable
     }
 
@@ -103,6 +108,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
             modelIdentifier: model,
             temperature: temperature,
             effectiveContextWindow: context?.tokens,
+            // An answer can't be longer than the model's window; with none known, Ollama decides.
+            answerSize: context?.tokens,
             generationOptions: options,
             reasoningSwitch: reasoningSwitch,
             failures: .ollama
@@ -180,6 +187,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                 modelIdentifier: model,
                 temperature: temperature,
                 effectiveContextWindow: contextWindow,
+                // An answer can't be longer than the window it's given.
+                answerSize: contextWindow,
                 generationOptions: options,
                 failures: .swiftErrors
             )
@@ -301,10 +310,6 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
     /// turn calling tools without end still stops.
     static let maximumToolRounds = 32
 
-    /// The most one answer takes, thinking included, whoever asks for it: room for a long answer,
-    /// and an end to one that never ends.
-    static let maximumAnswerTokens = 16384
-
     /// A caller that counts its calls stops the request itself: each round makes at least one
     /// call, so the round past its last call is one more than the calls it has left.
     private func options(
@@ -313,7 +318,7 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
         var options = generationOptions
         options.maximumToolRounds = toolCallsLeft.map { $0 + 1 } ?? Self.maximumToolRounds
         switch purpose {
-        case .generation: options.maximumResponseTokens = options.maximumResponseTokens ?? Self.maximumAnswerTokens
+        case .generation: options.maximumResponseTokens = options.maximumResponseTokens ?? answerSize
         case .compaction(let maxOutputTokens): options.maximumResponseTokens = maxOutputTokens
         }
         if thinking != .providerDefault { reasoningSwitch?.apply(thinking, &options) }
@@ -394,6 +399,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                 modelIdentifier: model,
                 temperature: temperature,
                 effectiveContextWindow: contextWindow,
+                // An answer can't be longer than the window it's given.
+                answerSize: contextWindow,
                 generationOptions: options,
                 failures: .swiftErrors
             )

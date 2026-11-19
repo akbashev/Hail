@@ -5,6 +5,12 @@ import Testing
 
 @testable import HailModelRuntime
 
+#if canImport(FoundationEssentials)
+    import FoundationEssentials
+#else
+    import Foundation
+#endif
+
 @Suite("AnyLanguageModel endpoint")
 struct AnyLanguageModelEndpointTests {
     @Generable
@@ -190,6 +196,44 @@ struct AnyLanguageModelEndpointTests {
             ) {}
         }
         #expect(await recorded.temperatures == [1, 0, 0.5])
+    }
+
+    /// An answer takes as much as the model's answer size; none said, as much as where it runs lets
+    /// it, as Hail sets no size of its own.
+    @Test("an answer may take the model's answer size, and with none, what the provider gives it")
+    func anAnswerTakesTheModelsAnswerSize() async {
+        let entries: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: "hello"))]))]
+        for (answerSize, asked) in [(128_000, 128_000), (nil, nil)] as [(Int?, Int?)] {
+            let recorded = RecordedOptions()
+            let endpoint = AnyLanguageModelEndpoint(
+                languageModel: OptionsRecordingLanguageModel(recorded: recorded),
+                modelIdentifier: "test",
+                temperature: 0.5,
+                answerSize: answerSize,
+                failures: .swiftErrors
+            )
+            for await _ in endpoint.stream(
+                request: ModelRequest(input: "hello", entries: entries),
+                tools: [],
+                authority: FullAuthority(),
+                generating: String.self,
+                purpose: .generation
+            ) {}
+            #expect(await recorded.answerSizes == [asked])
+        }
+    }
+
+    @Test("an Ollama model answers within its window, and with none known, as long as Ollama lets it")
+    func ollamaAnswersWithinItsWindow() {
+        let server = URL(string: "http://127.0.0.1:11434")!
+        let given = AnyLanguageModelEndpoint.ollama(
+            model: "llama", baseURL: server, temperature: 0, context: .given(8192))
+        let own = AnyLanguageModelEndpoint.ollama(
+            model: "llama", baseURL: server, temperature: 0, context: .own(262_144))
+        let unknown = AnyLanguageModelEndpoint.ollama(model: "llama", baseURL: server, temperature: 0)
+        #expect(given.answerSize == 8192)
+        #expect(own.answerSize == 262_144)
+        #expect(unknown.answerSize == nil)
     }
 
     /// A request whose model thinks its whole length without answering is asked again without
@@ -514,7 +558,11 @@ private struct ToolCallingLanguageModel: LanguageModel {
 
 private actor RecordedOptions {
     private(set) var temperatures: [Double?] = []
-    func record(_ options: GenerationOptions) { temperatures.append(options.temperature) }
+    private(set) var answerSizes: [Int?] = []
+    func record(_ options: GenerationOptions) {
+        temperatures.append(options.temperature)
+        answerSizes.append(options.maximumResponseTokens)
+    }
 }
 
 /// Answers "ok", recording the options of each request.

@@ -191,7 +191,7 @@ extension ModelAccess {
                         url: AnthropicLanguageModel.defaultBaseURL.appendingPathComponent("v1/models")
                             .appendingPathComponent(model),
                         headerFields: Self.anthropicHeaders(apiKey)))
-                return ModelDetails(contextSize: found.maxInputTokens)
+                return ModelDetails(contextSize: found.maxInputTokens, answerSize: found.maxTokens)
             } catch {
                 throw try ModelUnavailability(asking: error, keyGiven: !apiKey.isEmpty, missingModel: true)
             }
@@ -201,7 +201,7 @@ extension ModelAccess {
                     HTTPRequest(
                         method: .get, url: Self.geminiModels.appendingPathComponent(model),
                         headerFields: Self.geminiHeaders(apiKey)))
-                return ModelDetails(contextSize: found.inputTokenLimit)
+                return ModelDetails(contextSize: found.inputTokenLimit, answerSize: found.outputTokenLimit)
             } catch {
                 throw try ModelUnavailability(
                     asking: error, keyGiven: !apiKey.isEmpty, missingModel: true, refusesKey: Self.geminiRefusesKey)
@@ -322,10 +322,13 @@ private struct AnthropicModelPage: Decodable {
         let id: String
         /// The most tokens the model takes as input: its context window.
         let maxInputTokens: Int?
+        /// The most a request may ask one answer to take: its `max_tokens` at most.
+        let maxTokens: Int?
 
         private enum CodingKeys: String, CodingKey {
             case id
             case maxInputTokens = "max_input_tokens"
+            case maxTokens = "max_tokens"
         }
     }
 
@@ -348,6 +351,8 @@ private struct GeminiModelPage: Decodable {
         let supportedGenerationMethods: [String]?
         /// The most tokens its input may take.
         let inputTokenLimit: Int?
+        /// The most tokens one answer may take.
+        let outputTokenLimit: Int?
 
         /// What a model is made with: its name without `models/`.
         var id: String {

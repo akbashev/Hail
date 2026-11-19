@@ -272,6 +272,40 @@ struct AnyLanguageModelEndpointTests {
         }
     }
 
+    /// A request whose answer reached its token limit is cut short, not answered: it's asked again
+    /// as one that wrote nothing is.
+    @Test("a request whose answer reached its token limit is asked again without thinking")
+    func aRequestCutShortIsAskedAgainWithoutThinking() async {
+        let entries: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: "hello"))]))]
+        for (answersWithoutThinking, ending) in [(true, "generated ok"), (false, "failed thoughtPastAnswer")] {
+            let recorded = RecordedOptions()
+            let endpoint = AnyLanguageModelEndpoint(
+                languageModel: GoingRoundLanguageModel(
+                    recorded: recorded, answersWithoutThinking: answersWithoutThinking,
+                    cutShort: "Now I'll write the wrapper."),
+                modelIdentifier: "test",
+                temperature: 0.5,
+                // Thinking on is temperature 1 to the model, off is 0.
+                reasoningSwitch: .init { thinking, options in
+                    options.temperature = thinking == .enabled ? 1 : 0
+                },
+                failures: .swiftErrors
+            )
+            var events: [String] = []
+            for await event in endpoint.stream(
+                request: ModelRequest(input: "hello", entries: entries, reasoning: .enabled),
+                tools: [],
+                authority: FullAuthority(),
+                generating: String.self,
+                purpose: .generation
+            ) {
+                events.append(describe(event))
+            }
+            #expect(events.last == ending)
+            #expect(await recorded.temperatures == [1, 0])
+        }
+    }
+
     @Test("text before a tool call isn't an answer: a model that writes nothing after its call fails")
     func textBeforeACallIsNotAnAnswer() async {
         let endpoint = AnyLanguageModelEndpoint(
@@ -631,6 +665,8 @@ private func text(_ content: GeneratedContent) -> String {
 private struct GoingRoundLanguageModel: LanguageModel {
     let recorded: RecordedOptions
     let answersWithoutThinking: Bool
+    /// What it writes, thinking, before its answer reaches its token limit: none, it writes nothing.
+    var cutShort: String? = nil
 
     func respond<Content>(
         within session: LanguageModelSession,
@@ -650,16 +686,19 @@ private struct GoingRoundLanguageModel: LanguageModel {
         options: GenerationOptions
     ) -> sending LanguageModelSession.ResponseStream<Content> where Content: Generable {
         let recorded = recorded
-        let answer = options.temperature == 0 && answersWithoutThinking ? "ok" : ""
+        let answering = options.temperature == 0 && answersWithoutThinking
+        let answer = answering ? "ok" : cutShort ?? ""
+        let reachedTokenLimit = !answering && cutShort != nil
         let stream = AsyncThrowingStream<LanguageModelSession.ResponseStream<Content>.Snapshot, any Error> {
             continuation in
             let task = Task {
                 await recorded.record(options)
                 let content = answer as! Content
-                continuation.yield(
-                    .init(
-                        content: content.asPartiallyGenerated(), rawContent: GeneratedContent(answer),
-                        transcriptEntries: []))
+                var snapshot = LanguageModelSession.ResponseStream<Content>.Snapshot(
+                    content: content.asPartiallyGenerated(), rawContent: GeneratedContent(answer),
+                    transcriptEntries: [])
+                snapshot.reachedTokenLimit = reachedTokenLimit
+                continuation.yield(snapshot)
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }

@@ -266,8 +266,8 @@ public struct AnyLanguageModelEndpoint: ModelEndpoint {
                             continuation.yield(.generated(output))
                             continuation.finish()
                             return
-                        case .wroteNothing:
-                            ending = .wroteNothing
+                        case .ranOut:
+                            ending = .ranOut
                         case .outOfShape(let written):
                             // Its turn tells it so and asks again, with its tools' results.
                             continuation.yield(.failed(.answerOutOfShape(written: written)))

@@ -115,11 +115,18 @@ struct AnyLanguageModelEndpointTests {
         #expect(forecast.text == "It's sunny.")
     }
 
-    @Test("a reply written as JSON in a Markdown fence is that JSON")
-    func aFencedJSONReplyIsItsJSON() async {
+    /// A model that doesn't fill in the reply but writes it as JSON text, bare or in a Markdown
+    /// fence, still replied: the JSON is the reply, not text holding it.
+    @Test("a reply written as JSON, bare or in a Markdown fence, is that JSON")
+    func aReplyWrittenAsJSONIsItsJSON() async {
         for (fenced, expected) in [
             ("```json\n{\"text\": \"It's sunny.\"}\n```", "It's sunny."),
             ("```\n{\"text\": \"It's \\\"sunny\\\".\"}\n```\n", "It's \"sunny\"."),
+            (
+                "{\"text\":\"Removed — the **object** is gone.\\n\\nNothing else was tied to it.\"}",
+                "Removed — the **object** is gone.\n\nNothing else was tied to it."
+            ),
+            ("\n {\"text\": \"It's sunny.\"} \n", "It's sunny."),
         ] {
             let endpoint = AnyLanguageModelEndpoint(
                 languageModel: ProseLanguageModel(text: fenced),

@@ -1,7 +1,7 @@
 /// Serializable snapshot intent supplied when an agent is spawned.
 ///
 /// The runtime turns this value into EventSourcing's executable
-/// ``Snapshotting`` value. Keeping the intent here means it can cross a
+/// `Snapshotting` value. Keeping the intent here means it can cross a
 /// distributed-actor boundary; executable snapshot predicates remain an
 /// activation-time concern.
 public enum AgentSnapshotRetention: Codable, Equatable, Sendable {

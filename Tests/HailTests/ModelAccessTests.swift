@@ -1,16 +1,12 @@
 import AnyLanguageModel
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HTTPTypes
 import HailCore
 import Synchronization
 import Testing
 
 @testable import HailModelRuntime
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 #if canImport(FoundationModels)
     import FoundationModels
@@ -293,7 +289,7 @@ struct CheckAvailabilityTests {
             .checkAvailability(of: "claude-sonnet", transport: transport)
 
         #expect(availability.kind == kind)
-        #expect(availability.details == (kind == nil ? ModelDetails(contextSize: 1_000_000) : nil))
+        #expect(availability.details == (kind == nil ? ModelDetails(contextSize: 1_000_000, answerSize: 128_000) : nil))
         #expect(transport.requests.map(\.path) == ["/v1/models/claude-sonnet"])
     }
 
@@ -301,7 +297,8 @@ struct CheckAvailabilityTests {
         "Gemini is asked for the model itself; a key it says isn't valid is refused",
         arguments: [
             (
-                HTTPResponse.Status.ok, #"{"name":"models/gemini-pro","inputTokenLimit":1048576}"#,
+                HTTPResponse.Status.ok,
+                #"{"name":"models/gemini-pro","inputTokenLimit":1048576,"outputTokenLimit":65536}"#,
                 ModelUnavailability.Kind?.none
             ),
             (.badRequest, #"{"error":{"code":400,"details":[{"reason":"API_KEY_INVALID"}]}}"#, .keyRefused),
@@ -316,7 +313,7 @@ struct CheckAvailabilityTests {
             .checkAvailability(of: "gemini-pro", transport: transport)
 
         #expect(availability.kind == kind)
-        #expect(availability.details == (kind == nil ? ModelDetails(contextSize: 1_048_576) : nil))
+        #expect(availability.details == (kind == nil ? ModelDetails(contextSize: 1_048_576, answerSize: 65_536) : nil))
         #expect(transport.requests.map(\.path) == ["/v1beta/models/gemini-pro"])
     }
 

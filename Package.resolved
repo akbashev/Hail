@@ -1,13 +1,13 @@
 {
-  "originHash" : "96addaa02a380fc62f1e992d60662dd0d8933651f6ba93767af906c580ae2c9b",
+  "originHash" : "bf882a4f517074fae4062ad5f845ad6cb090c57e80c5e8868e4d1b3d308e23a4",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/huggingface/AnyLanguageModel.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "6f9387a974c5254ac58c918b747f672463d252fb"
+        "revision" : "810efa3a6c17328ce2ec821d846c80e14a47de75",
+        "version" : "1.4.0"
       }
     },
     {
@@ -170,6 +170,24 @@
       "state" : {
         "revision" : "dc4030184203ffafbb2ec614352487235d747fe0",
         "version" : "1.4.1"
+      }
+    },
+    {
+      "identity" : "swift-docc-plugin",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-docc-plugin.git",
+      "state" : {
+        "revision" : "647c708be89f834fa6a6d4945442793a77ddf5b6",
+        "version" : "1.5.0"
+      }
+    },
+    {
+      "identity" : "swift-docc-symbolkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-docc-symbolkit",
+      "state" : {
+        "revision" : "b45d1f2ed151d057b54504d653e0da5552844e34",
+        "version" : "1.0.0"
       }
     },
     {

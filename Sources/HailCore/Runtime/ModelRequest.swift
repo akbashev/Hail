@@ -229,7 +229,7 @@ public struct FailureJournalRecord: Codable, Sendable, Equatable {
 }
 
 /// Projects durable request records from journal events. Hosts that read the
-/// event journal can feed events incrementally; the distributed ``Agent`` also
+/// event journal can feed events incrementally; the distributed `Agent` also
 /// exposes the same recent records through its state-backed properties.
 public struct AgentJournalReader: Sendable, Equatable {
     public private(set) var turns: [TurnJournalRecord] = []

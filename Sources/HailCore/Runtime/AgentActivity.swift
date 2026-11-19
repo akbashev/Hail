@@ -13,7 +13,7 @@ public import AnyLanguageModel
 /// here carries a typed outcome. Subscribers (chat, host views, a freshly
 /// opened browser) consume it with `for await activity in agent`.
 /// The hard rule: never derive control flow from activity —
-/// the typed result rides the turn's ``AgentConnection``.
+/// the typed result rides the turn's `AgentConnection`.
 public enum AgentActivity: Codable, Sendable, Equatable {
     /// One unit of work, unfolding over time: it starts, reports progress
     /// zero or more times, and completes. Progress cannot exist outside a

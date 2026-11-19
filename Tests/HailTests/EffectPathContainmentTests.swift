@@ -1,11 +1,7 @@
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import Hail
 import Testing
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// Regression coverage for the symlink-then-".." escape: a lexical ".."
 /// collapse treats `link/..` as cancelling `link` back to nothing, which is
@@ -60,7 +56,7 @@ struct EffectPathContainmentTests {
         // collapse of "link/.." (cancelling to nothing) would miss.
         let link = "\(root)/link"
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: outside)
-        let attack = "\(root)/link/../\((outside as NSString).lastPathComponent)-sibling.txt"
+        let attack = "\(root)/link/../\(URL(fileURLWithPath: outside).lastPathComponent)-sibling.txt"
         #expect(!EffectPath.isContained(attack, in: root))
     }
 
@@ -101,7 +97,7 @@ struct EffectPathContainmentTests {
         defer { cleanup() }
         let link = "\(root)/link"
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: outside)
-        let attack = "\(root)/link/../\((outside as NSString).lastPathComponent)-sibling.txt"
+        let attack = "\(root)/link/../\(URL(fileURLWithPath: outside).lastPathComponent)-sibling.txt"
         let policy = FileEffect.pathPolicy(scopedTo: root)
         let decision = policy(FileEffect(path: attack, action: .read))
         guard case .denied = decision else {

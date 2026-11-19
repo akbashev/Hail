@@ -22,9 +22,8 @@ let package = Package(
         .package(url: "https://github.com/akbashev/cluster-virtual-actors.git", branch: "stable-references"),
         .package(url: "https://github.com/akbashev/cluster-event-sourcing.git", branch: "turgai-integration"),
         .package(
-            // Ollama's API key (#414) and no key for an empty one (#417), until a release has them.
             url: "https://github.com/huggingface/AnyLanguageModel.git",
-            branch: "main",
+            from: "1.4.0",
             traits: ["AsyncHTTPClient", .trait(name: "Llama", condition: .when(traits: ["Llama"]))]
         ),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),
@@ -35,6 +34,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-http-types", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
+        // `swift package generate-documentation`: only for building the docs.
+        .package(url: "https://github.com/swiftlang/swift-docc-plugin.git", from: "1.4.0"),
     ],
     targets: [
         .macro(

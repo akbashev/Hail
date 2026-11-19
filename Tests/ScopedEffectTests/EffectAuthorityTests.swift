@@ -1,12 +1,8 @@
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import ScopedEffect
 import Synchronization
 import Testing
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// A demo effect for the decision layer: configuration on the outside,
 /// operations gated on the token.

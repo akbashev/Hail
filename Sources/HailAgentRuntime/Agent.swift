@@ -521,7 +521,7 @@ public distributed actor Agent: AsyncSequence {
     }
 
     /// Applies a journaled event. Events are checked against the state before they're journaled
-    /// (``emitReasoningEvent(_:)``), so one the state can't take means the journal isn't this
+    /// (`emitReasoningEvent(_:)`), so one the state can't take means the journal isn't this
     /// agent's: replay stops there, loudly.
     public func handleEvent(_ event: AgentEvent) {
         do {

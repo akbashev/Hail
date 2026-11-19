@@ -288,6 +288,17 @@ Depend only on the layer you need:
 | `HailAgentRuntime` | Distributed, virtual, event-sourced agents and the reasoning runtime |
 | `Hail` | Umbrella product that re-exports the complete stack |
 
+## Documentation
+
+The documentation is at [akbashev.github.io/Hail](https://akbashev.github.io/Hail/): each product,
+with articles on getting started, turns and history, tools and effects, composing the host runtime,
+models and providers, and compacting context. Build the site yourself with
+`bash scripts/build-docs.sh`, or preview one product:
+
+```sh
+swift package --disable-sandbox preview-documentation --target Hail
+```
+
 ## Requirements
 
 - Swift 6.4 package tools

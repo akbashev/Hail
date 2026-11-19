@@ -27,7 +27,7 @@ public struct AgentModelID: RawRepresentable, Codable, Sendable, Hashable,
 /// Suggested model names per provider, used by the UI to hint at known model
 /// identifiers in the agent edit form.
 ///
-/// The catalog is advisory only: ``ModelRouter`` passes any
+/// The catalog is advisory only: `ModelRouter` passes any
 /// `<provider>/<model-name>` identifier through to the provider verbatim, so
 /// agents can always use model IDs that are not listed here. To surface new
 /// model IDs without a code change, extend the catalog from the host's

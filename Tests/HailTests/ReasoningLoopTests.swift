@@ -1,14 +1,10 @@
 import AnyLanguageModel
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import HailCore
 import Testing
 
 @testable import HailAgentRuntime
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 @Generable
 private struct SignalReport: Codable, Sendable {

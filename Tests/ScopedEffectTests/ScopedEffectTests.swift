@@ -1,12 +1,8 @@
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import Testing
 
 @testable import ScopedEffect
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// A demo effect used to spike the mechanism: configuration on the outside,
 /// operations gated on the token.

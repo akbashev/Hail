@@ -24,7 +24,7 @@ public protocol CompositeScopedEffect: ScopedEffect {
     /// The static child effects this operation is built from. Declaring the
     /// list is the composition: the default ``decision(using:)`` derives
     /// from it, and readers can see the dependency graph before anything
-    /// runs. Children spawned dynamically inside ``run`` are not listed;
+    /// runs. Children spawned dynamically inside `run` are not listed;
     /// they are checked against the same authority at spawn time.
     var childEffects: [any ScopedEffect] { get }
 

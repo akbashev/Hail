@@ -1,11 +1,7 @@
+// A test may use all of Foundation, on Linux too.
+import Foundation
 import ScopedEffect
 import Testing
-
-#if canImport(FoundationEssentials)
-    import FoundationEssentials
-#else
-    import Foundation
-#endif
 
 /// A test-only access conformer. The protocol is public so modules can hold
 /// access values; production conformers (e.g. `SecretStore.Access`) keep
@@ -67,9 +63,8 @@ struct SecretRefTests {
 
     @Test("The encoded shape is tagged by case, never carrying a value shape")
     func encodedShape() throws {
-        let data = try JSONEncoder().encode(SecretRef.env("KIMI_API_KEY"))
-        let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(object["env"] != nil)
-        #expect(object["store"] == nil)
+        let encoded = String(decoding: try JSONEncoder().encode(SecretRef.env("KIMI_API_KEY")), as: UTF8.self)
+        #expect(encoded.contains(#""env""#))
+        #expect(!encoded.contains(#""store""#))
     }
 }

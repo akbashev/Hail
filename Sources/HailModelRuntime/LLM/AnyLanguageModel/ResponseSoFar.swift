@@ -59,9 +59,10 @@ struct ResponseSoFar<Output: Generable> {
             return .answered(try Output(last.raw))
         } catch {
             guard case .string(let text) = last.raw.kind else { return .outOfShape(written: last.raw.jsonString) }
-            // JSON in a Markdown fence is that JSON: a model that fences its answer still answers.
-            if let json = Self.fenced(text), let output = try? Output(GeneratedContent(json: json)) {
-                return .answered(output)
+            // JSON written as text, bare or in a Markdown fence, is that JSON: a model that writes its
+            // answer instead of giving it still answers.
+            for json in [Self.fenced(text), text.trimmed()].compactMap({ $0 }) {
+                if let output = try? Output(GeneratedContent(json: json)) { return .answered(output) }
             }
             // Plain text is all an object of one text property can say, so it says that.
             if let property = Output.generationSchema.soleTextProperty,

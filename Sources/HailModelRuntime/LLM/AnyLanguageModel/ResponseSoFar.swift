@@ -14,8 +14,9 @@ struct ResponseSoFar<Output: Generable> {
     /// How a response that came to its end ended.
     enum Ending {
         case answered(Output)
-        /// The model wrote nothing after its last tool call.
-        case wroteNothing
+        /// The answer ran out of room: the model wrote nothing after its last tool call, or what it
+        /// wrote reached its token limit and is cut short.
+        case ranOut
         /// The model wrote an answer that isn't the content asked for: `written` is what it wrote.
         case outOfShape(written: String)
     }
@@ -29,6 +30,8 @@ struct ResponseSoFar<Output: Generable> {
     /// The usage of the response's final request, as its snapshots report it: its input is how
     /// full the context is.
     private(set) var usage: LanguageModelSession.Usage?
+    /// Whether the provider said the final request stopped at its token limit.
+    private var reachedTokenLimit = false
 
     /// Takes the next snapshot.
     mutating func receive(_ snapshot: LanguageModelSession.ResponseStream<Output>.Snapshot) {
@@ -37,6 +40,7 @@ struct ResponseSoFar<Output: Generable> {
             return count + calls.count
         }
         usage = snapshot.usage
+        reachedTokenLimit = snapshot.reachedTokenLimit
         last = (snapshot.content, snapshot.rawContent)
         guard Output.self == String.self else {
             wroteAfterCalls = calls
@@ -49,7 +53,7 @@ struct ResponseSoFar<Output: Generable> {
 
     /// How the response ended, once its stream did.
     func ending() throws -> Ending {
-        guard wroteAfterCalls == calls, let last else { return .wroteNothing }
+        guard !reachedTokenLimit, wroteAfterCalls == calls, let last else { return .ranOut }
         if let output = last.content as? Output { return .answered(output) }
         do {
             return .answered(try Output(last.raw))

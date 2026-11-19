@@ -15,8 +15,9 @@ struct RequestAttempts: Equatable {
     /// How an attempt ended without an answer.
     enum Ending: Equatable {
         case failed(RequestFailure)
-        /// The model wrote nothing after its last tool call: it thought its whole length.
-        case wroteNothing
+        /// The answer ran out of room: the model thought its whole length, or what it wrote reached
+        /// its token limit.
+        case ranOut
     }
 
     /// What follows an attempt that ended without an answer.
@@ -62,7 +63,7 @@ struct RequestAttempts: Equatable {
             }
             busyWaits += 1
             return .askAgain(after: wait)
-        case .wroteNothing:
+        case .ranOut:
             // Without thinking, which is where it went round.
             guard progress != .calledTools, thinkingCanBeTurnedOff, thinking != .disabled else {
                 return .fail(.thoughtPastAnswer)

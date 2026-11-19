@@ -44,23 +44,23 @@ struct RequestAttemptsTests {
     }
 
     @Test("a model that wrote nothing is asked once more, without thinking")
-    func wroteNothingIsAskedWithoutThinking() {
+    func ranOutIsAskedWithoutThinking() {
         var attempts = RequestAttempts(thinking: .providerDefault, thinkingCanBeTurnedOff: true)
-        #expect(attempts.next(after: .wroteNothing, progress: .answering) == .askAgain(after: .zero))
+        #expect(attempts.next(after: .ranOut, progress: .answering) == .askAgain(after: .zero))
         #expect(attempts.thinking == .disabled)
-        #expect(attempts.next(after: .wroteNothing, progress: .answering) == .fail(.thoughtPastAnswer))
+        #expect(attempts.next(after: .ranOut, progress: .answering) == .fail(.thoughtPastAnswer))
     }
 
     @Test("a model that wrote nothing after its tools ran fails: asked again, they'd run again")
-    func wroteNothingAfterToolsFails() {
+    func ranOutAfterToolsFails() {
         var attempts = RequestAttempts(thinking: .providerDefault, thinkingCanBeTurnedOff: true)
-        #expect(attempts.next(after: .wroteNothing, progress: .calledTools) == .fail(.thoughtPastAnswer))
+        #expect(attempts.next(after: .ranOut, progress: .calledTools) == .fail(.thoughtPastAnswer))
     }
 
     @Test("a model whose thinking can't be turned off fails when it wrote nothing")
-    func wroteNothingWithoutASwitchFails() {
+    func ranOutWithoutASwitchFails() {
         var attempts = RequestAttempts(thinking: .providerDefault, thinkingCanBeTurnedOff: false)
-        #expect(attempts.next(after: .wroteNothing, progress: .notStarted) == .fail(.thoughtPastAnswer))
+        #expect(attempts.next(after: .ranOut, progress: .notStarted) == .fail(.thoughtPastAnswer))
     }
 
     @Test("the final request's context and the session's usage reach the turn")

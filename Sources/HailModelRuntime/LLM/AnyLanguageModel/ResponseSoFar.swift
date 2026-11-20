@@ -60,9 +60,11 @@ struct ResponseSoFar<Output: Generable> {
         } catch {
             guard case .string(let text) = last.raw.kind else { return .outOfShape(written: last.raw.jsonString) }
             // JSON written as text, bare or in a Markdown fence, is that JSON: a model that writes its
-            // answer instead of giving it still answers.
+            // answer instead of giving it still answers, its strings' lines broken as prose's are too.
             for json in [Self.fenced(text), text.trimmed()].compactMap({ $0 }) {
-                if let output = try? Output(GeneratedContent(json: json)) { return .answered(output) }
+                if let output = try? Output(GeneratedContent(json: Self.escapingControlCharacters(json))) {
+                    return .answered(output)
+                }
             }
             // Plain text is all an object of one text property can say, so it says that.
             if let property = Output.generationSchema.soleTextProperty,
@@ -82,6 +84,42 @@ struct ResponseSoFar<Output: Generable> {
             String(last).trimmed() == "```"
         else { return nil }
         return lines.dropFirst().dropLast().joined(separator: "\n")
+    }
+
+    /// `json` with the control characters written inside its strings escaped, as JSON writes them:
+    /// a line break as `\n`. JSON that has none there is the same.
+    static func escapingControlCharacters(_ json: String) -> String {
+        var escaped = String.UnicodeScalarView()
+        var inString = false
+        var afterBackslash = false
+        for scalar in json.unicodeScalars {
+            guard inString else {
+                if scalar == "\"" { inString = true }
+                escaped.append(scalar)
+                continue
+            }
+            if afterBackslash {
+                afterBackslash = false
+            } else if scalar == "\\" {
+                afterBackslash = true
+            } else if scalar == "\"" {
+                inString = false
+            } else if scalar.value < 0x20 {
+                let written: String =
+                    switch scalar {
+                    case "\n": "\\n"
+                    case "\r": "\\r"
+                    case "\t": "\\t"
+                    default:
+                        "\\u" + String(repeating: "0", count: 4 - String(scalar.value, radix: 16).count)
+                            + String(scalar.value, radix: 16)
+                    }
+                escaped.append(contentsOf: written.unicodeScalars)
+                continue
+            }
+            escaped.append(scalar)
+        }
+        return String(escaped)
     }
 
     /// What a snapshot adds to the text before it: the suffix after `accumulated`.

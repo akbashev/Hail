@@ -127,6 +127,11 @@ struct AnyLanguageModelEndpointTests {
                 "Removed — the **object** is gone.\n\nNothing else was tied to it."
             ),
             ("\n {\"text\": \"It's sunny.\"} \n", "It's sunny."),
+            // Its lines broken as prose's are, inside the string, where JSON escapes them.
+            (
+                "{\"text\":\"Done.\n\nWhat it gives you\n- forecast(for:)\tby place\"}",
+                "Done.\n\nWhat it gives you\n- forecast(for:)\tby place"
+            ),
         ] {
             let endpoint = AnyLanguageModelEndpoint(
                 languageModel: ProseLanguageModel(text: fenced),
